@@ -124,6 +124,9 @@ const fileStatusEl = document.getElementById("fileStatus");
 const editorRootEl = document.getElementById("editorRoot");
 const editorLayoutEl = document.getElementById("editorLayout");
 const themeToggleEl = document.getElementById("themeToggle");
+const workspaceCodeInputEl = document.getElementById("workspaceCodeInput");
+const workspaceSwitchBtnEl = document.getElementById("workspaceSwitchBtn");
+const workspaceBadgeEl = document.getElementById("workspaceBadge");
 const syntaxThemeSelectEl = document.getElementById("syntaxThemeSelect");
 const fontSizeRangeEl = document.getElementById("fontSizeRange");
 const fontSizeValueEl = document.getElementById("fontSizeValue");
@@ -636,6 +639,58 @@ function initTheme() {
 
 function setStatus(text) {
   fileStatusEl.textContent = text;
+}
+
+function normalizeWorkspaceCode(value) {
+  const code = String(value || "").trim().toLowerCase();
+  if (!code) {
+    return "";
+  }
+  return /^[a-z0-9][a-z0-9_-]{1,47}$/.test(code) ? code : "";
+}
+
+async function loadWorkspaceInfo() {
+  if (!workspaceBadgeEl) {
+    return;
+  }
+  try {
+    const data = await apiJson("/api/session/workspace");
+    const code = normalizeWorkspaceCode(data?.workspaceCode) || "default";
+    workspaceBadgeEl.textContent = `Workspace: ${code}`;
+    if (workspaceCodeInputEl && !workspaceCodeInputEl.value) {
+      workspaceCodeInputEl.value = code;
+    }
+  } catch {
+    workspaceBadgeEl.textContent = "Workspace: unknown";
+  }
+}
+
+async function switchWorkspace() {
+  if (!workspaceCodeInputEl || !workspaceSwitchBtnEl) {
+    return;
+  }
+
+  const code = normalizeWorkspaceCode(workspaceCodeInputEl.value);
+  if (!code) {
+    setStatus("Workspace code must use letters, numbers, _ or -.");
+    return;
+  }
+
+  workspaceSwitchBtnEl.disabled = true;
+  try {
+    await apiJson("/api/session/workspace", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accessCode: code })
+    });
+    const url = new URL(window.location.href);
+    url.searchParams.set("access_code", code);
+    window.location.href = url.toString();
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  } finally {
+    workspaceSwitchBtnEl.disabled = false;
+  }
 }
 
 function extensionForPath(filePath) {
@@ -1172,6 +1227,21 @@ if (themeToggleEl) {
   });
 }
 
+if (workspaceSwitchBtnEl) {
+  workspaceSwitchBtnEl.addEventListener("click", () => {
+    switchWorkspace();
+  });
+}
+
+if (workspaceCodeInputEl) {
+  workspaceCodeInputEl.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      switchWorkspace();
+    }
+  });
+}
+
 if (syntaxThemeSelectEl) {
   syntaxThemeSelectEl.addEventListener("change", () => {
     applySyntaxTheme(syntaxThemeSelectEl.value);
@@ -1265,3 +1335,5 @@ if (launchPath) {
 } else {
   loadDirectory("").catch((error) => setStatus(`Error: ${error.message}`));
 }
+
+loadWorkspaceInfo().catch(() => {});

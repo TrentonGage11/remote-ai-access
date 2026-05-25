@@ -20,6 +20,9 @@ const notifySuccessToggleEl = document.getElementById("notifySuccessToggle");
 const notifyWarningToggleEl = document.getElementById("notifyWarningToggle");
 const notifyErrorToggleEl = document.getElementById("notifyErrorToggle");
 const notifyDebounceInputEl = document.getElementById("notifyDebounceInput");
+const workspaceCodeInputEl = document.getElementById("workspaceCodeInput");
+const workspaceSwitchBtnEl = document.getElementById("workspaceSwitchBtn");
+const workspaceBadgeEl = document.getElementById("workspaceBadge");
 
 const THEME_STORAGE_KEY = "remote-ai-access-theme";
 const CHAT_STATE_KEY = "remote-ai-access-chat-state-v1";
@@ -79,6 +82,68 @@ function createChat(overrides = {}) {
 
 function normalizeProvider(value) {
   return String(value || "").trim().toLowerCase();
+}
+
+function normalizeWorkspaceCode(value) {
+  const code = String(value || "").trim().toLowerCase();
+  if (!code) {
+    return "";
+  }
+  return /^[a-z0-9][a-z0-9_-]{1,47}$/.test(code) ? code : "";
+}
+
+async function loadWorkspaceInfo() {
+  if (!workspaceBadgeEl) {
+    return;
+  }
+  try {
+    const response = await fetch("/api/session/workspace", { cache: "no-store" });
+    const data = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(data.error || "Failed to load workspace");
+    }
+
+    const code = normalizeWorkspaceCode(data?.workspaceCode) || "default";
+    workspaceBadgeEl.textContent = `Workspace: ${code}`;
+    if (workspaceCodeInputEl && !workspaceCodeInputEl.value) {
+      workspaceCodeInputEl.value = code;
+    }
+  } catch {
+    workspaceBadgeEl.textContent = "Workspace: unknown";
+  }
+}
+
+async function switchWorkspace() {
+  if (!workspaceCodeInputEl) {
+    return;
+  }
+
+  const code = normalizeWorkspaceCode(workspaceCodeInputEl.value);
+  if (!code) {
+    statusEl.textContent = "Workspace code must use letters, numbers, _ or -.";
+    return;
+  }
+
+  workspaceSwitchBtnEl.disabled = true;
+  try {
+    const response = await fetch("/api/session/workspace", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accessCode: code })
+    });
+    const data = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(data.error || "Failed to switch workspace");
+    }
+
+    const url = new URL(window.location.href);
+    url.searchParams.set("access_code", code);
+    window.location.href = url.toString();
+  } catch (error) {
+    statusEl.textContent = `Error: ${error.message}`;
+  } finally {
+    workspaceSwitchBtnEl.disabled = false;
+  }
 }
 
 function normalizeStateShape(parsed) {
@@ -1537,10 +1602,25 @@ promptEl.addEventListener("keydown", (event) => {
   }
 });
 
+if (workspaceSwitchBtnEl) {
+  workspaceSwitchBtnEl.addEventListener("click", switchWorkspace);
+}
+
+if (workspaceCodeInputEl) {
+  workspaceCodeInputEl.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      switchWorkspace();
+    }
+  });
+}
+
 initTheme();
 await loadConfig();
 await loadModelCatalog();
+await loadWorkspaceInfo();
 saveState();
 renderAll();
 loadToolRuns();
 startNotificationPolling();
+N1FmanhxdkR1OTJOUk1T

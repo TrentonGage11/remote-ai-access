@@ -13,6 +13,7 @@ import os from "os";
 import { promisify } from "util";
 import { execFile } from "child_process";
 import { fileURLToPath } from "url";
+import { AsyncLocalStorage } from "async_hooks";
 
 const app = express();
 
@@ -21,17 +22,43 @@ const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, "..");
 const publicDir = path.join(__dirname, "..", "public");
 const modelsCsvPath = path.join(__dirname, "..", "models.csv");
-const sandboxRoot = path.resolve(process.env.SANDBOX_ROOT || path.join(__dirname, "..", "sandbox"));
-const auditLogPath = path.join(sandboxRoot, ".audit-log.jsonl");
+const sandboxBaseRoot = path.resolve(process.env.SANDBOX_ROOT || path.join(__dirname, "..", "sandbox"));
 const maxReadBytes = Number(process.env.FILE_API_MAX_READ_BYTES || 1024 * 1024);
 const gitUserName = process.env.SANDBOX_GIT_USER_NAME || "Remote AI Access";
 const gitUserEmail = process.env.SANDBOX_GIT_USER_EMAIL || "remote-ai-access@local";
+const workspaceCookieName = String(process.env.WORKSPACE_COOKIE_NAME || "raa_workspace").trim() || "raa_workspace";
+const defaultWorkspaceCode = String(process.env.DEFAULT_WORKSPACE_CODE || "default").trim().toLowerCase() || "default";
+const allowedWorkspaceCodes = String(process.env.WORKSPACE_ACCESS_CODES || "")
+  .split(",")
+  .map((item) => item.trim().toLowerCase())
+  .filter(Boolean);
+const enableAutoSessionBranching = String(process.env.ENABLE_AUTO_SESSION_BRANCH || "false").trim().toLowerCase() === "true";
+const sessionBranchPrefixRaw = String(process.env.SESSION_BRANCH_PREFIX || "session").trim().toLowerCase() || "session";
+const sessionBranchPrefix = sessionBranchPrefixRaw.replace(/[^a-z0-9/_-]/g, "").replace(/^\/+|\/+$/g, "") || "session";
+const enableNightlyWorkspaceBackup = String(process.env.ENABLE_NIGHTLY_WORKSPACE_BACKUP || "true").trim().toLowerCase() === "true";
+const workspaceBackupRoot = path.resolve(process.env.WORKSPACE_BACKUP_ROOT || path.join(sandboxBaseRoot, "_backups"));
+const workspaceBackupUtcHour = Math.max(0, Math.min(23, Number(process.env.WORKSPACE_BACKUP_UTC_HOUR || 3)));
+const workspaceBackupRetentionDays = Math.max(1, Math.min(365, Number(process.env.WORKSPACE_BACKUP_RETENTION_DAYS || 21)));
 
 const execFileAsync = promisify(execFile);
 const safeTerminalCommands = new Set(["node", "npm", "npx", "python", "python3", "pip", "pip3", "git", "ls", "pwd", "echo", "cat", "grep", "find", "head", "tail", "wc"]);
+const dockerOnlyTerminalCommands = new Set(["apt", "apt-get"]);
+const blockedTerminalCommandsAlways = new Set(["sudo", "su", "systemctl", "service", "docker", "podman", "mount", "umount", "chown"]);
+const blockedTerminalCommandsHostOnly = new Set(["apt", "apt-get", "dnf", "yum", "apk", "pacman"]);
+const blockedTerminalArgPatterns = [/^--prefix=/i, /^--root=/i, /^--target=/i];
 const scheduledTasks = new Map();
 const notificationStore = [];
 let scheduledTaskCounter = 0;
+const workspaceContextStore = new AsyncLocalStorage();
+const workspaceReadyPromises = new Map();
+const workspaceBranchState = new Map();
+const terminalRuntime = String(process.env.TERMINAL_RUNTIME || "host").trim().toLowerCase() === "docker" ? "docker" : "host";
+const terminalDockerImage = String(process.env.TERMINAL_DOCKER_IMAGE || "node:20-bookworm").trim() || "node:20-bookworm";
+const terminalDockerMemory = String(process.env.TERMINAL_DOCKER_MEMORY || "1g").trim() || "1g";
+const terminalDockerCpus = String(process.env.TERMINAL_DOCKER_CPUS || "1.0").trim() || "1.0";
+const terminalDockerPidsLimit = Math.max(64, Math.min(2048, Number(process.env.TERMINAL_DOCKER_PIDS_LIMIT || 256)));
+const terminalDockerNetwork = String(process.env.TERMINAL_DOCKER_NETWORK || "bridge").trim() || "bridge";
+let workspaceBackupTimer = null;
 
 const port = Number(process.env.PORT || 8787);
 const appBaseUrl = process.env.APP_BASE_URL || `http://localhost:${port}`;
@@ -105,6 +132,86 @@ function normalizeSandboxRelativePath(inputPath) {
   return cleaned;
 }
 
+function normalizeWorkspaceCode(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (!/^[a-z0-9][a-z0-9_-]{1,47}$/.test(normalized)) {
+    return null;
+  }
+  return normalized;
+}
+
+function parseCookieHeader(headerValue) {
+  const source = String(headerValue || "");
+  const out = {};
+  for (const item of source.split(";")) {
+    const idx = item.indexOf("=");
+    if (idx < 0) {
+      continue;
+    }
+    const key = item.slice(0, idx).trim();
+    const value = item.slice(idx + 1).trim();
+    if (!key) {
+      continue;
+    }
+    out[key] = decodeURIComponent(value || "");
+  }
+  return out;
+}
+
+function workspaceContextForCode(codeValue) {
+  const workspaceCode = normalizeWorkspaceCode(codeValue) || defaultWorkspaceCode;
+  const root = path.resolve(sandboxBaseRoot, "workspaces", workspaceCode);
+  return {
+    code: workspaceCode,
+    sandboxRoot: root,
+    auditLogPath: path.join(root, ".audit-log.jsonl")
+  };
+}
+
+function getWorkspaceContext() {
+  return workspaceContextStore.getStore() || workspaceContextForCode(defaultWorkspaceCode);
+}
+
+function getSandboxRoot() {
+  return getWorkspaceContext().sandboxRoot;
+}
+
+function getAuditLogPath() {
+  return getWorkspaceContext().auditLogPath;
+}
+
+function setWorkspaceCookie(res, code) {
+  const encoded = encodeURIComponent(code);
+  const cookieValue = `${workspaceCookieName}=${encoded}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`;
+  const existing = res.getHeader("Set-Cookie");
+  if (!existing) {
+    res.setHeader("Set-Cookie", cookieValue);
+    return;
+  }
+  if (Array.isArray(existing)) {
+    res.setHeader("Set-Cookie", [...existing, cookieValue]);
+    return;
+  }
+  res.setHeader("Set-Cookie", [String(existing), cookieValue]);
+}
+
+function resolveRequestedWorkspaceCode(req) {
+  const queryCode = normalizeWorkspaceCode(req.query?.access_code || req.query?.workspace || req.query?.code);
+  const headerCode = normalizeWorkspaceCode(req.headers["x-workspace-code"]);
+  const cookies = parseCookieHeader(req.headers.cookie || "");
+  const cookieCode = normalizeWorkspaceCode(cookies[workspaceCookieName]);
+  const resolved = queryCode || headerCode || cookieCode || defaultWorkspaceCode;
+
+  if (allowedWorkspaceCodes.length > 0 && !allowedWorkspaceCodes.includes(resolved)) {
+    return null;
+  }
+
+  return resolved;
+}
+
 function toArray(value) {
   if (Array.isArray(value)) {
     return value;
@@ -116,6 +223,7 @@ function toArray(value) {
 }
 
 function resolveSandboxPath(inputPath = "") {
+  const sandboxRoot = getSandboxRoot();
   const rel = normalizeSandboxRelativePath(inputPath);
   const absolute = path.resolve(sandboxRoot, rel);
   const sandboxPrefix = `${sandboxRoot}${path.sep}`;
@@ -126,6 +234,7 @@ function resolveSandboxPath(inputPath = "") {
 }
 
 async function runGit(args, allowFail = false) {
+  const sandboxRoot = getSandboxRoot();
   try {
     return await execFileAsync("git", args, { cwd: sandboxRoot });
   } catch (error) {
@@ -140,7 +249,188 @@ async function runGit(args, allowFail = false) {
   }
 }
 
+async function runGitInRepo(repoRoot, args, allowFail = false) {
+  try {
+    return await execFileAsync("git", args, { cwd: repoRoot });
+  } catch (error) {
+    if (allowFail) {
+      return {
+        stdout: String(error?.stdout || ""),
+        stderr: String(error?.stderr || ""),
+        code: Number(error?.code || 1)
+      };
+    }
+    throw error;
+  }
+}
+
+function utcDateStamp(dateValue = new Date()) {
+  return dateValue.toISOString().slice(0, 10);
+}
+
+function getAutoSessionBranchName(workspaceCode, dateValue = new Date()) {
+  return `${sessionBranchPrefix}/${workspaceCode}-${utcDateStamp(dateValue)}`;
+}
+
+function isValidBranchName(value) {
+  const branch = String(value || "").trim();
+  if (!branch) {
+    return false;
+  }
+  if (branch.startsWith("/") || branch.endsWith("/") || branch.includes("..") || branch.includes("@{") || branch.endsWith(".")) {
+    return false;
+  }
+  return /^[a-zA-Z0-9._/-]{2,120}$/.test(branch);
+}
+
+async function getCurrentBranchName() {
+  const result = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], true);
+  const branch = String(result?.stdout || "").trim();
+  return branch || "";
+}
+
+async function switchWorkspaceBranch(branchName, createIfMissing = true) {
+  const target = String(branchName || "").trim();
+  if (!isValidBranchName(target)) {
+    throw new Error("invalid branch name");
+  }
+
+  const existsResult = await runGit(["show-ref", "--verify", "--quiet", `refs/heads/${target}`], true);
+  if (existsResult.code === 0) {
+    await runGit(["checkout", target]);
+  } else {
+    if (!createIfMissing) {
+      throw new Error(`branch '${target}' does not exist`);
+    }
+    await runGit(["checkout", "-b", target]);
+  }
+
+  const workspace = getWorkspaceContext();
+  workspaceBranchState.set(workspace.code, target);
+  return target;
+}
+
+async function ensureWorkspaceSessionBranch() {
+  if (!enableAutoSessionBranching) {
+    return null;
+  }
+
+  const workspace = getWorkspaceContext();
+  const targetBranch = getAutoSessionBranchName(workspace.code);
+  const currentBranch = await getCurrentBranchName();
+  const cached = workspaceBranchState.get(workspace.code);
+  if (cached === targetBranch && currentBranch === targetBranch) {
+    return targetBranch;
+  }
+
+  await switchWorkspaceBranch(targetBranch, true);
+  return targetBranch;
+}
+
+async function listWorkspaceRepositories() {
+  const workspacesRoot = path.join(sandboxBaseRoot, "workspaces");
+  await fsp.mkdir(workspacesRoot, { recursive: true });
+  const entries = await fsp.readdir(workspacesRoot, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => ({
+      code: entry.name,
+      root: path.join(workspacesRoot, entry.name)
+    }));
+}
+
+async function pruneOldWorkspaceBackups(backupDir) {
+  const retentionMs = workspaceBackupRetentionDays * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - retentionMs;
+  const entries = await fsp.readdir(backupDir, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".bundle")) {
+      continue;
+    }
+    const fullPath = path.join(backupDir, entry.name);
+    const stat = await fsp.stat(fullPath).catch(() => null);
+    if (!stat) {
+      continue;
+    }
+    if (stat.mtimeMs < cutoff) {
+      await fsp.rm(fullPath, { force: true }).catch(() => {});
+    }
+  }
+}
+
+async function backupWorkspaceRepository(code, repoRoot) {
+  const gitDir = path.join(repoRoot, ".git");
+  if (!fs.existsSync(gitDir)) {
+    return { code, skipped: true, reason: "no-git" };
+  }
+
+  const backupDir = path.join(workspaceBackupRoot, code);
+  await fsp.mkdir(backupDir, { recursive: true });
+  const bundlePath = path.join(backupDir, `${utcDateStamp()}.bundle`);
+  const result = await runGitInRepo(repoRoot, ["bundle", "create", bundlePath, "--all"], true);
+  if (result.code && result.code !== 0) {
+    return {
+      code,
+      skipped: true,
+      reason: "bundle-failed",
+      stderr: String(result.stderr || "").slice(0, 240)
+    };
+  }
+
+  await pruneOldWorkspaceBackups(backupDir);
+  return { code, ok: true, bundlePath };
+}
+
+async function runNightlyWorkspaceBackups() {
+  const repos = await listWorkspaceRepositories();
+  const summary = [];
+  for (const repo of repos) {
+    const item = await backupWorkspaceRepository(repo.code, repo.root);
+    summary.push(item);
+  }
+  return summary;
+}
+
+function msUntilNextUtcHour(hour) {
+  const now = new Date();
+  const next = new Date(now);
+  next.setUTCHours(hour, 0, 0, 0);
+  if (next <= now) {
+    next.setUTCDate(next.getUTCDate() + 1);
+  }
+  return Math.max(1000, next.getTime() - now.getTime());
+}
+
+function scheduleNightlyWorkspaceBackups() {
+  if (!enableNightlyWorkspaceBackup) {
+    return;
+  }
+
+  const runAndReschedule = async () => {
+    try {
+      const results = await runNightlyWorkspaceBackups();
+      const okCount = results.filter((item) => item.ok).length;
+      const skippedCount = results.length - okCount;
+      console.log(`Nightly workspace backup completed: ok=${okCount}, skipped=${skippedCount}`);
+    } catch (error) {
+      console.error("Nightly workspace backup failed:", String(error?.message || error));
+    } finally {
+      workspaceBackupTimer = setTimeout(runAndReschedule, 24 * 60 * 60 * 1000);
+    }
+  };
+
+  const initialDelay = msUntilNextUtcHour(workspaceBackupUtcHour);
+  workspaceBackupTimer = setTimeout(runAndReschedule, initialDelay);
+  console.log(`Nightly workspace backup scheduled for UTC hour ${workspaceBackupUtcHour}.`);
+}
+
 async function ensureSandboxReady() {
+  const { code, sandboxRoot, auditLogPath } = getWorkspaceContext();
+  if (workspaceReadyPromises.has(code)) {
+    return workspaceReadyPromises.get(code);
+  }
+
+  const readyPromise = (async () => {
   await fsp.mkdir(sandboxRoot, { recursive: true });
   if (!fs.existsSync(auditLogPath)) {
     await fsp.writeFile(auditLogPath, "", "utf8");
@@ -154,6 +444,10 @@ async function ensureSandboxReady() {
     await runGit(["add", "-A"]);
     await runGit(["commit", "--allow-empty", "-m", "Initialize sandbox"]);
   }
+  })();
+
+  workspaceReadyPromises.set(code, readyPromise);
+  return readyPromise;
 }
 
 async function commitSandboxSnapshot(message) {
@@ -166,9 +460,12 @@ async function commitSandboxSnapshot(message) {
 }
 
 async function appendAuditLog(req, operation, details = {}) {
+  const auditLogPath = getAuditLogPath();
+  const workspace = getWorkspaceContext();
   const entry = {
     timestamp: new Date().toISOString(),
     operation,
+    workspaceCode: workspace.code,
     ip: req.ip,
     userAgent: String(req.headers["user-agent"] || "").slice(0, 240),
     details
@@ -181,6 +478,7 @@ async function appendAuditLog(req, operation, details = {}) {
 }
 
 async function readAuditEntries(limit = 200) {
+  const auditLogPath = getAuditLogPath();
   if (!fs.existsSync(auditLogPath)) {
     return [];
   }
@@ -1210,7 +1508,7 @@ async function unzipSandboxArchive(archivePath, targetPath) {
   await fsp.mkdir(targetAbs, { recursive: true });
 
   try {
-    await execFileAsync("unzip", ["-o", archiveAbs, "-d", targetAbs], { cwd: sandboxRoot, timeout: 120000 });
+    await execFileAsync("unzip", ["-o", archiveAbs, "-d", targetAbs], { cwd: getSandboxRoot(), timeout: 120000 });
   } catch (error) {
     throw new Error(`unzip command failed. Ensure 'unzip' is installed. ${String(error?.stderr || error?.message || "")}`.trim());
   }
@@ -1219,22 +1517,163 @@ async function unzipSandboxArchive(archivePath, targetPath) {
   return { ok: true, archivePath: archiveRel, targetPath: targetRel };
 }
 
+function getAllowedTerminalCommands() {
+  const allowed = new Set(safeTerminalCommands);
+  if (terminalRuntime === "docker") {
+    for (const cmd of dockerOnlyTerminalCommands) {
+      allowed.add(cmd);
+    }
+  }
+  return allowed;
+}
+
+function getTerminalIsolationDirs(sandboxRoot) {
+  const homeDir = path.join(sandboxRoot, ".home");
+  const cacheDir = path.join(sandboxRoot, ".cache");
+  const npmPrefixDir = path.join(sandboxRoot, ".npm-global");
+  const pythonPackagesDir = path.join(sandboxRoot, ".python-packages");
+  const pythonScriptsDir = path.join(pythonPackagesDir, "bin");
+  const npmBinDir = path.join(npmPrefixDir, "bin");
+  return {
+    homeDir,
+    cacheDir,
+    npmPrefixDir,
+    pythonPackagesDir,
+    pythonScriptsDir,
+    npmBinDir
+  };
+}
+
+async function runWorkspaceCommandInDocker(commandName, commandArgs, cwdRel, timeout, sandboxRoot, envVars) {
+  const inContainerCwd = cwdRel ? `/workspace/${cwdRel}` : "/workspace";
+  const dockerArgs = [
+    "run",
+    "--rm",
+    "--network", terminalDockerNetwork,
+    "--memory", terminalDockerMemory,
+    "--cpus", terminalDockerCpus,
+    "--pids-limit", String(terminalDockerPidsLimit),
+    "--security-opt", "no-new-privileges",
+    "-v", `${sandboxRoot}:/workspace`,
+    "-w", inContainerCwd
+  ];
+
+  for (const [key, value] of Object.entries(envVars)) {
+    dockerArgs.push("-e", `${key}=${value}`);
+  }
+
+  dockerArgs.push(terminalDockerImage, commandName, ...commandArgs);
+  return execFileAsync("docker", dockerArgs, { timeout });
+}
+
 async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
   const name = String(commandName || "").trim();
-  if (!safeTerminalCommands.has(name)) {
+  if (blockedTerminalCommandsAlways.has(name)) {
+    throw new Error(`command '${name}' is blocked on this server`);
+  }
+
+  if (terminalRuntime === "host" && blockedTerminalCommandsHostOnly.has(name)) {
+    throw new Error(`command '${name}' is blocked in host terminal runtime`);
+  }
+
+  const allowedTerminalCommands = getAllowedTerminalCommands();
+  if (!allowedTerminalCommands.has(name)) {
     throw new Error(`command '${name}' is not allowed`);
   }
+
   const commandArgs = Array.isArray(args) ? args.map((item) => String(item)) : [];
-  const timeout = Math.max(1000, Math.min(60000, Number(timeoutMs || 15000)));
+  for (const arg of commandArgs) {
+    if (blockedTerminalArgPatterns.some((pattern) => pattern.test(arg))) {
+      throw new Error(`argument '${arg}' is not allowed`);
+    }
+  }
+
+  if (name === "npm" && commandArgs.some((arg) => arg === "-g" || arg === "--global")) {
+    throw new Error("npm global installs are blocked; use workspace-local installs only");
+  }
+
+  if ((name === "pip" || name === "pip3") && commandArgs.some((arg) => /^--(prefix|root|target)=?/i.test(arg))) {
+    throw new Error("pip path overrides are blocked");
+  }
+
+  if ((name === "python" || name === "python3")
+    && commandArgs.length >= 2
+    && commandArgs[0] === "-m"
+    && commandArgs[1] === "pip"
+    && commandArgs.some((arg) => /^--(prefix|root|target)=?/i.test(arg))) {
+    throw new Error("python -m pip path overrides are blocked");
+  }
+
+  const maxTimeout = terminalRuntime === "docker" ? 300000 : 60000;
+  const defaultTimeout = terminalRuntime === "docker" ? 45000 : 15000;
+  const timeout = Math.max(1000, Math.min(maxTimeout, Number(timeoutMs || defaultTimeout)));
   const { absolute: cwdAbs, rel: cwdRel } = resolveSandboxPath(cwdPath || "");
+  const sandboxRoot = getSandboxRoot();
+
+  const {
+    homeDir,
+    cacheDir,
+    npmPrefixDir,
+    pythonPackagesDir,
+    pythonScriptsDir,
+    npmBinDir
+  } = getTerminalIsolationDirs(sandboxRoot);
+
+  await fsp.mkdir(homeDir, { recursive: true });
+  await fsp.mkdir(cacheDir, { recursive: true });
+  await fsp.mkdir(npmPrefixDir, { recursive: true });
+  await fsp.mkdir(pythonPackagesDir, { recursive: true });
+  await fsp.mkdir(pythonScriptsDir, { recursive: true });
+
+  const basePath = String(process.env.PATH || "");
+  const toolPath = [pythonScriptsDir, npmBinDir, basePath].filter(Boolean).join(path.delimiter);
+  const hostExecEnv = {
+    ...process.env,
+    PATH: toolPath,
+    HOME: homeDir,
+    TMPDIR: cacheDir,
+    TEMP: cacheDir,
+    TMP: cacheDir,
+    LANG: process.env.LANG || "C.UTF-8",
+    LC_ALL: process.env.LC_ALL || "C.UTF-8",
+    TERM: "dumb",
+    NO_COLOR: "1",
+    PIP_DISABLE_PIP_VERSION_CHECK: "1",
+    PIP_CACHE_DIR: path.join(cacheDir, "pip"),
+    PIP_TARGET: pythonPackagesDir,
+    PYTHONPATH: pythonPackagesDir,
+    npm_config_prefix: npmPrefixDir,
+    npm_config_cache: path.join(cacheDir, "npm")
+  };
+
+  const containerExecEnv = {
+    PATH: "/workspace/.python-packages/bin:/workspace/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    HOME: "/workspace/.home",
+    TMPDIR: "/workspace/.cache",
+    TEMP: "/workspace/.cache",
+    TMP: "/workspace/.cache",
+    LANG: process.env.LANG || "C.UTF-8",
+    LC_ALL: process.env.LC_ALL || "C.UTF-8",
+    TERM: "dumb",
+    NO_COLOR: "1",
+    PIP_DISABLE_PIP_VERSION_CHECK: "1",
+    PIP_CACHE_DIR: "/workspace/.cache/pip",
+    PIP_TARGET: "/workspace/.python-packages",
+    PYTHONPATH: "/workspace/.python-packages",
+    npm_config_prefix: "/workspace/.npm-global",
+    npm_config_cache: "/workspace/.cache/npm"
+  };
 
   try {
-    const result = await execFileAsync(name, commandArgs, { cwd: cwdAbs, timeout });
+    const result = terminalRuntime === "docker"
+      ? await runWorkspaceCommandInDocker(name, commandArgs, cwdRel, timeout, sandboxRoot, containerExecEnv)
+      : await execFileAsync(name, commandArgs, { cwd: cwdAbs, timeout, env: hostExecEnv });
     return {
       ok: true,
       command: name,
       args: commandArgs,
       cwd: cwdRel,
+      runtime: terminalRuntime,
       stdout: String(result.stdout || "").slice(0, 12000),
       stderr: String(result.stderr || "").slice(0, 12000)
     };
@@ -1244,6 +1683,7 @@ async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
       command: name,
       args: commandArgs,
       cwd: cwdRel,
+      runtime: terminalRuntime,
       code: Number(error?.code || 1),
       stdout: String(error?.stdout || "").slice(0, 12000),
       stderr: String(error?.stderr || error?.message || "").slice(0, 12000)
@@ -1354,7 +1794,7 @@ async function getPathDiffNoIndex(leftPath, rightPath) {
   const { absolute: rightAbs, rel: rightRel } = resolveSandboxPath(rightPath || "");
   try {
     const result = await execFileAsync("git", ["diff", "--no-color", "--no-index", leftAbs, rightAbs], {
-      cwd: sandboxRoot,
+      cwd: getSandboxRoot(),
       timeout: 120000
     });
     return { ok: true, leftPath: leftRel, rightPath: rightRel, diff: String(result.stdout || "") };
@@ -1473,7 +1913,7 @@ async function searchSandboxContent(args = {}) {
     }
 
     results.push({
-      path: path.relative(sandboxRoot, filePath).replaceAll("\\", "/"),
+      path: path.relative(getSandboxRoot(), filePath).replaceAll("\\", "/"),
       score: Number(score.toFixed(4)),
       exactCount,
       semanticScore: Number(semanticScore.toFixed(4)),
@@ -1500,7 +1940,7 @@ async function runAutomatedTestProfile(args = {}) {
   const profile = String(args.profile || "npm-test").trim().toLowerCase();
   const timeoutMs = Math.max(2000, Math.min(10 * 60 * 1000, Number(args.timeoutMs || 120000)));
   const cwdScope = String(args.cwd || "project").trim().toLowerCase();
-  const cwd = cwdScope === "sandbox" ? sandboxRoot : projectRoot;
+  const cwd = cwdScope === "sandbox" ? getSandboxRoot() : projectRoot;
 
   let command = "npm";
   let commandArgs = ["test"];
@@ -1669,7 +2109,7 @@ async function searchReplaceInFiles(args = {}) {
     if (count > 0 && updated !== original) {
       await fsp.writeFile(filePath, updated, "utf8");
       replacementCount += count;
-      changedFiles.push(path.relative(sandboxRoot, filePath).replaceAll("\\", "/"));
+      changedFiles.push(path.relative(getSandboxRoot(), filePath).replaceAll("\\", "/"));
     }
   }
 
@@ -2916,6 +3356,17 @@ app.use(helmet({
 
 app.use(express.json({ limit: "1mb" }));
 
+app.use((req, res, next) => {
+  const queryCode = normalizeWorkspaceCode(req.query?.access_code || req.query?.workspace || req.query?.code);
+  if (queryCode) {
+    if (allowedWorkspaceCodes.length > 0 && !allowedWorkspaceCodes.includes(queryCode)) {
+      return res.status(403).send("Invalid workspace code.");
+    }
+    setWorkspaceCookie(res, queryCode);
+  }
+  next();
+});
+
 const authEnabled = String(process.env.ENABLE_BASIC_AUTH).toLowerCase() === "true";
 const authUser = process.env.BASIC_AUTH_USER || "";
 const authPass = process.env.BASIC_AUTH_PASS || "";
@@ -2952,6 +3403,33 @@ app.use(
   })
 );
 
+app.use("/api", (req, res, next) => {
+  const workspaceCode = resolveRequestedWorkspaceCode(req);
+  if (!workspaceCode) {
+    return res.status(403).json({ error: "workspace access code is not allowed" });
+  }
+
+  const context = workspaceContextForCode(workspaceCode);
+  if (normalizeWorkspaceCode(req.query?.access_code || req.query?.workspace || req.query?.code) && workspaceCode) {
+    setWorkspaceCookie(res, workspaceCode);
+  }
+
+  workspaceContextStore.run(context, async () => {
+    try {
+      await ensureSandboxReady();
+      const autoBranch = await ensureWorkspaceSessionBranch();
+      req.workspace = {
+        code: context.code,
+        sandboxRoot: context.sandboxRoot,
+        autoSessionBranch: autoBranch || null
+      };
+      next();
+    } catch (error) {
+      next(error);
+    }
+  });
+});
+
 app.use(
   "/api/chat",
   cors({
@@ -2963,9 +3441,61 @@ app.use(
       callback(new Error("Origin not allowed by CORS."));
     },
     methods: ["POST"],
-    allowedHeaders: ["Content-Type"]
+    allowedHeaders: ["Content-Type", "X-Workspace-Code"]
   })
 );
+
+app.get("/api/session/workspace", async (req, res) => {
+  const context = getWorkspaceContext();
+  const currentBranch = await getCurrentBranchName().catch(() => "");
+  res.json({
+    workspaceCode: context.code,
+    cookieName: workspaceCookieName,
+    constrainedByAllowList: allowedWorkspaceCodes.length > 0,
+    autoSessionBranching: enableAutoSessionBranching,
+    currentBranch: currentBranch || workspaceBranchState.get(context.code) || null
+  });
+});
+
+app.post("/api/session/workspace", (req, res) => {
+  const code = normalizeWorkspaceCode(req.body?.accessCode || req.body?.workspaceCode || req.body?.code);
+  if (!code) {
+    return res.status(400).json({ error: "accessCode is required (letters, numbers, _ or -)" });
+  }
+  if (allowedWorkspaceCodes.length > 0 && !allowedWorkspaceCodes.includes(code)) {
+    return res.status(403).json({ error: "workspace access code is not allowed" });
+  }
+  setWorkspaceCookie(res, code);
+  return res.json({ ok: true, workspaceCode: code });
+});
+
+app.get("/api/session/branch", async (req, res, next) => {
+  try {
+    const branch = await getCurrentBranchName();
+    return res.json({
+      workspaceCode: getWorkspaceContext().code,
+      branch,
+      autoSessionBranching: enableAutoSessionBranching,
+      suggestedAutoBranch: getAutoSessionBranchName(getWorkspaceContext().code)
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/session/branch", async (req, res, next) => {
+  try {
+    const branch = String(req.body?.branch || "").trim();
+    if (!branch) {
+      return res.status(400).json({ error: "branch is required" });
+    }
+    const createIfMissing = req.body?.createIfMissing !== false;
+    const selected = await switchWorkspaceBranch(branch, createIfMissing);
+    return res.json({ ok: true, branch: selected, workspaceCode: getWorkspaceContext().code });
+  } catch (error) {
+    return next(error);
+  }
+});
 
 app.post("/api/chat", async (req, res) => {
   const provider = String(req.body?.provider || defaultProvider).trim().toLowerCase();
@@ -3109,10 +3639,31 @@ app.get("/models.csv", (_req, res) => {
 
 app.get("/api/tools", (_req, res) => {
   const agentToolNames = agentToolDefinitions.map((tool) => tool.function.name);
+  const context = getWorkspaceContext();
   res.json({
-    sandboxRoot,
+    sandboxRoot: context.sandboxRoot,
+    workspaceCode: context.code,
+    workspaceRepository: {
+      sourceOfTruth: context.sandboxRoot,
+      autoSessionBranching: enableAutoSessionBranching,
+      sessionBranchPrefix,
+      lastKnownBranch: workspaceBranchState.get(context.code) || null
+    },
+    workspaceBackups: {
+      enabled: enableNightlyWorkspaceBackup,
+      backupRoot: workspaceBackupRoot,
+      utcHour: workspaceBackupUtcHour,
+      retentionDays: workspaceBackupRetentionDays
+    },
+    terminal: {
+      runtime: terminalRuntime,
+      dockerImage: terminalRuntime === "docker" ? terminalDockerImage : null
+    },
     notes: [
       "All file operations are constrained to SANDBOX_ROOT and tracked in local git.",
+      "Each workspace path is the source-of-truth git repository; optional auto session branches can isolate daily sessions.",
+      "Nightly workspace backups create git bundle archives and prune backups older than retention policy.",
+      "Terminal tool runs with an isolated per-workspace HOME/cache/env and cannot execute host-admin commands like sudo/apt.",
       "Use /api/files/format before /api/files/write when you want prettified output.",
       "Use /api/files/git/log to inspect snapshots and /api/files/git/revert to roll back.",
       "Set agentMode=true in /api/chat (openai provider) to enable automatic tool-calling."
@@ -3156,6 +3707,7 @@ app.get("/api/tools", (_req, res) => {
       { method: "POST", path: "/api/files/mkdir", purpose: "Create directory", body: { path: "docs" } },
       { method: "POST", path: "/api/files/format", purpose: "Format text using Prettier", body: { path: "src/app.js", content: "...", write: false } },
       { method: "POST", path: "/api/files/lint", purpose: "Lint JS/TS code with ESLint", body: { path: "src/app.ts", content: "..." } },
+      { method: "POST", path: "/api/files/terminal", purpose: "Run allow-listed command in isolated workspace terminal env", body: { command: "npm", args: ["install", "lodash"], cwd: "", timeoutMs: 20000 } },
       { method: "GET", path: "/api/files/audit?limit=200", purpose: "Read per-operation audit entries" },
       { method: "GET", path: "/api/files/git/log?limit=20", purpose: "List sandbox commits" },
       { method: "POST", path: "/api/files/git/revert", purpose: "Hard reset sandbox to a commit", body: { ref: "HEAD~1" } },
@@ -3408,6 +3960,28 @@ app.post("/api/files/lint", async (req, res) => {
   }
 });
 
+app.post("/api/files/terminal", async (req, res) => {
+  try {
+    const result = await runSafeTerminalCommand(
+      req.body?.command,
+      req.body?.args,
+      req.body?.cwd,
+      req.body?.timeoutMs
+    );
+
+    await appendAuditLog(req, "terminal", {
+      command: result.command,
+      cwd: result.cwd,
+      ok: result.ok,
+      code: result.code || 0
+    });
+
+    return res.json(result);
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to run terminal command") });
+  }
+});
+
 app.get("/api/files/audit", async (req, res) => {
   try {
     const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 200)));
@@ -3608,6 +4182,7 @@ app.get("/health", (_req, res) => {
 });
 
 await ensureSandboxReady();
+scheduleNightlyWorkspaceBackups();
 
 app.listen(port, () => {
   console.log(`Remote AI Access running at ${appBaseUrl}`);

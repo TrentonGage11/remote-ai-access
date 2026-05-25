@@ -234,7 +234,20 @@ body {
   min-width: 120px;
 }
 
+.model-field input[type="text"] {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.55);
+  color: var(--ink);
+  padding: 8px;
+  min-width: 120px;
+}
+
 [data-theme="dark"] .model-field input[type="number"] {
+  background: rgba(23, 36, 30, 0.72);
+}
+
+[data-theme="dark"] .model-field input[type="text"] {
   background: rgba(23, 36, 30, 0.72);
 }
 

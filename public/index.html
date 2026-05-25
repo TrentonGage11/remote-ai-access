@@ -32,6 +32,12 @@
             <p>Multi-tab chat with persisted history and markdown rendering</p>
           </div>
           <div class="top-actions">
+            <label class="model-field" for="workspaceCodeInput">
+              <span>Workspace</span>
+              <input id="workspaceCodeInput" type="text" placeholder="alice" aria-label="Workspace access code" />
+            </label>
+            <button id="workspaceSwitchBtn" class="btn btn-soft" type="button">Switch Workspace</button>
+            <span id="workspaceBadge" class="tab-meta" aria-live="polite">Workspace: default</span>
             <label class="model-field" for="providerSelect">
               <span>Provider</span>
               <select id="providerSelect" aria-label="Provider selector"></select>
