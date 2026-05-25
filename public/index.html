@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Remote AI Access</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-b" aria-hidden="true"></div>
+
+    <main class="app-shell">
+      <aside class="card sidebar">
+        <div class="side-top">
+          <h2>Chats</h2>
+          <button id="newChatBtn" class="btn btn-soft" type="button">New</button>
+        </div>
+        <ul id="tabList" class="tab-list" aria-label="Chat tabs"></ul>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar card">
+          <div>
+            <h1>Remote AI Access</h1>
+            <p>Multi-tab chat with persisted history and markdown rendering</p>
+          </div>
+          <div class="top-actions">
+            <label class="model-field" for="providerSelect">
+              <span>Provider</span>
+              <select id="providerSelect" aria-label="Provider selector"></select>
+            </label>
+            <label class="model-field" for="modelSelect">
+              <span>Model</span>
+              <select id="modelSelect" aria-label="Model selector"></select>
+            </label>
+            <label class="model-field model-check" for="agentModeToggle">
+              <span>Agent Tools</span>
+              <input id="agentModeToggle" type="checkbox" aria-label="Enable agent tool calling" />
+            </label>
+            <a class="btn btn-soft" href="filelab.html">File Lab</a>
+            <a class="btn btn-soft" href="api-tools.html">API Tools</a>
+            <a class="btn btn-soft" href="notifications.html">Notifications</a>
+            <a class="btn btn-soft" href="notification-rules.html">Notification Rules</a>
+            <a class="btn btn-soft" href="notification-permission.html">Notification Access</a>
+            <a class="btn btn-soft" href="snapshots.html">Snapshots</a>
+            <a class="btn btn-soft" href="diff-merge.html">Diff and Merge</a>
+            <a class="btn btn-soft" href="search.html">Search</a>
+            <a class="btn btn-soft" href="test-runner.html">Test Runner</a>
+            <a class="btn btn-soft" href="archive.html">Chat Archive</a>
+            <a class="btn btn-soft" href="history.html">History JSON</a>
+            <label class="model-field model-check" for="notificationToggle">
+              <span>Notifications</span>
+              <input id="notificationToggle" type="checkbox" aria-label="Enable notifications" />
+            </label>
+            <label class="model-field model-check" for="notificationSoundToggle">
+              <span>Sound</span>
+              <input id="notificationSoundToggle" type="checkbox" aria-label="Enable notification sound" />
+            </label>
+            <button id="copyAllAssistantBtn" class="btn btn-soft" type="button">Copy All Replies</button>
+            <button id="themeToggle" class="btn btn-soft" type="button" aria-label="Toggle dark mode">
+              Dark mode
+            </button>
+          </div>
+        </header>
+
+        <section id="chatPanel" class="card chat-panel">
+          <ol id="messageList" class="message-list"></ol>
+        </section>
+
+        <section class="card tool-status-panel">
+          <div class="tool-status-head">
+            <h2>Last Tool Runs</h2>
+            <div class="top-actions">
+              <label class="model-field" for="toolRunsFilterSelect">
+                <span>Filter</span>
+                <select id="toolRunsFilterSelect" aria-label="Tool runs filter">
+                  <option value="all">All</option>
+                  <option value="agent">Agent tools only</option>
+                  <option value="file">File ops only</option>
+                </select>
+              </label>
+              <button id="refreshToolRunsBtn" class="btn btn-soft" type="button">Refresh</button>
+            </div>
+          </div>
+          <ul id="toolRunsList" class="tool-runs-list"></ul>
+        </section>
+
+        <section class="card tool-status-panel">
+          <div class="tool-status-head">
+            <h2>Notification Settings</h2>
+          </div>
+          <div class="top-actions">
+            <label class="model-field model-check" for="notifyInfoToggle">
+              <span>Info</span>
+              <input id="notifyInfoToggle" type="checkbox" aria-label="Enable info notifications" />
+            </label>
+            <label class="model-field model-check" for="notifySuccessToggle">
+              <span>Success</span>
+              <input id="notifySuccessToggle" type="checkbox" aria-label="Enable success notifications" />
+            </label>
+            <label class="model-field model-check" for="notifyWarningToggle">
+              <span>Warning</span>
+              <input id="notifyWarningToggle" type="checkbox" aria-label="Enable warning notifications" />
+            </label>
+            <label class="model-field model-check" for="notifyErrorToggle">
+              <span>Error</span>
+              <input id="notifyErrorToggle" type="checkbox" aria-label="Enable error notifications" />
+            </label>
+            <label class="model-field" for="notifyDebounceInput">
+              <span>Debounce ms</span>
+              <input id="notifyDebounceInput" type="number" min="500" max="30000" step="100" value="1200" />
+            </label>
+          </div>
+        </section>
+
+        <section class="card composer">
+          <label for="prompt">Message</label>
+          <textarea
+            id="prompt"
+            rows="5"
+            placeholder="Type a message. Ctrl/Cmd+Enter to send"
+            aria-label="Prompt input"
+          ></textarea>
+
+          <div class="actions">
+            <button id="sendBtn" class="btn">Send</button>
+            <span id="status" role="status" aria-live="polite"></span>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

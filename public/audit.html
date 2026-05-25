@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Audit Log | Remote AI Access</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-b" aria-hidden="true"></div>
+
+    <main class="docs-shell">
+      <section class="card reveal" style="--d: 30ms">
+        <div class="topbar">
+          <div>
+            <h1>Sandbox Audit Log</h1>
+            <p>Per-operation records from file and git tool endpoints.</p>
+          </div>
+          <div class="top-actions">
+            <a class="btn btn-soft" href="filelab.html">File Lab</a>
+            <button id="refreshAuditBtn" class="btn">Refresh</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card reveal" style="--d: 70ms">
+        <div class="path-row" style="max-width: 280px;">
+          <input id="limitInput" type="number" min="1" max="1000" value="200" />
+          <button id="loadAuditBtn" class="btn btn-soft" type="button">Load</button>
+        </div>
+      </section>
+
+      <section class="card reveal" style="--d: 100ms">
+        <pre id="auditJson" class="doc-json">Loading...</pre>
+      </section>
+    </main>
+
+    <script type="module" src="audit.js"></script>
+  </body>
+</html>

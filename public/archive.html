@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chat Archive | Remote AI Access</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-b" aria-hidden="true"></div>
+
+    <main class="docs-shell">
+      <section class="card reveal" style="--d: 30ms">
+        <div class="topbar">
+          <div>
+            <h1>Chat Archive</h1>
+            <p>Export chats to move across devices, then import with merge or replace.</p>
+          </div>
+          <div class="top-actions">
+            <a class="btn btn-soft" href="index.html">Back to Chat</a>
+            <button id="downloadArchiveBtn" class="btn">Download Archive</button>
+            <button id="copyArchiveBtn" class="btn btn-soft" type="button">Copy JSON</button>
+            <button id="themeToggle" class="btn btn-soft" type="button">Dark mode</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card reveal" style="--d: 70ms">
+        <h2>Import Archive</h2>
+        <div class="top-actions">
+          <button id="importMergeBtn" class="btn btn-soft" type="button">Import and Merge</button>
+          <button id="importReplaceBtn" class="btn btn-soft danger" type="button">Import and Replace</button>
+          <input id="archiveFileInput" type="file" accept="application/json" hidden />
+        </div>
+        <p id="archiveStatus" class="muted-inline">Ready.</p>
+      </section>
+
+      <section class="card reveal" style="--d: 110ms">
+        <h2>Current Chats</h2>
+        <ul id="chatSummaryList" class="file-list"></ul>
+      </section>
+
+      <section class="card reveal" style="--d: 140ms">
+        <h2>Archive JSON Preview</h2>
+        <pre id="archiveJson" class="doc-json archive-json">Loading...</pre>
+      </section>
+    </main>
+
+    <script type="module" src="archive.js"></script>
+  </body>
+</html>

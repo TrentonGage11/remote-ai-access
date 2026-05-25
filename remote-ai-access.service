@@ -1,0 +1,16 @@
+[Unit]
+Description=Remote AI Access Node Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/remote-ai-access
+EnvironmentFile=/opt/remote-ai-access/.env
+ExecStart=/usr/bin/node /opt/remote-ai-access/src/server.js
+Restart=always
+RestartSec=3
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

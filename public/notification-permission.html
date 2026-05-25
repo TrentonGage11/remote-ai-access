@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Notification Access | Remote AI Access</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-b" aria-hidden="true"></div>
+
+    <main class="docs-shell">
+      <section class="card reveal" style="--d: 40ms">
+        <div class="topbar">
+          <div>
+            <h1>Notification Access</h1>
+            <p>Grant browser permission to receive desktop notifications for this site.</p>
+          </div>
+          <div class="top-actions">
+            <a class="btn btn-soft" href="index.html">Chat</a>
+            <a class="btn btn-soft" href="notifications.html">Notifications</a>
+            <a class="btn btn-soft" href="notification-rules.html">Notification Rules</a>
+            <button id="themeToggle" class="btn btn-soft" type="button">Dark mode</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card reveal" style="--d: 90ms">
+        <h2>Permission Status</h2>
+        <p id="permissionStatus" class="muted-inline">Checking...</p>
+        <div class="top-actions" style="margin-top: 10px">
+          <button id="requestPermissionBtn" class="btn" type="button">Request Notification Permission</button>
+          <button id="sendTestNotificationBtn" class="btn btn-soft" type="button">Send Test Notification</button>
+        </div>
+      </section>
+
+      <section class="card reveal" style="--d: 130ms">
+        <h2>How it works</h2>
+        <ul class="file-list">
+          <li class="file-item">Click Request Notification Permission to trigger the browser prompt.</li>
+          <li class="file-item">If allowed, this site can show desktop notifications while open.</li>
+          <li class="file-item">Use Send Test Notification to verify delivery and click-to-focus behavior.</li>
+        </ul>
+      </section>
+    </main>
+
+    <script type="module" src="notification-permission.js"></script>
+  </body>
+</html>

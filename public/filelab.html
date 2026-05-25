@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>File Lab | Remote AI Access</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-b" aria-hidden="true"></div>
+
+    <main class="filelab-shell">
+      <section class="card file-sidebar reveal" style="--d: 40ms">
+        <div class="file-head-row">
+          <h2>Sandbox Files</h2>
+          <button id="refreshBtn" class="btn btn-soft" type="button">Refresh</button>
+        </div>
+
+        <div class="path-row">
+          <input id="dirPathInput" type="text" value="" placeholder="directory path" />
+          <button id="goDirBtn" class="btn btn-soft" type="button">Go</button>
+        </div>
+
+        <div id="dropZone" class="drop-zone" tabindex="0" aria-label="Drop files here to upload">
+          Drop files here or use upload
+        </div>
+
+        <div class="action-grid">
+          <button id="uploadBtn" class="btn btn-soft" type="button">Upload Files</button>
+          <button id="uploadFolderBtn" class="btn btn-soft" type="button">Upload Folder</button>
+          <button id="newFileBtn" class="btn btn-soft" type="button">New File</button>
+          <button id="newDirBtn" class="btn btn-soft" type="button">New Dir</button>
+          <button id="renameBtn" class="btn btn-soft" type="button">Rename</button>
+          <button id="moveBtn" class="btn btn-soft" type="button">Move</button>
+          <button id="deleteBtn" class="btn btn-soft danger" type="button">Delete</button>
+          <button id="downloadBtn" class="btn btn-soft" type="button">Download</button>
+        </div>
+
+        <ul id="fileList" class="file-list" aria-label="Directory entries"></ul>
+
+        <input id="fileUploadInput" type="file" multiple hidden />
+        <input id="folderUploadInput" type="file" webkitdirectory directory multiple hidden />
+      </section>
+
+      <section class="workspace">
+        <header class="topbar card reveal" style="--d: 70ms">
+          <div>
+            <h1>File Lab</h1>
+            <p>CodeMirror editor + sandboxed file APIs + local git snapshots</p>
+          </div>
+          <div class="top-actions">
+            <a class="btn btn-soft" href="/">Chat</a>
+            <a class="btn btn-soft" href="api-tools.html">API Tools</a>
+            <a class="btn btn-soft" href="audit.html">Audit Log</a>
+            <button id="themeToggle" class="btn btn-soft" type="button">Dark mode</button>
+            <button id="saveBtn" class="btn" type="button">Save</button>
+            <button id="formatBtn" class="btn btn-soft" type="button">Format</button>
+            <button id="lintBtn" class="btn btn-soft" type="button">Lint</button>
+            <button id="gitLogBtn" class="btn btn-soft" type="button">Git Log</button>
+            <button id="revertBtn" class="btn btn-soft danger" type="button">Revert</button>
+          </div>
+        </header>
+
+        <section class="card editor-panel reveal" style="--d: 120ms">
+          <div class="editor-meta">
+            <strong id="activePathLabel">No file selected</strong>
+            <span id="fileStatus">Ready</span>
+          </div>
+          <div class="editor-controls">
+            <label class="control-chip" for="syntaxThemeSelect">
+              Syntax
+              <select id="syntaxThemeSelect" aria-label="Syntax color theme">
+                <option value="verdant">Verdant</option>
+                <option value="ember">Ember</option>
+                <option value="oceanic">Oceanic</option>
+                <option value="mono">Mono Ink</option>
+                <option value="preparing">Preparing</option>
+                <option value="cyberpunk-hc">Cyberpunk HC</option>
+              </select>
+            </label>
+            <label class="control-chip" for="fontSizeRange">
+              Font
+              <input id="fontSizeRange" type="range" min="12" max="22" step="1" value="14" aria-label="Editor font size" />
+              <span id="fontSizeValue">14px</span>
+            </label>
+            <button id="minimapToggle" class="btn btn-soft" type="button">Hide minimap</button>
+          </div>
+          <div id="editorLayout" class="editor-layout">
+            <div id="editorRoot" class="editor-root"></div>
+            <aside id="minimapPane" class="minimap-pane" aria-label="Code overview minimap">
+              <canvas id="minimapCanvas" class="minimap-canvas" width="120" height="640"></canvas>
+              <div id="minimapViewport" class="minimap-viewport" aria-hidden="true"></div>
+            </aside>
+          </div>
+        </section>
+
+        <section id="diffModal" class="diff-modal" aria-hidden="true">
+          <div class="card diff-dialog">
+            <h2>Review Changes Before Save</h2>
+            <div class="diff-columns">
+              <section>
+                <h3>Original</h3>
+                <pre id="diffOriginal" class="doc-json"></pre>
+              </section>
+              <section>
+                <h3>Updated</h3>
+                <pre id="diffUpdated" class="doc-json"></pre>
+              </section>
+            </div>
+            <div class="top-actions">
+              <button id="diffCancelBtn" class="btn btn-soft" type="button">Cancel</button>
+              <button id="diffConfirmBtn" class="btn" type="button">Save File</button>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script type="module" src="filelab.js"></script>
+  </body>
+</html>

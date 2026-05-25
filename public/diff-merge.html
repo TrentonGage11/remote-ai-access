@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Diff and Merge | Remote AI Access</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-b" aria-hidden="true"></div>
+
+    <main class="docs-shell">
+      <section class="card reveal" style="--d: 40ms">
+        <div class="topbar">
+          <div>
+            <h1>File and Folder Diff plus Merge</h1>
+            <p>Review changes before applying snapshot content into working files.</p>
+          </div>
+          <div class="top-actions">
+            <a class="btn btn-soft" href="index.html">Chat</a>
+            <a class="btn btn-soft" href="snapshots.html">Snapshots</a>
+            <button id="themeToggle" class="btn btn-soft" type="button">Dark mode</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card reveal" style="--d: 90ms">
+        <h2>Diff Refs</h2>
+        <div class="top-actions">
+          <input id="leftRefInput" type="text" value="HEAD~1" placeholder="left ref" />
+          <input id="rightRefInput" type="text" value="HEAD" placeholder="right ref" />
+          <input id="diffPathInput" type="text" placeholder="optional path" />
+          <button id="runRefDiffBtn" class="btn" type="button">Run Ref Diff</button>
+        </div>
+      </section>
+
+      <section class="card reveal" style="--d: 120ms">
+        <h2>Diff Paths</h2>
+        <div class="top-actions">
+          <input id="leftPathInput" type="text" placeholder="left path in sandbox" />
+          <input id="rightPathInput" type="text" placeholder="right path in sandbox" />
+          <button id="runPathDiffBtn" class="btn btn-soft" type="button">Run Path Diff</button>
+        </div>
+      </section>
+
+      <section class="card reveal" style="--d: 150ms">
+        <h2>Merge From Snapshot</h2>
+        <div class="top-actions">
+          <input id="mergeRefInput" type="text" placeholder="ref e.g. HEAD~1" />
+          <input id="mergePathInput" type="text" placeholder="target path e.g. src/app.js" />
+          <button id="mergeFromSnapshotBtn" class="btn btn-soft danger" type="button">Apply From Snapshot</button>
+        </div>
+        <p id="diffStatus" class="muted-inline">Ready.</p>
+      </section>
+
+      <section class="card reveal" style="--d: 180ms">
+        <h2>Diff Output</h2>
+        <pre id="diffOutput" class="doc-json">No diff yet.</pre>
+      </section>
+
+      <section class="card reveal" style="--d: 210ms">
+        <h2>Side-by-Side View</h2>
+        <div class="diff-columns">
+          <section>
+            <h3>Left</h3>
+            <pre id="diffLeftOutput" class="doc-json">No diff yet.</pre>
+          </section>
+          <section>
+            <h3>Right</h3>
+            <pre id="diffRightOutput" class="doc-json">No diff yet.</pre>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="diff-merge.js"></script>
+  </body>
+</html>

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Snapshots | Remote AI Access</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-b" aria-hidden="true"></div>
+
+    <main class="docs-shell">
+      <section class="card reveal" style="--d: 40ms">
+        <div class="topbar">
+          <div>
+            <h1>Backup and Restore Snapshots</h1>
+            <p>Create checkpoints and roll back workspace state safely.</p>
+          </div>
+          <div class="top-actions">
+            <a class="btn btn-soft" href="index.html">Chat</a>
+            <a class="btn btn-soft" href="diff-merge.html">Diff and Merge</a>
+            <button id="themeToggle" class="btn btn-soft" type="button">Dark mode</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card reveal" style="--d: 90ms">
+        <h2>Create Snapshot</h2>
+        <div class="top-actions">
+          <input id="snapshotMessageInput" type="text" placeholder="checkpoint message (optional)" />
+          <button id="createSnapshotBtn" class="btn" type="button">Create Snapshot</button>
+          <button id="refreshSnapshotsBtn" class="btn btn-soft" type="button">Refresh</button>
+        </div>
+        <p id="snapshotsStatus" class="muted-inline">Loading snapshots...</p>
+      </section>
+
+      <section class="card reveal" style="--d: 130ms">
+        <h2>Snapshot History</h2>
+        <ul id="snapshotsList" class="file-list"></ul>
+      </section>
+    </main>
+
+    <script type="module" src="snapshots.js"></script>
+  </body>
+</html>

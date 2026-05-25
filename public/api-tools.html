@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>API Tools | Remote AI Access</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-b" aria-hidden="true"></div>
+
+    <main class="docs-shell">
+      <section class="card reveal" style="--d: 40ms">
+        <div class="topbar">
+          <div>
+            <h1>Tool API Reference</h1>
+            <p>How agents and users can call file management tools in your sandbox.</p>
+          </div>
+          <div class="top-actions">
+            <a class="btn btn-soft" href="/">Chat</a>
+            <a class="btn btn-soft" href="filelab.html">File Lab</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="card reveal" style="--d: 80ms">
+        <h2>Summary Table</h2>
+        <div class="table-wrap">
+          <table id="toolsTable" class="tools-table">
+            <thead>
+              <tr>
+                <th>Feature</th>
+                <th>Example Tool/API</th>
+                <th>How Agent Can Use</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card reveal" style="--d: 120ms">
+        <h2>Detailed Endpoints</h2>
+        <pre id="detailsJson" class="doc-json">Loading...</pre>
+      </section>
+
+      <section class="card reveal" style="--d: 140ms">
+        <h2>Agent Tool Reference</h2>
+        <div class="table-wrap">
+          <table id="agentToolsTable" class="tools-table">
+            <thead>
+              <tr>
+                <th>Tool Name</th>
+                <th>Description</th>
+                <th>Why Useful</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card reveal" style="--d: 160ms">
+        <h2>Quick Tool Status</h2>
+        <div class="top-actions">
+          <input id="toolStatusNameInput" type="text" placeholder="tool name (optional, e.g. list_tools)" />
+          <button id="runToolStatusBtn" class="btn btn-soft" type="button">Run tool_status</button>
+        </div>
+        <pre id="toolStatusOutput" class="doc-json">No result yet.</pre>
+      </section>
+    </main>
+
+    <script type="module" src="api-tools.js"></script>
+  </body>
+</html>

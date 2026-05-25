@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Notification Rules | Remote AI Access</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-b" aria-hidden="true"></div>
+
+    <main class="docs-shell">
+      <section class="card reveal" style="--d: 40ms">
+        <div class="topbar">
+          <div>
+            <h1>Notification Rules</h1>
+            <p>Create rules that trigger custom actions from incoming notification events.</p>
+          </div>
+          <div class="top-actions">
+            <a class="btn btn-soft" href="index.html">Chat</a>
+            <a class="btn btn-soft" href="notifications.html">Notifications</a>
+            <a class="btn btn-soft" href="notification-permission.html">Notification Access</a>
+            <button id="themeToggle" class="btn btn-soft" type="button">Dark mode</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card reveal" style="--d: 90ms">
+        <h2>New Rule</h2>
+        <p id="rulesStatus" class="muted-inline">Create a rule and save it.</p>
+        <form id="ruleForm" class="top-actions" style="align-items: flex-end">
+          <label class="model-field" for="ruleName">
+            <span>Name</span>
+            <input id="ruleName" type="text" maxlength="80" placeholder="Error notifications to webhook" required />
+          </label>
+
+          <label class="model-field model-check" for="ruleEnabled">
+            <span>Enabled</span>
+            <input id="ruleEnabled" type="checkbox" checked />
+          </label>
+
+          <label class="model-field" for="ruleMessageIncludes">
+            <span>Message includes</span>
+            <input id="ruleMessageIncludes" type="text" maxlength="120" placeholder="optional keyword filter" />
+          </label>
+
+          <label class="model-field" for="ruleCooldownMs">
+            <span>Cooldown ms</span>
+            <input id="ruleCooldownMs" type="number" min="0" max="600000" step="100" value="5000" />
+          </label>
+
+          <div class="top-actions">
+            <label class="model-field model-check" for="sevInfo"><span>Info</span><input id="sevInfo" type="checkbox" checked /></label>
+            <label class="model-field model-check" for="sevSuccess"><span>Success</span><input id="sevSuccess" type="checkbox" checked /></label>
+            <label class="model-field model-check" for="sevWarning"><span>Warning</span><input id="sevWarning" type="checkbox" checked /></label>
+            <label class="model-field model-check" for="sevError"><span>Error</span><input id="sevError" type="checkbox" checked /></label>
+          </div>
+
+          <div class="top-actions">
+            <label class="model-field model-check" for="actToast"><span>Toast</span><input id="actToast" type="checkbox" checked /></label>
+            <label class="model-field model-check" for="actDesktop"><span>Desktop</span><input id="actDesktop" type="checkbox" checked /></label>
+            <label class="model-field model-check" for="actSound"><span>Sound</span><input id="actSound" type="checkbox" /></label>
+            <label class="model-field model-check" for="actTitleFlash"><span>Title Flash</span><input id="actTitleFlash" type="checkbox" /></label>
+            <label class="model-field model-check" for="actWebhook"><span>Webhook</span><input id="actWebhook" type="checkbox" /></label>
+          </div>
+
+          <label class="model-field" for="ruleWebhookUrl">
+            <span>Webhook URL</span>
+            <input id="ruleWebhookUrl" type="url" maxlength="400" placeholder="https://example.com/hook" />
+          </label>
+
+          <button id="saveRuleBtn" class="btn" type="submit">Save Rule</button>
+        </form>
+      </section>
+
+      <section class="card reveal" style="--d: 130ms">
+        <div class="topbar">
+          <h2>Existing Rules</h2>
+          <button id="clearRulesBtn" class="btn btn-soft danger" type="button">Delete All Rules</button>
+        </div>
+        <ul id="rulesList" class="file-list"></ul>
+      </section>
+    </main>
+
+    <script type="module" src="notification-rules.js"></script>
+  </body>
+</html>

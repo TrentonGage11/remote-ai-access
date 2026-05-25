@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Test Runner | Remote AI Access</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-b" aria-hidden="true"></div>
+
+    <main class="docs-shell">
+      <section class="card reveal" style="--d: 40ms">
+        <div class="topbar">
+          <div>
+            <h1>Automated Test Runner</h1>
+            <p>Run test profiles and inspect failures directly in this panel.</p>
+          </div>
+          <div class="top-actions">
+            <a class="btn btn-soft" href="index.html">Chat</a>
+            <button id="themeToggle" class="btn btn-soft" type="button">Dark mode</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card reveal" style="--d: 90ms">
+        <h2>Run Profile</h2>
+        <div class="top-actions">
+          <select id="testProfileSelect"></select>
+          <select id="testCwdSelect">
+            <option value="project">project</option>
+            <option value="sandbox">sandbox</option>
+          </select>
+          <input id="testTimeoutInput" type="number" min="2000" max="600000" step="1000" value="120000" />
+          <button id="runTestBtn" class="btn" type="button">Run Tests</button>
+        </div>
+        <p id="testStatus" class="muted-inline">Loading profiles...</p>
+      </section>
+
+      <section class="card reveal" style="--d: 130ms">
+        <h2>Failures</h2>
+        <ul id="testFailuresList" class="file-list"></ul>
+      </section>
+
+      <section class="card reveal" style="--d: 160ms">
+        <h2>Raw Output</h2>
+        <pre id="testOutput" class="doc-json">No run yet.</pre>
+      </section>
+    </main>
+
+    <script type="module" src="test-runner.js"></script>
+  </body>
+</html>

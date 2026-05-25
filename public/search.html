@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Search | Remote AI Access</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-b" aria-hidden="true"></div>
+
+    <main class="docs-shell">
+      <section class="card reveal" style="--d: 40ms">
+        <div class="topbar">
+          <div>
+            <h1>Full Text plus Semantic Search</h1>
+            <p>Search inside sandbox files by exact text, semantic similarity, or hybrid ranking.</p>
+          </div>
+          <div class="top-actions">
+            <a class="btn btn-soft" href="index.html">Chat</a>
+            <a class="btn btn-soft" href="filelab.html">File Lab</a>
+            <button id="themeToggle" class="btn btn-soft" type="button">Dark mode</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card reveal" style="--d: 90ms">
+        <h2>Search Query</h2>
+        <div class="top-actions">
+          <input id="searchQueryInput" type="text" placeholder="search query" />
+          <select id="searchModeSelect">
+            <option value="hybrid">Hybrid</option>
+            <option value="full">Full Text</option>
+            <option value="semantic">Semantic</option>
+          </select>
+          <input id="searchPathInput" type="text" placeholder="optional path" />
+          <input id="searchLimitInput" type="number" min="1" max="100" value="20" />
+          <button id="runSearchBtn" class="btn" type="button">Search</button>
+        </div>
+        <div class="top-actions" style="margin-top: 8px">
+          <input id="searchPresetNameInput" type="text" placeholder="preset name" />
+          <button id="savePresetBtn" class="btn btn-soft" type="button">Save Preset</button>
+          <select id="searchPresetSelect">
+            <option value="">Load preset...</option>
+          </select>
+          <button id="applyPresetBtn" class="btn btn-soft" type="button">Apply Preset</button>
+          <button id="deletePresetBtn" class="btn btn-soft danger" type="button">Delete Preset</button>
+        </div>
+        <div class="top-actions" style="margin-top: 8px">
+          <select id="searchRecentSelect">
+            <option value="">Recent queries...</option>
+          </select>
+          <button id="applyRecentBtn" class="btn btn-soft" type="button">Use Recent</button>
+          <button id="clearRecentBtn" class="btn btn-soft danger" type="button">Clear Recent</button>
+        </div>
+        <p id="searchStatus" class="muted-inline">Enter a query to search.</p>
+      </section>
+
+      <section class="card reveal" style="--d: 130ms">
+        <h2>Results</h2>
+        <ul id="searchResultsList" class="file-list"></ul>
+      </section>
+    </main>
+
+    <script type="module" src="search.js"></script>
+  </body>
+</html>

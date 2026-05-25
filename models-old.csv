@@ -1,0 +1,88 @@
+Agency,Name,Model Tag,Type
+OpenAI,GPT 5.5 Pro,gpt-5.5-pro,text
+OpenAI,GPT 5.5,gpt-5.5,text
+OpenAI,GPT 5.4 Pro,gpt-5.4-pro,text
+OpenAI,GPT 5.4,gpt-5.4,text
+OpenAI,GPT 5.4 Mini,gpt-5.4-mini,text
+OpenAI,GPT 5.4 Nano,gpt-5.4-nano,text
+OpenAI,GPT 5.3,gpt-5.3,text
+OpenAI,GPT 5.2 Pro,gpt-5.2-pro,text
+OpenAI,GPT 5.2,gpt-5.2,text
+OpenAI,GPT 5.1,gpt-5.1,text
+OpenAI,GPT 5 Pro,gpt-5-pro,text
+OpenAI,GPT 5,gpt-5,text
+OpenAI,GPT 5 Mini,gpt-5-mini,text
+OpenAI,GPT 5 Nano,gpt-5-nano,text
+OpenAI,GPT 4.5 Preview,gpt-4.5-preview,text
+OpenAI,GPT 4.1,gpt-4.1,text
+OpenAI,GPT 4.1 Mini,gpt-4.1-mini,text
+OpenAI,GPT 4.1 Nano,gpt-4.1-nano,text
+OpenAI,GPT 4o,gpt-4o,text
+OpenAI,GPT 4o Mini,gpt-4o-mini,text
+OpenAI,GPT 4 Turbo,gpt-4-turbo,text
+OpenAI,GPT 4 Turbo Preview,gpt-4-turbo-preview,text
+OpenAI,GPT 4,gpt-4,text
+OpenAI,GPT 3.5 Turbo,gpt-3.5-turbo,text
+OpenAI,O3 Pro,o3-pro,text
+OpenAI,O3,o3,text
+OpenAI,O3 Mini,o3-mini,text
+OpenAI,O4 Mini,o4-mini,text
+OpenAI,O1 Pro,o1-pro,text
+OpenAI,O1,o1,text
+OpenAI,O1 Mini,o1-mini,text
+OpenAI,O1 Preview,o1-preview,text
+OpenAI,Babbage 002,babbage-002,text
+OpenAI,Davinci 002,davinci-002,text
+OpenAI,GPT Image 2,gpt-image-2,image
+OpenAI,GPT Image 1.5,gpt-image-1.5,image
+OpenAI,GPT Image 1,gpt-image-1,image
+OpenAI,GPT Image Mini,gpt-image-1-mini,image
+OpenAI,ChatGPT Image Latest,chatgpt-image-latest,image
+OpenAI,DALL-E 3,dall-e-3,image
+OpenAI,DALL-E 2,dall-e-2,image
+OpenAI,DALL-E,dall-e,image
+OpenAI,GPT Realtime Translate,gpt-realtime-translate,realtime
+OpenAI,GPT Realtime Whisper,gpt-realtime-whisper,realtime
+OpenAI,GPT Realtime 1.5,gpt-realtime-1.5,realtime
+OpenAI,GPT Realtime,gpt-realtime,realtime
+OpenAI,GPT Realtime Mini,gpt-realtime-mini,realtime
+OpenAI,GPT Audio 1.5,gpt-audio-1.5,audio
+OpenAI,GPT Audio,gpt-audio,audio
+OpenAI,GPT Audio Mini,gpt-audio-mini,audio
+OpenAI,GPT-4o Audio Preview,gpt-4o-audio-preview,audio
+OpenAI,GPT-4o Mini Audio Preview,gpt-4o-mini-audio-preview,audio
+OpenAI,GPT-4o Realtime Preview,gpt-4o-realtime-preview,realtime
+OpenAI,GPT-4o Mini Realtime Preview,gpt-4o-mini-realtime-preview,realtime
+OpenAI,GPT-4o Transcribe,gpt-4o-transcribe,audio
+OpenAI,GPT-4o Mini Transcribe,gpt-4o-mini-transcribe,audio
+OpenAI,GPT-4o Transcribe Diarize,gpt-4o-transcribe-diarize,audio
+OpenAI,GPT-4o Mini TTS,gpt-4o-mini-tts,audio
+OpenAI,TTS 1,tts-1,audio
+OpenAI,TTS 1 HD,tts-1-hd,audio
+OpenAI,Whisper 1,whisper-1,audio
+OpenAI,GPT 5.3 Codex,gpt-5.3-codex,code
+OpenAI,GPT 5 Codex,gpt-5-codex,code
+OpenAI,GPT 5.2 Codex,gpt-5.2-codex,code
+OpenAI,GPT 5.1 Codex,gpt-5.1-codex,code
+OpenAI,GPT 5.1 Codex Max,gpt-5.1-codex-max,code
+OpenAI,GPT 5.1 Codex Mini,gpt-5.1-codex-mini,code
+OpenAI,Codex Mini Latest,codex-mini-latest,code
+OpenAI,O3 Deep Research,o3-deep-research,research
+OpenAI,O4 Mini Deep Research,o4-mini-deep-research,research
+OpenAI,GPT OSS 120B,gpt-oss-120b,open-weight
+OpenAI,GPT OSS 20B,gpt-oss-20b,open-weight
+OpenAI,Computer Use Preview,computer-use-preview,tool
+OpenAI,GPT-4o Search Preview,gpt-4o-search-preview,search
+OpenAI,GPT-4o Mini Search Preview,gpt-4o-mini-search-preview,search
+OpenAI,Omni Moderation Latest,omni-moderation-latest,moderation
+OpenAI,Text Moderation Latest,text-moderation-latest,moderation
+OpenAI,Text Moderation Stable,text-moderation-stable,moderation
+OpenAI,Chat Latest,chat-latest,chatgpt
+OpenAI,GPT 5.3 Chat Latest,gpt-5.3-chat-latest,chatgpt
+OpenAI,GPT 5.2 Chat Latest,gpt-5.2-chat-latest,chatgpt
+OpenAI,GPT 5.1 Chat Latest,gpt-5.1-chat-latest,chatgpt
+OpenAI,GPT 5 Chat Latest,gpt-5-chat-latest,chatgpt
+OpenAI,ChatGPT 4o Latest,chatgpt-4o-latest,chatgpt
+OpenAI,Sora 2,sora-2-2025-12-08,video
+OpenAI,Sora 2 Pro Latest,sora-2-pro-2025-10-06,video
+OpenAI,Sora 2 Pro,sora-2-pro,video
