@@ -118,6 +118,7 @@ const fileListEl = document.getElementById("fileList");
 const dirPathInputEl = document.getElementById("dirPathInput");
 const fileUploadInputEl = document.getElementById("fileUploadInput");
 const folderUploadInputEl = document.getElementById("folderUploadInput");
+const uploadBypassCodeInputEl = document.getElementById("uploadBypassCodeInput");
 const dropZoneEl = document.getElementById("dropZone");
 const activePathLabelEl = document.getElementById("activePathLabel");
 const fileStatusEl = document.getElementById("fileStatus");
@@ -160,8 +161,11 @@ const THEME_STORAGE_KEY = "remote-ai-access-theme";
 const FILELAB_SYNTAX_THEME_KEY = "filelab-syntax-theme";
 const FILELAB_FONT_SIZE_KEY = "filelab-font-size";
 const FILELAB_MINIMAP_KEY = "filelab-minimap-enabled";
+const FILELAB_UPLOAD_BYPASS_CODE_KEY = "filelab-upload-bypass-code";
+const FILELAB_CHUNK_SESSIONS_KEY = "filelab-chunk-sessions-v1";
 const languageCompartment = new Compartment();
 const editorThemeCompartment = new Compartment();
+const DEFAULT_MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 
 const FONT_SIZE_MIN = 12;
 const FONT_SIZE_MAX = 22;
@@ -175,6 +179,17 @@ let editorInitError = null;
 let currentSyntaxTheme = "verdant";
 let currentFontSize = 14;
 let minimapEnabled = true;
+let currentWorkspaceCode = "";
+let uploadPolicy = {
+  defaultMaxBytes: DEFAULT_MAX_UPLOAD_BYTES,
+  bypassConfiguredForWorkspace: false,
+  chunked: {
+    enabled: true,
+    thresholdBytes: 64 * 1024 * 1024,
+    chunkSizeBytes: 4 * 1024 * 1024
+  }
+};
+let uploadInFlight = false;
 let minimapFrame = 0;
 let minimapBoundScroller = null;
 
@@ -641,6 +656,21 @@ function setStatus(text) {
   fileStatusEl.textContent = text;
 }
 
+function normalizeUploadBypassCode(value) {
+  let normalized = String(value || "");
+  try {
+    normalized = normalized.normalize("NFKC");
+  } catch {
+    // String normalization is optional; continue with raw value if unsupported.
+  }
+
+  normalized = normalized.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+  if (normalized.length >= 2 && normalized.startsWith("`") && normalized.endsWith("`")) {
+    normalized = normalized.slice(1, -1).trim();
+  }
+  return normalized.replace(/\s+/g, "");
+}
+
 function normalizeWorkspaceCode(value) {
   const code = String(value || "").trim().toLowerCase();
   if (!code) {
@@ -656,12 +686,42 @@ async function loadWorkspaceInfo() {
   try {
     const data = await apiJson("/api/session/workspace");
     const code = normalizeWorkspaceCode(data?.workspaceCode) || "default";
+    currentWorkspaceCode = code;
     workspaceBadgeEl.textContent = `Workspace: ${code}`;
     if (workspaceCodeInputEl && !workspaceCodeInputEl.value) {
       workspaceCodeInputEl.value = code;
     }
   } catch {
+    currentWorkspaceCode = "";
     workspaceBadgeEl.textContent = "Workspace: unknown";
+  }
+}
+
+async function loadUploadPolicy() {
+  try {
+    const data = await apiJson("/api/tools");
+    const maxBytes = Number(data?.uploadPolicy?.defaultMaxBytes);
+    const thresholdBytes = Number(data?.uploadPolicy?.chunked?.thresholdBytes);
+    const chunkSizeBytes = Number(data?.uploadPolicy?.chunked?.chunkSizeBytes);
+    uploadPolicy = {
+      defaultMaxBytes: Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : DEFAULT_MAX_UPLOAD_BYTES,
+      bypassConfiguredForWorkspace: Boolean(data?.uploadPolicy?.bypassConfiguredForWorkspace),
+      chunked: {
+        enabled: data?.uploadPolicy?.chunked?.enabled !== false,
+        thresholdBytes: Number.isFinite(thresholdBytes) && thresholdBytes > 0 ? thresholdBytes : 64 * 1024 * 1024,
+        chunkSizeBytes: Number.isFinite(chunkSizeBytes) && chunkSizeBytes > 0 ? chunkSizeBytes : 4 * 1024 * 1024
+      }
+    };
+  } catch {
+    uploadPolicy = {
+      defaultMaxBytes: DEFAULT_MAX_UPLOAD_BYTES,
+      bypassConfiguredForWorkspace: false,
+      chunked: {
+        enabled: true,
+        thresholdBytes: 64 * 1024 * 1024,
+        chunkSizeBytes: 4 * 1024 * 1024
+      }
+    };
   }
 }
 
@@ -812,6 +872,233 @@ function parentDir(dir) {
   if (!cleaned) return "";
   const idx = cleaned.lastIndexOf("/");
   return idx >= 0 ? cleaned.slice(0, idx) : "";
+}
+
+function formatByteSize(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function openPickerForInput(inputEl) {
+  if (!inputEl) {
+    return;
+  }
+  if (typeof inputEl.showPicker === "function") {
+    try {
+      inputEl.showPicker();
+      return;
+    } catch {
+      // Fallback to click if showPicker is unsupported by the browser runtime.
+    }
+  }
+  inputEl.click();
+}
+
+function getUploadBypassCode() {
+  return normalizeUploadBypassCode(uploadBypassCodeInputEl?.value || "");
+}
+
+function formatUploadProgress(loaded, total) {
+  const safeLoaded = Math.max(0, Number(loaded || 0));
+  const safeTotal = Math.max(0, Number(total || 0));
+  if (!safeTotal) {
+    return `sent ${formatByteSize(safeLoaded)}`;
+  }
+  const percent = Math.max(0, Math.min(100, Math.round((safeLoaded / safeTotal) * 100)));
+  return `${percent}% (${formatByteSize(safeLoaded)} / ${formatByteSize(safeTotal)})`;
+}
+
+function uploadWithProgress(uploadUrl, requestHeaders, form, onProgress, onUploadSent) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", uploadUrl, true);
+    xhr.responseType = "text";
+    xhr.timeout = 10 * 60 * 1000;
+    for (const [key, value] of Object.entries(requestHeaders || {})) {
+      xhr.setRequestHeader(key, String(value));
+    }
+
+    xhr.upload.addEventListener("progress", (event) => {
+      onProgress?.(event.loaded, event.total, event.lengthComputable);
+    });
+    xhr.upload.addEventListener("load", () => {
+      onUploadSent?.();
+    });
+
+    xhr.addEventListener("error", () => reject(new Error("Network error while uploading.")));
+    xhr.addEventListener("timeout", () => reject(new Error("Upload timed out.")));
+    xhr.addEventListener("abort", () => reject(new Error("Upload cancelled.")));
+    xhr.addEventListener("load", () => {
+      const raw = String(xhr.responseText || "");
+      let data = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        data = {};
+      }
+
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve({ status: xhr.status, data, raw });
+        return;
+      }
+
+      const trimmed = raw.replace(/\s+/g, " ").trim();
+      const fallback = trimmed ? trimmed.slice(0, 160) : `Upload failed (${xhr.status})`;
+      reject(new Error(data.error || fallback));
+    });
+
+    xhr.send(form);
+  });
+}
+
+function getSavedChunkSessions() {
+  try {
+    const raw = localStorage.getItem(FILELAB_CHUNK_SESSIONS_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function setSavedChunkSessions(value) {
+  try {
+    localStorage.setItem(FILELAB_CHUNK_SESSIONS_KEY, JSON.stringify(value || {}));
+  } catch {
+    // Ignore localStorage quota/access issues.
+  }
+}
+
+function makeChunkResumeKey(file, relativePath) {
+  return [
+    currentWorkspaceCode || "default",
+    String(currentDir || ""),
+    String(relativePath || file?.name || ""),
+    Number(file?.size || 0),
+    Number(file?.lastModified || 0)
+  ].join("|");
+}
+
+async function uploadFilesChunked(files, bypassCode, totalBytes) {
+  const requestHeaders = {};
+  if (bypassCode) {
+    requestHeaders["X-Upload-Bypass-Code"] = bypassCode;
+  }
+
+  let uploadedOverall = 0;
+  const saved = [];
+
+  for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
+    const file = files[fileIndex];
+    const relativePath = normalizeRelativePath(file.webkitRelativePath || file.name);
+    const resumeKey = makeChunkResumeKey(file, relativePath);
+    const sessions = getSavedChunkSessions();
+    const resumeUploadId = String(sessions?.[resumeKey]?.uploadId || "");
+
+    let uploadId = "";
+    let chunkSize = Math.max(256 * 1024, Number(uploadPolicy?.chunked?.chunkSizeBytes || (4 * 1024 * 1024)));
+    let expectedChunks = Math.max(1, Math.ceil(Number(file.size || 0) / chunkSize));
+    let startChunkIndex = 0;
+
+    if (resumeUploadId) {
+      try {
+        const statusUrl = bypassCode
+          ? `/api/files/upload/chunk/${encodeURIComponent(resumeUploadId)}?upload_code=${encodeURIComponent(bypassCode)}`
+          : `/api/files/upload/chunk/${encodeURIComponent(resumeUploadId)}`;
+        const status = await apiJson(statusUrl);
+        if (Number(status.expectedSize || 0) === Number(file.size || 0)) {
+          uploadId = resumeUploadId;
+          expectedChunks = Math.max(1, Number(status.totalChunks || expectedChunks));
+          startChunkIndex = Math.max(0, Number(status.nextChunkIndex || 0));
+          setStatus(`Resuming upload: file ${fileIndex + 1}/${files.length} from chunk ${startChunkIndex + 1}/${expectedChunks}...`);
+        }
+      } catch {
+        // Session missing/expired; start a new one.
+      }
+    }
+
+    if (!uploadId) {
+    const startPayload = {
+      path: currentDir,
+      name: file.name,
+      relativePath,
+      size: Number(file.size || 0),
+      mimeType: String(file.type || "application/octet-stream")
+    };
+
+    const startUrl = bypassCode
+      ? `/api/files/upload/chunk/start?upload_code=${encodeURIComponent(bypassCode)}`
+      : "/api/files/upload/chunk/start";
+
+      const started = await apiJson(startUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...requestHeaders },
+      body: JSON.stringify(startPayload)
+    });
+
+      uploadId = String(started.uploadId || "");
+      chunkSize = Math.max(256 * 1024, Number(started.chunkSizeBytes || uploadPolicy?.chunked?.chunkSizeBytes || (4 * 1024 * 1024)));
+      expectedChunks = Math.max(1, Number(started.totalChunks || Math.ceil(file.size / chunkSize)));
+      startChunkIndex = 0;
+    }
+
+    const updatedSessions = getSavedChunkSessions();
+    updatedSessions[resumeKey] = { uploadId, updatedAt: Date.now() };
+    setSavedChunkSessions(updatedSessions);
+
+    for (let chunkIndex = startChunkIndex; chunkIndex < expectedChunks; chunkIndex += 1) {
+      const start = chunkIndex * chunkSize;
+      const end = Math.min(file.size, start + chunkSize);
+      const chunk = file.slice(start, end);
+
+      const chunkUrlBase = `/api/files/upload/chunk/${encodeURIComponent(uploadId)}?index=${chunkIndex}`;
+      const chunkUrl = bypassCode
+        ? `${chunkUrlBase}&upload_code=${encodeURIComponent(bypassCode)}`
+        : chunkUrlBase;
+
+      await fetch(chunkUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream", ...requestHeaders },
+        body: chunk
+      }).then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(data.error || `Chunk upload failed (${response.status})`);
+        }
+      });
+
+      const fileProgress = end;
+      const currentOverall = uploadedOverall + fileProgress;
+      setStatus(`Uploading ${files.length} file(s)... ${formatUploadProgress(currentOverall, totalBytes)} [file ${fileIndex + 1}/${files.length}, chunk ${chunkIndex + 1}/${expectedChunks}]`);
+    }
+
+    const completeUrl = bypassCode
+      ? `/api/files/upload/chunk/${encodeURIComponent(uploadId)}/complete?upload_code=${encodeURIComponent(bypassCode)}`
+      : `/api/files/upload/chunk/${encodeURIComponent(uploadId)}/complete`;
+
+    const completed = await apiJson(completeUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...requestHeaders },
+      body: JSON.stringify({})
+    });
+
+    saved.push({ path: completed.path, size: completed.size });
+    uploadedOverall += Number(file.size || 0);
+    const doneSessions = getSavedChunkSessions();
+    delete doneSessions[resumeKey];
+    setSavedChunkSessions(doneSessions);
+  }
+
+  return {
+    files: saved,
+    count: saved.length,
+    workspaceCode: currentWorkspaceCode || undefined
+  };
 }
 
 async function loadDirectory(pathValue = currentDir) {
@@ -996,6 +1283,25 @@ async function uploadFiles(files) {
     return;
   }
 
+  if (uploadInFlight) {
+    setStatus("Upload already in progress. Please wait.");
+    return;
+  }
+
+  const totalBytes = files.reduce((sum, file) => sum + Number(file?.size || 0), 0);
+  setStatus(`Preparing upload: ${files.length} file(s), ${formatByteSize(totalBytes)}.`);
+
+  const bypassCode = getUploadBypassCode();
+  const maxUploadBytes = Number(uploadPolicy?.defaultMaxBytes || DEFAULT_MAX_UPLOAD_BYTES);
+  const tooLarge = files.filter((file) => Number(file?.size || 0) > maxUploadBytes);
+  if (!bypassCode && tooLarge.length > 0) {
+    const first = tooLarge[0];
+    const bypassHint = uploadPolicy?.bypassConfiguredForWorkspace
+      ? " Enter your upload unlock code, then try again."
+      : "";
+    throw new Error(`File too large: ${first.name} (${formatByteSize(first.size)}). Max is ${formatByteSize(maxUploadBytes)}.${bypassHint}`);
+  }
+
   const form = new FormData();
   form.append("path", currentDir);
 
@@ -1005,13 +1311,75 @@ async function uploadFiles(files) {
     form.append("relativePaths", relativePath);
   }
 
-  const response = await fetch("/api/files/upload", { method: "POST", body: form });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(data.error || `Upload failed (${response.status})`);
+  const requestHeaders = {};
+  if (bypassCode) {
+    requestHeaders["X-Upload-Bypass-Code"] = bypassCode;
+  }
+
+  const uploadUrl = bypassCode
+    ? `/api/files/upload?upload_code=${encodeURIComponent(bypassCode)}`
+    : "/api/files/upload";
+
+  uploadInFlight = true;
+  let lastLoaded = 0;
+  let lastTotal = totalBytes;
+  let lastProgressAt = Date.now();
+  let waitingOnServer = false;
+  let heartbeatTicks = 0;
+  const heartbeat = window.setInterval(() => {
+    heartbeatTicks += 1;
+    const elapsed = Math.round((Date.now() - lastProgressAt) / 1000);
+    if (waitingOnServer) {
+      const dotCount = (heartbeatTicks % 3) + 1;
+      setStatus(`Upload sent. Waiting on server${".".repeat(dotCount)} (${elapsed}s)`);
+      return;
+    }
+    if (elapsed >= 3) {
+      setStatus(`Uploading ${files.length} file(s)... ${formatUploadProgress(lastLoaded, lastTotal)} (${elapsed}s without new progress)`);
+    }
+  }, 1000);
+
+  let data;
+  try {
+    const shouldUseChunked = Boolean(uploadPolicy?.chunked?.enabled)
+      && files.some((file) => Number(file?.size || 0) >= Number(uploadPolicy?.chunked?.thresholdBytes || (64 * 1024 * 1024)));
+
+    if (shouldUseChunked) {
+      setStatus(`Uploading ${files.length} file(s)... 0% [chunked mode]`);
+      data = await uploadFilesChunked(files, bypassCode, totalBytes);
+      setStatus("Chunked upload complete. Finalizing file list...");
+    } else {
+      setStatus(`Uploading ${files.length} file(s)... 0%`);
+      const result = await uploadWithProgress(
+        uploadUrl,
+        requestHeaders,
+        form,
+        (loaded, total, lengthComputable) => {
+          lastLoaded = Math.max(0, Number(loaded || 0));
+          lastTotal = lengthComputable ? Math.max(0, Number(total || 0)) : totalBytes;
+          lastProgressAt = Date.now();
+          setStatus(`Uploading ${files.length} file(s)... ${formatUploadProgress(lastLoaded, lastTotal)}`);
+        },
+        () => {
+          waitingOnServer = true;
+          lastProgressAt = Date.now();
+          setStatus("Upload sent. Waiting on server... (0s)");
+        }
+      );
+      data = result.data;
+      setStatus("Upload complete. Finalizing file list...");
+    }
+  } finally {
+    window.clearInterval(heartbeat);
+    uploadInFlight = false;
   }
 
   const count = Array.isArray(data.files) ? data.files.length : (data.path ? 1 : 0);
+  const responseWorkspace = normalizeWorkspaceCode(data?.workspaceCode);
+  if (responseWorkspace && currentWorkspaceCode && responseWorkspace !== currentWorkspaceCode) {
+    setStatus(`Error: upload landed in workspace '${responseWorkspace}' while UI is '${currentWorkspaceCode}'.`);
+    return;
+  }
   setStatus(`Uploaded ${count} file(s).`);
   await loadDirectory(currentDir);
 }
@@ -1057,16 +1425,43 @@ lintBtnEl.addEventListener("click", () => {
 });
 
 uploadBtnEl.addEventListener("click", () => {
-  fileUploadInputEl.click();
+  setStatus("Opening file picker...");
+  openPickerForInput(fileUploadInputEl);
 });
 
 uploadFolderBtnEl.addEventListener("click", () => {
-  folderUploadInputEl.click();
+  const supportsFolder = "webkitdirectory" in folderUploadInputEl || "directory" in folderUploadInputEl;
+  if (!supportsFolder) {
+    setStatus("Folder upload is not supported on this browser. Use Upload Files instead.");
+    openPickerForInput(fileUploadInputEl);
+    return;
+  }
+  setStatus("Opening folder picker...");
+  openPickerForInput(folderUploadInputEl);
 });
+
+if (uploadBypassCodeInputEl) {
+  const savedCode = localStorage.getItem(FILELAB_UPLOAD_BYPASS_CODE_KEY);
+  if (savedCode) {
+    uploadBypassCodeInputEl.value = normalizeUploadBypassCode(savedCode);
+  }
+  uploadBypassCodeInputEl.addEventListener("change", () => {
+    const value = getUploadBypassCode();
+    uploadBypassCodeInputEl.value = value;
+    if (value) {
+      localStorage.setItem(FILELAB_UPLOAD_BYPASS_CODE_KEY, value);
+    } else {
+      localStorage.removeItem(FILELAB_UPLOAD_BYPASS_CODE_KEY);
+    }
+  });
+}
 
 fileUploadInputEl.addEventListener("change", () => {
   const files = Array.from(fileUploadInputEl.files || []);
-  if (files.length === 0) return;
+  if (files.length === 0) {
+    setStatus("No files selected.");
+    return;
+  }
   uploadFiles(files)
     .catch((error) => setStatus(`Error: ${error.message}`))
     .finally(() => {
@@ -1076,7 +1471,10 @@ fileUploadInputEl.addEventListener("change", () => {
 
 folderUploadInputEl.addEventListener("change", () => {
   const files = Array.from(folderUploadInputEl.files || []);
-  if (files.length === 0) return;
+  if (files.length === 0) {
+    setStatus("No folder selected.");
+    return;
+  }
   uploadFiles(files)
     .catch((error) => setStatus(`Error: ${error.message}`))
     .finally(() => {
@@ -1337,3 +1735,4 @@ if (launchPath) {
 }
 
 loadWorkspaceInfo().catch(() => {});
+loadUploadPolicy().catch(() => {});

@@ -8,6 +8,8 @@ const themeToggleEl = document.getElementById("themeToggle");
 const providerSelectEl = document.getElementById("providerSelect");
 const modelSelectEl = document.getElementById("modelSelect");
 const agentModeToggleEl = document.getElementById("agentModeToggle");
+const agentStepOverrideInputEl = document.getElementById("agentStepOverrideInput");
+const agentStepOverrideCodeInputEl = document.getElementById("agentStepOverrideCodeInput");
 const chatPanelEl = document.getElementById("chatPanel");
 const copyAllAssistantBtnEl = document.getElementById("copyAllAssistantBtn");
 const refreshToolRunsBtnEl = document.getElementById("refreshToolRunsBtn");
@@ -51,7 +53,12 @@ let config = {
   defaultModel: "gpt-4.1",
   allowedModels: [],
   supportedProviders: ["openai"],
-  agentModeSupportedProviders: ["openai"]
+  agentModeSupportedProviders: ["openai"],
+  agentStepOverride: {
+    enabled: false,
+    baseMaxSteps: 16,
+    maxOverrideSteps: 40
+  }
 };
 
 let modelCatalog = [];
@@ -155,6 +162,8 @@ function normalizeStateShape(parsed) {
     ...chat,
     provider: normalizeProvider(chat?.provider) || "openai",
     model: typeof chat?.model === "string" && chat.model ? chat.model : config.defaultModel,
+    agentMaxStepsOverride: Number.isInteger(Number(chat?.agentMaxStepsOverride)) ? Number(chat.agentMaxStepsOverride) : null,
+    agentMaxStepsOverrideCode: typeof chat?.agentMaxStepsOverrideCode === "string" ? chat.agentMaxStepsOverrideCode : "",
     messages: Array.isArray(chat?.messages) ? chat.messages : []
   }));
 
@@ -1175,6 +1184,28 @@ function syncAgentModeToggle() {
     return;
   }
   agentModeToggleEl.checked = isAgentModeEnabled();
+
+  if (agentStepOverrideInputEl && agentStepOverrideCodeInputEl) {
+    const max = Number(config?.agentStepOverride?.maxOverrideSteps || 40);
+    const base = Number(config?.agentStepOverride?.baseMaxSteps || 16);
+    const overrideEnabled = Boolean(config?.agentStepOverride?.enabled);
+    const enabledForChat = supported && agentModeToggleEl.checked;
+    agentStepOverrideInputEl.disabled = !enabledForChat;
+    agentStepOverrideCodeInputEl.disabled = !enabledForChat;
+    agentStepOverrideInputEl.max = String(max);
+    agentStepOverrideInputEl.placeholder = `${base}`;
+    agentStepOverrideInputEl.title = overrideEnabled
+      ? `Optional per-chat step override (${base}-${max})`
+      : `Step override disabled on server (base ${base})`;
+    if (!enabledForChat) {
+      agentStepOverrideInputEl.value = "";
+      agentStepOverrideCodeInputEl.value = "";
+      return;
+    }
+    const requested = Number(chat?.agentMaxStepsOverride || 0);
+    agentStepOverrideInputEl.value = requested > 0 ? String(requested) : "";
+    agentStepOverrideCodeInputEl.value = String(chat?.agentMaxStepsOverrideCode || "");
+  }
 }
 
 async function loadConfig() {
@@ -1202,6 +1233,13 @@ async function loadConfig() {
       config.agentModeSupportedProviders = data.agentModeSupportedProviders
         .map((item) => normalizeProvider(item))
         .filter(Boolean);
+    }
+    if (data?.agentStepOverride && typeof data.agentStepOverride === "object") {
+      config.agentStepOverride = {
+        enabled: Boolean(data.agentStepOverride.enabled),
+        baseMaxSteps: Number(data.agentStepOverride.baseMaxSteps || config.agentStepOverride.baseMaxSteps || 16),
+        maxOverrideSteps: Number(data.agentStepOverride.maxOverrideSteps || config.agentStepOverride.maxOverrideSteps || 40)
+      };
     }
   } catch {
     // Keep defaults if config endpoint is unavailable.
@@ -1319,7 +1357,7 @@ async function loadModelCatalog() {
       .filter((entry) => /^[a-zA-Z0-9._/-]{2,120}$/.test(entry.tag));
   } catch {
     modelCatalog = [];
-  }
+  }    
 }
 
 async function sendPrompt() {
@@ -1358,6 +1396,10 @@ async function sendPrompt() {
       provider: chat.provider,
       model: chat.model,
       agentMode: agentModeToggleEl.checked,
+      agentMaxStepsOverride: Number.isInteger(Number(chat.agentMaxStepsOverride)) && Number(chat.agentMaxStepsOverride) > 0
+        ? Number(chat.agentMaxStepsOverride)
+        : undefined,
+      agentMaxStepsOverrideCode: chat.agentMaxStepsOverrideCode || undefined,
       messages: payloadMessages
     });
     if (!response.ok) {
@@ -1527,6 +1569,40 @@ modelSelectEl.addEventListener("change", () => {
   saveState();
   renderTabs();
 });
+
+if (agentStepOverrideInputEl) {
+  agentStepOverrideInputEl.addEventListener("change", () => {
+    const chat = getActiveChat();
+    const raw = String(agentStepOverrideInputEl.value || "").trim();
+    if (!raw) {
+      chat.agentMaxStepsOverride = null;
+      saveState();
+      statusEl.textContent = "Per-chat step override cleared.";
+      return;
+    }
+    const max = Number(config?.agentStepOverride?.maxOverrideSteps || 40);
+    const value = Math.max(1, Math.min(max, Number(raw)));
+    if (!Number.isInteger(value)) {
+      statusEl.textContent = "Step override must be an integer.";
+      return;
+    }
+    chat.agentMaxStepsOverride = value;
+    agentStepOverrideInputEl.value = String(value);
+    saveState();
+    statusEl.textContent = `Per-chat step override set to ${value}.`;
+  });
+}
+
+if (agentStepOverrideCodeInputEl) {
+  agentStepOverrideCodeInputEl.addEventListener("change", () => {
+    const chat = getActiveChat();
+    chat.agentMaxStepsOverrideCode = String(agentStepOverrideCodeInputEl.value || "").trim();
+    saveState();
+    statusEl.textContent = chat.agentMaxStepsOverrideCode
+      ? "Per-chat step override code saved."
+      : "Per-chat step override code cleared.";
+  });
+}
 
 providerSelectEl.addEventListener("change", () => {
   const chat = getActiveChat();

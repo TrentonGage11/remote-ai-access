@@ -50,8 +50,17 @@
               <span>Agent Tools</span>
               <input id="agentModeToggle" type="checkbox" aria-label="Enable agent tool calling" />
             </label>
+            <label class="model-field" for="agentStepOverrideInput">
+              <span>Agent Steps</span>
+              <input id="agentStepOverrideInput" type="number" min="1" step="1" placeholder="16" aria-label="Per-chat agent step override" />
+            </label>
+            <label class="model-field" for="agentStepOverrideCodeInput">
+              <span>Step Unlock</span>
+              <input id="agentStepOverrideCodeInput" type="password" placeholder="optional" aria-label="Per-chat agent step unlock code" />
+            </label>
             <a class="btn btn-soft" href="filelab.html">File Lab</a>
             <a class="btn btn-soft" href="api-tools.html">API Tools</a>
+            <a class="btn btn-soft" href="security-admin.html">Security Admin</a>
             <a class="btn btn-soft" href="notifications.html">Notifications</a>
             <a class="btn btn-soft" href="notification-rules.html">Notification Rules</a>
             <a class="btn btn-soft" href="notification-permission.html">Notification Access</a>
@@ -143,6 +152,7 @@
       </section>
     </main>
 
-    <script type="module" src="app.js"></script>
+    <script src="api-auth.js"></script>
+    <script type="module" src="app.js?v=20260525b"></script>
   </body>
 </html>

@@ -39,15 +39,26 @@ const enableNightlyWorkspaceBackup = String(process.env.ENABLE_NIGHTLY_WORKSPACE
 const workspaceBackupRoot = path.resolve(process.env.WORKSPACE_BACKUP_ROOT || path.join(sandboxBaseRoot, "_backups"));
 const workspaceBackupUtcHour = Math.max(0, Math.min(23, Number(process.env.WORKSPACE_BACKUP_UTC_HOUR || 3)));
 const workspaceBackupRetentionDays = Math.max(1, Math.min(365, Number(process.env.WORKSPACE_BACKUP_RETENTION_DAYS || 21)));
+const workspaceGitRemoteRoot = path.resolve(process.env.WORKSPACE_GIT_REMOTE_ROOT || path.join(sandboxBaseRoot, "workspace-remotes"));
+const workspaceGitRemoteName = String(process.env.WORKSPACE_GIT_REMOTE_NAME || "origin").trim() || "origin";
+const workspaceGitSshHost = String(process.env.WORKSPACE_GIT_SSH_HOST || "").trim();
+const workspaceGitSshUser = String(process.env.WORKSPACE_GIT_SSH_USER || "").trim() || "root";
+const defaultUploadMaxBytes = Math.max(1024, Number(process.env.FILE_API_UPLOAD_MAX_BYTES || 20 * 1024 * 1024));
+const workspaceUploadBypassCodesRaw = String(process.env.WORKSPACE_UPLOAD_BYPASS_CODES || "");
+const workspaceUploadBypassCodes = parseWorkspaceUploadBypassCodes(workspaceUploadBypassCodesRaw);
+const chunkUploadThresholdBytes = Math.max(1024 * 1024, Number(process.env.FILE_API_CHUNK_UPLOAD_THRESHOLD_BYTES || 64 * 1024 * 1024));
+const chunkUploadChunkSizeBytes = Math.max(256 * 1024, Number(process.env.FILE_API_CHUNK_SIZE_BYTES || 4 * 1024 * 1024));
+const chunkUploadSessionMaxAgeMs = Math.max(60_000, Number(process.env.FILE_API_CHUNK_SESSION_MAX_AGE_MS || 2 * 60 * 60 * 1000));
 
 const execFileAsync = promisify(execFile);
-const safeTerminalCommands = new Set(["node", "npm", "npx", "python", "python3", "pip", "pip3", "git", "ls", "pwd", "echo", "cat", "grep", "find", "head", "tail", "wc"]);
+const safeTerminalCommands = new Set(["node", "npm", "npx", "python", "python3", "pip", "pip3", "git", "ls", "pwd", "echo", "cat", "grep", "find", "head", "tail", "wc", "7z", "7za", "7zr", "vfa"]);
 const dockerOnlyTerminalCommands = new Set(["apt", "apt-get"]);
 const blockedTerminalCommandsAlways = new Set(["sudo", "su", "systemctl", "service", "docker", "podman", "mount", "umount", "chown"]);
 const blockedTerminalCommandsHostOnly = new Set(["apt", "apt-get", "dnf", "yum", "apk", "pacman"]);
 const blockedTerminalArgPatterns = [/^--prefix=/i, /^--root=/i, /^--target=/i];
 const scheduledTasks = new Map();
 const notificationStore = [];
+const uploadSessionStore = new Map();
 let scheduledTaskCounter = 0;
 const workspaceContextStore = new AsyncLocalStorage();
 const workspaceReadyPromises = new Map();
@@ -58,13 +69,24 @@ const terminalDockerMemory = String(process.env.TERMINAL_DOCKER_MEMORY || "1g").
 const terminalDockerCpus = String(process.env.TERMINAL_DOCKER_CPUS || "1.0").trim() || "1.0";
 const terminalDockerPidsLimit = Math.max(64, Math.min(2048, Number(process.env.TERMINAL_DOCKER_PIDS_LIMIT || 256)));
 const terminalDockerNetwork = String(process.env.TERMINAL_DOCKER_NETWORK || "bridge").trim() || "bridge";
+const terminalHostFallbackCommands = new Set(
+  String(process.env.TERMINAL_HOST_FALLBACK_COMMANDS || "7z,7za,7zr,vfa")
+    .split(",")
+    .map((item) => String(item || "").trim().toLowerCase())
+    .filter(Boolean)
+);
+const terminalVfaCommand = String(process.env.TERMINAL_VFA_COMMAND || "").trim();
+const terminalVfaScript = String(process.env.TERMINAL_VFA_SCRIPT || "../VFA/vfa.py").trim() || "../VFA/vfa.py";
 let workspaceBackupTimer = null;
 
 const port = Number(process.env.PORT || 8787);
 const appBaseUrl = process.env.APP_BASE_URL || `http://localhost:${port}`;
 const defaultModel = process.env.OPENAI_MODEL || "gpt-4.1";
 const defaultProvider = "openai";
-const agentMaxSteps = Math.max(1, Math.min(20, Number(process.env.AGENT_MAX_STEPS || 10)));
+const agentMaxStepsHardLimit = Math.max(16, Math.min(4096, Number(process.env.AGENT_MAX_STEPS_HARD_LIMIT || 1024)));
+const agentMaxSteps = Math.max(1, Math.min(agentMaxStepsHardLimit, Number(process.env.AGENT_MAX_STEPS || 16)));
+const agentMaxStepsOverrideLimit = Math.max(agentMaxSteps, Math.min(agentMaxStepsHardLimit, Number(process.env.AGENT_MAX_STEPS_OVERRIDE_LIMIT || 40)));
+const agentMaxStepsOverrideCode = String(process.env.AGENT_MAX_STEPS_OVERRIDE_CODE || "").trim();
 const agentWebTimeoutMs = Math.max(1000, Math.min(20000, Number(process.env.AGENT_WEB_TIMEOUT_MS || 8000)));
 const githubPat = String(process.env.GITHUB_PAT || process.env.GITHUB_TOKEN || "").trim();
 const copilotApiBaseUrl = String(process.env.COPILOT_API_BASE_URL || "https://models.github.ai/inference").trim();
@@ -79,6 +101,25 @@ const allowedOrigins = rawAllowedOrigins
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
+const apiKeyAuthEnabled = String(process.env.ENABLE_API_KEY_AUTH || "false").trim().toLowerCase() === "true";
+const apiKeyHeaderName = String(process.env.API_KEY_HEADER_NAME || "x-api-key").trim().toLowerCase() || "x-api-key";
+const apiKeyValues = String(process.env.API_KEYS || "")
+  .split(",")
+  .map((item) => String(item || "").trim())
+  .filter(Boolean);
+const apiKeyProtectedPathPrefixes = String(process.env.API_KEY_PROTECTED_PATH_PREFIXES || "/api/files,/api/session/workspace/git,/api/tests,/api/notifications")
+  .split(",")
+  .map((item) => String(item || "").trim())
+  .filter(Boolean);
+const apiKeyExemptPathPrefixes = String(process.env.API_KEY_EXEMPT_PATH_PREFIXES || "")
+  .split(",")
+  .map((item) => String(item || "").trim())
+  .filter(Boolean);
+const apiKeyRequireHeaderOnly = String(process.env.API_KEY_REQUIRE_HEADER_ONLY || "true").trim().toLowerCase() !== "false";
+const adminDashboardToken = String(process.env.ADMIN_DASHBOARD_TOKEN || "").trim();
+const adminSettingsDbPath = path.resolve(process.env.ADMIN_SETTINGS_DB_PATH || path.join(sandboxBaseRoot, "_admin", "settings-db.json"));
+let adminSettingsCache = null;
+let adminSettingsLoaded = false;
 
 const openaiApiKey = process.env.OPENAI_API_KEY;
 if (!openaiApiKey) {
@@ -87,10 +128,6 @@ if (!openaiApiKey) {
 }
 
 const client = new OpenAI({ apiKey: openaiApiKey });
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: Number(process.env.FILE_API_UPLOAD_MAX_BYTES || 20 * 1024 * 1024) }
-});
 
 // This app runs behind Apache reverse proxy in production.
 app.set("trust proxy", 1);
@@ -143,6 +180,167 @@ function normalizeWorkspaceCode(value) {
   return normalized;
 }
 
+function normalizeUploadBypassCode(value) {
+  let normalized = String(value || "");
+  try {
+    normalized = normalized.normalize("NFKC");
+  } catch {
+    // Unicode normalization may not be available in all runtimes.
+  }
+
+  normalized = normalized.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+  if (normalized.length >= 2 && normalized.startsWith("`") && normalized.endsWith("`")) {
+    normalized = normalized.slice(1, -1).trim();
+  }
+  return normalized.replace(/\s+/g, "");
+}
+
+function parseWorkspaceUploadBypassCodes(rawValue) {
+  const map = new Map();
+  const source = String(rawValue || "");
+  for (const entry of source.split(",")) {
+    const item = String(entry || "").trim();
+    if (!item) {
+      continue;
+    }
+    const idx = item.indexOf(":");
+    if (idx <= 0) {
+      continue;
+    }
+    const workspace = normalizeWorkspaceCode(item.slice(0, idx));
+    const code = normalizeUploadBypassCode(item.slice(idx + 1));
+    if (!workspace || !code) {
+      continue;
+    }
+    map.set(workspace, code);
+  }
+  return map;
+}
+
+function normalizePathPrefixList(value) {
+  const list = Array.isArray(value) ? value : String(value || "").split(",");
+  const normalized = [];
+  const dedupe = new Set();
+  for (const item of list) {
+    const prefix = normalizeApiPathPrefix(item);
+    if (!prefix || dedupe.has(prefix)) {
+      continue;
+    }
+    dedupe.add(prefix);
+    normalized.push(prefix);
+  }
+  return normalized;
+}
+
+function normalizeApiKeyList(value) {
+  const list = Array.isArray(value) ? value : String(value || "").split(",");
+  const dedupe = new Set();
+  const out = [];
+  for (const item of list) {
+    const key = String(item || "").trim();
+    if (!key || dedupe.has(key)) {
+      continue;
+    }
+    dedupe.add(key);
+    out.push(key);
+  }
+  return out;
+}
+
+function getDefaultAdminSecuritySettings() {
+  return {
+    apiKeyAuthEnabled,
+    apiKeyHeaderName,
+    apiKeys: apiKeyValues,
+    apiKeyProtectedPathPrefixes: normalizePathPrefixList(apiKeyProtectedPathPrefixes),
+    apiKeyExemptPathPrefixes: normalizePathPrefixList(apiKeyExemptPathPrefixes),
+    apiKeyRequireHeaderOnly,
+    agentMaxStepsOverrideCode,
+    workspaceUploadBypassCodesRaw,
+    updatedAt: null
+  };
+}
+
+async function loadAdminSecuritySettings() {
+  if (adminSettingsLoaded) {
+    return adminSettingsCache;
+  }
+
+  const fallback = getDefaultAdminSecuritySettings();
+  try {
+    const raw = await fsp.readFile(adminSettingsDbPath, "utf8");
+    const parsed = JSON.parse(raw);
+    adminSettingsCache = {
+      ...fallback,
+      ...parsed,
+      apiKeyHeaderName: String(parsed?.apiKeyHeaderName || fallback.apiKeyHeaderName).trim().toLowerCase() || "x-api-key",
+      apiKeys: normalizeApiKeyList(parsed?.apiKeys ?? fallback.apiKeys),
+      apiKeyProtectedPathPrefixes: normalizePathPrefixList(parsed?.apiKeyProtectedPathPrefixes ?? fallback.apiKeyProtectedPathPrefixes),
+      apiKeyExemptPathPrefixes: normalizePathPrefixList(parsed?.apiKeyExemptPathPrefixes ?? fallback.apiKeyExemptPathPrefixes),
+      apiKeyAuthEnabled: Boolean(parsed?.apiKeyAuthEnabled),
+      apiKeyRequireHeaderOnly: parsed?.apiKeyRequireHeaderOnly !== false,
+      agentMaxStepsOverrideCode: String(parsed?.agentMaxStepsOverrideCode || fallback.agentMaxStepsOverrideCode).trim(),
+      workspaceUploadBypassCodesRaw: String(parsed?.workspaceUploadBypassCodesRaw ?? fallback.workspaceUploadBypassCodesRaw ?? "").trim()
+    };
+  } catch {
+    adminSettingsCache = fallback;
+  }
+
+  adminSettingsLoaded = true;
+  return adminSettingsCache;
+}
+
+async function saveAdminSecuritySettings(update = {}) {
+  const current = await loadAdminSecuritySettings();
+  const next = {
+    ...current,
+    ...update,
+    apiKeyHeaderName: String(update?.apiKeyHeaderName ?? current.apiKeyHeaderName).trim().toLowerCase() || "x-api-key",
+    apiKeys: normalizeApiKeyList(update?.apiKeys ?? current.apiKeys),
+    apiKeyProtectedPathPrefixes: normalizePathPrefixList(update?.apiKeyProtectedPathPrefixes ?? current.apiKeyProtectedPathPrefixes),
+    apiKeyExemptPathPrefixes: normalizePathPrefixList(update?.apiKeyExemptPathPrefixes ?? current.apiKeyExemptPathPrefixes),
+    apiKeyAuthEnabled: Boolean(update?.apiKeyAuthEnabled ?? current.apiKeyAuthEnabled),
+    apiKeyRequireHeaderOnly: update?.apiKeyRequireHeaderOnly !== false,
+    agentMaxStepsOverrideCode: String(update?.agentMaxStepsOverrideCode ?? current.agentMaxStepsOverrideCode ?? "").trim(),
+    workspaceUploadBypassCodesRaw: String(update?.workspaceUploadBypassCodesRaw ?? current.workspaceUploadBypassCodesRaw ?? "").trim(),
+    updatedAt: new Date().toISOString()
+  };
+
+  await fsp.mkdir(path.dirname(adminSettingsDbPath), { recursive: true });
+  await fsp.writeFile(adminSettingsDbPath, JSON.stringify(next, null, 2), "utf8");
+  adminSettingsCache = next;
+  adminSettingsLoaded = true;
+  return next;
+}
+
+async function getEffectiveSecuritySettings() {
+  const settings = await loadAdminSecuritySettings();
+  return {
+    apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
+    apiKeyHeaderName: String(settings.apiKeyHeaderName || "x-api-key").trim().toLowerCase() || "x-api-key",
+    apiKeys: normalizeApiKeyList(settings.apiKeys),
+    apiKeyProtectedPathPrefixes: normalizePathPrefixList(settings.apiKeyProtectedPathPrefixes),
+    apiKeyExemptPathPrefixes: normalizePathPrefixList(settings.apiKeyExemptPathPrefixes),
+    apiKeyRequireHeaderOnly: settings.apiKeyRequireHeaderOnly !== false,
+    agentMaxStepsOverrideCode: String(settings.agentMaxStepsOverrideCode || "").trim(),
+    workspaceUploadBypassCodes: parseWorkspaceUploadBypassCodes(settings.workspaceUploadBypassCodesRaw)
+  };
+}
+
+function getEffectiveSecuritySettingsSync() {
+  const settings = adminSettingsCache || getDefaultAdminSecuritySettings();
+  return {
+    apiKeyAuthEnabled: Boolean(settings.apiKeyAuthEnabled),
+    apiKeyHeaderName: String(settings.apiKeyHeaderName || "x-api-key").trim().toLowerCase() || "x-api-key",
+    apiKeys: normalizeApiKeyList(settings.apiKeys),
+    apiKeyProtectedPathPrefixes: normalizePathPrefixList(settings.apiKeyProtectedPathPrefixes),
+    apiKeyExemptPathPrefixes: normalizePathPrefixList(settings.apiKeyExemptPathPrefixes),
+    apiKeyRequireHeaderOnly: settings.apiKeyRequireHeaderOnly !== false,
+    agentMaxStepsOverrideCode: String(settings.agentMaxStepsOverrideCode || "").trim(),
+    workspaceUploadBypassCodes: parseWorkspaceUploadBypassCodes(settings.workspaceUploadBypassCodesRaw)
+  };
+}
+
 function parseCookieHeader(headerValue) {
   const source = String(headerValue || "");
   const out = {};
@@ -161,13 +359,43 @@ function parseCookieHeader(headerValue) {
   return out;
 }
 
+function normalizeApiPathPrefix(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const noQuery = raw.split("?")[0] || "";
+  const normalized = noQuery.startsWith("/") ? noQuery : `/${noQuery}`;
+  return normalized.replace(/\/+$/, "") || "/";
+}
+
+function pathMatchesAnyPrefix(pathname, prefixes) {
+  const pathValue = normalizeApiPathPrefix(pathname);
+  if (!pathValue || !Array.isArray(prefixes) || prefixes.length === 0) {
+    return false;
+  }
+
+  for (const prefixRaw of prefixes) {
+    const prefix = normalizeApiPathPrefix(prefixRaw);
+    if (!prefix) {
+      continue;
+    }
+    if (pathValue === prefix || pathValue.startsWith(`${prefix}/`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function workspaceContextForCode(codeValue) {
   const workspaceCode = normalizeWorkspaceCode(codeValue) || defaultWorkspaceCode;
   const root = path.resolve(sandboxBaseRoot, "workspaces", workspaceCode);
+  const bareRepoPath = path.resolve(workspaceGitRemoteRoot, `${workspaceCode}.git`);
   return {
     code: workspaceCode,
     sandboxRoot: root,
-    auditLogPath: path.join(root, ".audit-log.jsonl")
+    auditLogPath: path.join(root, ".audit-log.jsonl"),
+    bareRepoPath
   };
 }
 
@@ -210,6 +438,66 @@ function resolveRequestedWorkspaceCode(req) {
   }
 
   return resolved;
+}
+
+function getUploadBypassCode(req) {
+  const headerCode = normalizeUploadBypassCode(req.headers["x-upload-bypass-code"] || "");
+  const queryCode = normalizeUploadBypassCode(req.query?.upload_code || "");
+  return headerCode || queryCode || "";
+}
+
+function isUploadLimitBypassAllowed(req) {
+  const workspace = getWorkspaceContext().code;
+  const security = getEffectiveSecuritySettingsSync();
+  const expectedCode = security.workspaceUploadBypassCodes.get(workspace);
+  if (!expectedCode) {
+    return false;
+  }
+  const provided = getUploadBypassCode(req);
+  return Boolean(provided) && provided === expectedCode;
+}
+
+function createUploadMiddlewareForRequest(req) {
+  const bypass = isUploadLimitBypassAllowed(req);
+  return multer({
+    storage: multer.memoryStorage(),
+    limits: bypass ? undefined : { fileSize: defaultUploadMaxBytes }
+  }).any();
+}
+
+function getChunkUploadRoot() {
+  return path.join(getSandboxRoot(), ".upload-sessions");
+}
+
+function makeUploadSessionId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function cleanupExpiredUploadSessions() {
+  const now = Date.now();
+  for (const [id, session] of uploadSessionStore.entries()) {
+    if (now - Number(session?.updatedAt || 0) < chunkUploadSessionMaxAgeMs) {
+      continue;
+    }
+    uploadSessionStore.delete(id);
+    if (session?.tempPath) {
+      fsp.unlink(session.tempPath).catch(() => {});
+    }
+  }
+}
+
+function getUploadSessionOrThrow(uploadId) {
+  cleanupExpiredUploadSessions();
+  const session = uploadSessionStore.get(uploadId);
+  if (!session) {
+    throw new Error("upload session not found or expired");
+  }
+  const workspace = getWorkspaceContext().code;
+  if (session.workspaceCode !== workspace) {
+    throw new Error("upload session belongs to a different workspace");
+  }
+  session.updatedAt = Date.now();
+  return session;
 }
 
 function toArray(value) {
@@ -264,6 +552,98 @@ async function runGitInRepo(repoRoot, args, allowFail = false) {
   }
 }
 
+function getWorkspaceGitRemoteName() {
+  return workspaceGitRemoteName;
+}
+
+function getWorkspaceBareRepoPath() {
+  return getWorkspaceContext().bareRepoPath;
+}
+
+function getWorkspaceBareRepoSshUrl(req) {
+  const hostFromReq = String(req?.headers?.host || "").split(":")[0].trim();
+  const host = workspaceGitSshHost || hostFromReq;
+  if (!host) {
+    return "";
+  }
+  const repoPath = getWorkspaceBareRepoPath().replaceAll("\\", "/");
+  return `${workspaceGitSshUser}@${host}:${repoPath}`;
+}
+
+async function ensureWorkspaceGitRemoteSetup(req = null) {
+  const bareRepoPath = getWorkspaceBareRepoPath();
+  await fsp.mkdir(path.dirname(bareRepoPath), { recursive: true });
+  if (!fs.existsSync(path.join(bareRepoPath, "HEAD"))) {
+    await execFileAsync("git", ["init", "--bare", bareRepoPath]);
+  }
+
+  const remoteName = getWorkspaceGitRemoteName();
+  const setResult = await runGit(["remote", "set-url", remoteName, bareRepoPath], true);
+  if (setResult.code && setResult.code !== 0) {
+    const addResult = await runGit(["remote", "add", remoteName, bareRepoPath], true);
+    const addErr = String(addResult?.stderr || "");
+    if (addResult.code && addResult.code !== 0 && !/already exists/i.test(addErr)) {
+      throw new Error(addErr || "failed to configure workspace git remote");
+    }
+    if (/already exists/i.test(addErr)) {
+      const retrySet = await runGit(["remote", "set-url", remoteName, bareRepoPath], true);
+      if (retrySet.code && retrySet.code !== 0) {
+        throw new Error(String(retrySet.stderr || "failed to update workspace git remote"));
+      }
+    }
+  }
+
+  return {
+    remoteName,
+    remotePath: bareRepoPath,
+    remoteSshUrl: getWorkspaceBareRepoSshUrl(req)
+  };
+}
+
+async function pullWorkspaceFromRemote({ remoteName, branch, strategy }) {
+  const chosenRemote = String(remoteName || getWorkspaceGitRemoteName()).trim() || getWorkspaceGitRemoteName();
+  const chosenBranch = String(branch || "main").trim() || "main";
+  const chosenStrategy = String(strategy || "ff-only").trim().toLowerCase();
+  await runGit(["fetch", chosenRemote]);
+
+  if (chosenStrategy === "hard-reset") {
+    await runGit(["checkout", "-B", chosenBranch, `${chosenRemote}/${chosenBranch}`]);
+  } else if (chosenStrategy === "rebase") {
+    await runGit(["pull", "--rebase", chosenRemote, chosenBranch]);
+  } else {
+    await runGit(["pull", "--ff-only", chosenRemote, chosenBranch]);
+  }
+
+  return {
+    ok: true,
+    remote: chosenRemote,
+    branch: chosenBranch,
+    strategy: chosenStrategy,
+    head: String((await runGit(["rev-parse", "--short", "HEAD"]))?.stdout || "").trim()
+  };
+}
+
+async function pushWorkspaceToRemote({ remoteName, branch, setUpstream, forceWithLease }) {
+  const chosenRemote = String(remoteName || getWorkspaceGitRemoteName()).trim() || getWorkspaceGitRemoteName();
+  const currentBranch = await getCurrentBranchName();
+  const chosenBranch = String(branch || currentBranch || "main").trim() || "main";
+  const args = ["push"];
+  if (setUpstream !== false) {
+    args.push("-u");
+  }
+  if (Boolean(forceWithLease)) {
+    args.push("--force-with-lease");
+  }
+  args.push(chosenRemote, chosenBranch);
+  const result = await runGit(args, true);
+  return {
+    ok: !result.code,
+    remote: chosenRemote,
+    branch: chosenBranch,
+    output: `${result.stdout || ""}${result.stderr || ""}`.trim()
+  };
+}
+
 function utcDateStamp(dateValue = new Date()) {
   return dateValue.toISOString().slice(0, 10);
 }
@@ -302,7 +682,15 @@ async function switchWorkspaceBranch(branchName, createIfMissing = true) {
     if (!createIfMissing) {
       throw new Error(`branch '${target}' does not exist`);
     }
-    await runGit(["checkout", "-b", target]);
+    const createResult = await runGit(["checkout", "-b", target], true);
+    if (createResult.code && createResult.code !== 0) {
+      const stderr = String(createResult.stderr || "");
+      if (/already exists/i.test(stderr)) {
+        await runGit(["checkout", target]);
+      } else {
+        throw new Error(stderr || `failed to create branch '${target}'`);
+      }
+    }
   }
 
   const workspace = getWorkspaceContext();
@@ -441,9 +829,12 @@ async function ensureSandboxReady() {
     await runGit(["init"]);
     await runGit(["config", "user.name", gitUserName]);
     await runGit(["config", "user.email", gitUserEmail]);
+    await runGit(["checkout", "-B", "main"], true);
     await runGit(["add", "-A"]);
     await runGit(["commit", "--allow-empty", "-m", "Initialize sandbox"]);
   }
+
+  await ensureWorkspaceGitRemoteSetup();
   })();
 
   workspaceReadyPromises.set(code, readyPromise);
@@ -1527,6 +1918,53 @@ function getAllowedTerminalCommands() {
   return allowed;
 }
 
+function looksLikePath(value) {
+  return value.includes("/") || value.includes("\\") || value.startsWith(".");
+}
+
+function resolveProjectRelativeExecutable(value) {
+  if (!looksLikePath(value)) {
+    return value;
+  }
+  if (path.isAbsolute(value)) {
+    return value;
+  }
+  return path.resolve(projectRoot, value);
+}
+
+function resolveTerminalInvocation(commandName, args) {
+  const commandArgs = Array.isArray(args) ? args.map((item) => String(item)) : [];
+  if (commandName !== "vfa") {
+    return {
+      command: commandName,
+      args: commandArgs,
+      preferHostRuntime: terminalHostFallbackCommands.has(commandName),
+      resolvedBy: "allowlist"
+    };
+  }
+
+  if (terminalVfaCommand) {
+    return {
+      command: resolveProjectRelativeExecutable(terminalVfaCommand),
+      args: commandArgs,
+      preferHostRuntime: true,
+      resolvedBy: "TERMINAL_VFA_COMMAND"
+    };
+  }
+
+  const vfaScriptPath = resolveProjectRelativeExecutable(terminalVfaScript);
+  if (fs.existsSync(vfaScriptPath)) {
+    return {
+      command: "python3",
+      args: [vfaScriptPath, ...commandArgs],
+      preferHostRuntime: true,
+      resolvedBy: "TERMINAL_VFA_SCRIPT"
+    };
+  }
+
+  throw new Error("command 'vfa' is not available; set TERMINAL_VFA_COMMAND or TERMINAL_VFA_SCRIPT");
+}
+
 function getTerminalIsolationDirs(sandboxRoot) {
   const homeDir = path.join(sandboxRoot, ".home");
   const cacheDir = path.join(sandboxRoot, ".cache");
@@ -1567,7 +2005,7 @@ async function runWorkspaceCommandInDocker(commandName, commandArgs, cwdRel, tim
 }
 
 async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
-  const name = String(commandName || "").trim();
+  const name = String(commandName || "").trim().toLowerCase();
   if (blockedTerminalCommandsAlways.has(name)) {
     throw new Error(`command '${name}' is blocked on this server`);
   }
@@ -1581,7 +2019,15 @@ async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
     throw new Error(`command '${name}' is not allowed`);
   }
 
-  const commandArgs = Array.isArray(args) ? args.map((item) => String(item)) : [];
+  const invocation = resolveTerminalInvocation(name, args);
+  const commandArgs = invocation.args;
+  const commandToExecute = invocation.command;
+  const effectiveRuntime = terminalRuntime === "docker" && !invocation.preferHostRuntime ? "docker" : "host";
+
+  if (effectiveRuntime === "host" && blockedTerminalCommandsHostOnly.has(name)) {
+    throw new Error(`command '${name}' is blocked in host terminal runtime`);
+  }
+
   for (const arg of commandArgs) {
     if (blockedTerminalArgPatterns.some((pattern) => pattern.test(arg))) {
       throw new Error(`argument '${arg}' is not allowed`);
@@ -1604,8 +2050,8 @@ async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
     throw new Error("python -m pip path overrides are blocked");
   }
 
-  const maxTimeout = terminalRuntime === "docker" ? 300000 : 60000;
-  const defaultTimeout = terminalRuntime === "docker" ? 45000 : 15000;
+  const maxTimeout = effectiveRuntime === "docker" ? 300000 : 60000;
+  const defaultTimeout = effectiveRuntime === "docker" ? 45000 : 15000;
   const timeout = Math.max(1000, Math.min(maxTimeout, Number(timeoutMs || defaultTimeout)));
   const { absolute: cwdAbs, rel: cwdRel } = resolveSandboxPath(cwdPath || "");
   const sandboxRoot = getSandboxRoot();
@@ -1665,15 +2111,17 @@ async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
   };
 
   try {
-    const result = terminalRuntime === "docker"
-      ? await runWorkspaceCommandInDocker(name, commandArgs, cwdRel, timeout, sandboxRoot, containerExecEnv)
-      : await execFileAsync(name, commandArgs, { cwd: cwdAbs, timeout, env: hostExecEnv });
+    const result = effectiveRuntime === "docker"
+      ? await runWorkspaceCommandInDocker(commandToExecute, commandArgs, cwdRel, timeout, sandboxRoot, containerExecEnv)
+      : await execFileAsync(commandToExecute, commandArgs, { cwd: cwdAbs, timeout, env: hostExecEnv });
     return {
       ok: true,
       command: name,
+      executable: commandToExecute,
+      resolvedBy: invocation.resolvedBy,
       args: commandArgs,
       cwd: cwdRel,
-      runtime: terminalRuntime,
+      runtime: effectiveRuntime,
       stdout: String(result.stdout || "").slice(0, 12000),
       stderr: String(result.stderr || "").slice(0, 12000)
     };
@@ -1681,9 +2129,11 @@ async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
     return {
       ok: false,
       command: name,
+      executable: commandToExecute,
+      resolvedBy: invocation.resolvedBy,
       args: commandArgs,
       cwd: cwdRel,
-      runtime: terminalRuntime,
+      runtime: effectiveRuntime,
       code: Number(error?.code || 1),
       stdout: String(error?.stdout || "").slice(0, 12000),
       stderr: String(error?.stderr || error?.message || "").slice(0, 12000)
@@ -1727,8 +2177,31 @@ async function runGitOperation(action, params) {
       const result = await runGit(["commit", "-m", message], true);
       return { ok: !result.code, action: op, output: `${result.stdout || ""}${result.stderr || ""}`.trim() };
     }
+    case "remote_info": {
+      const info = await ensureWorkspaceGitRemoteSetup();
+      return { ok: true, action: op, ...info };
+    }
+    case "pull": {
+      const info = await ensureWorkspaceGitRemoteSetup();
+      const result = await pullWorkspaceFromRemote({
+        remoteName: params?.remoteName || info.remoteName,
+        branch: params?.branch,
+        strategy: params?.strategy
+      });
+      return { action: op, ...result, remotePath: info.remotePath, remoteSshUrl: info.remoteSshUrl };
+    }
+    case "push": {
+      const info = await ensureWorkspaceGitRemoteSetup();
+      const result = await pushWorkspaceToRemote({
+        remoteName: params?.remoteName || info.remoteName,
+        branch: params?.branch,
+        setUpstream: params?.setUpstream,
+        forceWithLease: params?.forceWithLease
+      });
+      return { action: op, ...result, remotePath: info.remotePath, remoteSshUrl: info.remoteSshUrl };
+    }
     default:
-      throw new Error("Unsupported git action. Use status, log, diff, add, or commit.");
+      throw new Error("Unsupported git action. Use status, log, diff, add, commit, remote_info, pull, or push.");
   }
 }
 
@@ -2184,6 +2657,96 @@ async function testApiEndpoint(args = {}) {
       status: response.status,
       statusText: response.statusText,
       headers: responseHeaders,
+      bodyText: text.slice(0, 20000)
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function callInternalApiFromAgent(args = {}) {
+  const rawPath = String(args.path || "").trim();
+  if (!rawPath || !rawPath.startsWith("/api/")) {
+    throw new Error("path must start with /api/");
+  }
+  if (rawPath.startsWith("/api/admin/")) {
+    throw new Error("/api/admin endpoints are not available to agent tools");
+  }
+
+  const method = String(args.method || "GET").trim().toUpperCase();
+  const allowedMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]);
+  if (!allowedMethods.has(method)) {
+    throw new Error("unsupported method");
+  }
+
+  const timeoutMs = Math.max(1000, Math.min(30000, Number(args.timeoutMs || 8000)));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const url = new URL(rawPath, appBaseUrl);
+    const query = args?.query;
+    if (query && typeof query === "object") {
+      for (const [key, value] of Object.entries(query)) {
+        if (value == null) {
+          continue;
+        }
+        url.searchParams.set(String(key), String(value));
+      }
+    }
+
+    const headers = {};
+    if (args.headers && typeof args.headers === "object") {
+      for (const [key, value] of Object.entries(args.headers)) {
+        headers[String(key)] = String(value);
+      }
+    }
+
+    const workspaceCode = getWorkspaceContext().code;
+    if (workspaceCode && !headers["x-workspace-code"] && !headers["X-Workspace-Code"]) {
+      headers["x-workspace-code"] = workspaceCode;
+    }
+
+    const security = getEffectiveSecuritySettingsSync();
+    if (security.apiKeyAuthEnabled && security.apiKeys.length > 0) {
+      const hasApiHeader = Object.keys(headers).some((key) => key.toLowerCase() === security.apiKeyHeaderName);
+      if (!hasApiHeader) {
+        headers[security.apiKeyHeaderName] = security.apiKeys[0];
+      }
+    }
+
+    let body;
+    if (args.body != null) {
+      body = typeof args.body === "string" ? args.body : JSON.stringify(args.body);
+      const hasContentType = Object.keys(headers).some((key) => key.toLowerCase() === "content-type");
+      if (!hasContentType) {
+        headers["Content-Type"] = "application/json";
+      }
+    }
+
+    const response = await fetch(url.toString(), { method, headers, body, signal: controller.signal });
+    const text = await response.text();
+    let bodyJson = null;
+    try {
+      bodyJson = text ? JSON.parse(text) : null;
+    } catch {
+      bodyJson = null;
+    }
+
+    const responseHeaders = {};
+    response.headers.forEach((value, key) => {
+      responseHeaders[key] = value;
+    });
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      method,
+      path: url.pathname,
+      query: Object.fromEntries(url.searchParams.entries()),
+      headers: responseHeaders,
+      bodyJson,
       bodyText: text.slice(0, 20000)
     };
   } finally {
@@ -2703,6 +3266,25 @@ const agentToolDefinitions = [
   {
     type: "function",
     function: {
+      name: "call_api",
+      description: "Call this server's internal /api endpoints with workspace and API key headers when needed.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Internal API path like /api/files/list" },
+          method: { type: "string" },
+          query: { type: "object", description: "Optional query params object" },
+          headers: { type: "object", description: "Optional extra request headers" },
+          body: { type: ["object", "string", "number", "boolean", "array", "null"] },
+          timeoutMs: { type: "number" }
+        },
+        required: ["path"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
       name: "manage_permissions",
       description: "Set file or directory mode (chmod) inside sandbox.",
       parameters: {
@@ -3059,6 +3641,17 @@ async function executeAgentTool(req, callName, args) {
       await appendAuditLog(req, "agent-tool", { name: callName, url: args?.url || "", status: result.status, ok: result.ok });
       return result;
     }
+    case "call_api": {
+      const result = await callInternalApiFromAgent(args || {});
+      await appendAuditLog(req, "agent-tool", {
+        name: callName,
+        path: result.path,
+        method: result.method,
+        status: result.status,
+        ok: result.ok
+      });
+      return result;
+    }
     case "manage_permissions": {
       const result = await manageSandboxPermissions(args || {});
       await appendAuditLog(req, "agent-tool", { name: callName, path: result.path, mode: result.mode, recursive: result.recursive });
@@ -3256,7 +3849,53 @@ async function executeAgentTool(req, callName, args) {
   }
 }
 
-async function runOpenAiAgentWithTools(req, model, messages) {
+function resolveAgentStepBudget(req) {
+  const inputError = (message) => {
+    const error = new Error(message);
+    error.status = 400;
+    throw error;
+  };
+
+  const requestedRaw = req.body?.agentMaxStepsOverride ?? req.body?.agentStepOverride?.steps;
+  if (requestedRaw == null || requestedRaw === "") {
+    return { maxSteps: agentMaxSteps, override: false };
+  }
+
+  const requested = Number(requestedRaw);
+  if (!Number.isInteger(requested) || requested < 1) {
+    inputError("agentMaxStepsOverride must be a positive integer");
+  }
+
+  const security = getEffectiveSecuritySettingsSync();
+  const overrideCode = security.agentMaxStepsOverrideCode;
+
+  if (requested <= agentMaxSteps) {
+    return { maxSteps: requested, override: false };
+  }
+
+  if (requested > agentMaxStepsOverrideLimit) {
+    inputError(`agentMaxStepsOverride exceeds limit (${agentMaxStepsOverrideLimit})`);
+  }
+
+  if (!overrideCode) {
+    inputError("agent step override is not enabled on this server");
+  }
+
+  const providedCode = String(
+    req.body?.agentMaxStepsOverrideCode
+      || req.body?.agentStepOverride?.code
+      || req.headers["x-agent-step-override-code"]
+      || ""
+  ).trim();
+
+  if (!providedCode || providedCode !== overrideCode) {
+    inputError("invalid agent step override code");
+  }
+
+  return { maxSteps: requested, override: true };
+}
+
+async function runOpenAiAgentWithTools(req, model, messages, maxSteps = agentMaxSteps) {
   const executedTools = [];
   const latestUserText = [...messages]
     .reverse()
@@ -3271,7 +3910,7 @@ async function runOpenAiAgentWithTools(req, model, messages) {
     ...messages.map((item) => ({ role: item.role, content: item.content }))
   ];
 
-  for (let step = 0; step < agentMaxSteps; step += 1) {
+  for (let step = 0; step < maxSteps; step += 1) {
     const completion = await client.chat.completions.create({
       model,
       messages: conversation,
@@ -3336,7 +3975,34 @@ async function runOpenAiAgentWithTools(req, model, messages) {
     return { text: assistant.content || "", executedTools };
   }
 
-  return { text: "Reached agent step limit before producing a final answer.", executedTools };
+  try {
+    conversation.push({
+      role: "system",
+      content: "Tool execution budget has been reached. Do not call tools. Provide a concise final answer summarizing completed actions, outputs, and any remaining blockers."
+    });
+
+    const finalize = await client.chat.completions.create({
+      model,
+      messages: conversation,
+      tools: agentToolDefinitions,
+      tool_choice: "none"
+    });
+    const finalAssistant = finalize.choices?.[0]?.message;
+    const finalText = String(finalAssistant?.content || "").trim();
+    if (finalText) {
+      return { text: finalText, executedTools };
+    }
+  } catch {
+    // Fall through to deterministic fallback message.
+  }
+
+  const count = executedTools.length;
+  return {
+    text: count > 0
+      ? `Agent step limit reached after executing ${count} tool call(s). Please ask me to continue from current state.`
+      : "Reached agent step limit before producing a final answer.",
+    executedTools
+  };
 }
 
 app.use(helmet({
@@ -3404,6 +4070,42 @@ app.use(
 );
 
 app.use("/api", (req, res, next) => {
+  const security = getEffectiveSecuritySettingsSync();
+  if (!security.apiKeyAuthEnabled || security.apiKeys.length === 0) {
+    next();
+    return;
+  }
+
+  const pathname = new URL(req.originalUrl || req.url || "/", appBaseUrl).pathname;
+  const protectedRoute = pathMatchesAnyPrefix(pathname, security.apiKeyProtectedPathPrefixes);
+  if (!protectedRoute) {
+    next();
+    return;
+  }
+
+  const exemptRoute = pathMatchesAnyPrefix(pathname, security.apiKeyExemptPathPrefixes);
+  if (exemptRoute) {
+    next();
+    return;
+  }
+
+  const headerValue = String(req.headers[security.apiKeyHeaderName] || "").trim();
+  const providedKey = headerValue;
+
+  if (!providedKey || !security.apiKeys.includes(providedKey)) {
+    const hint = security.apiKeyRequireHeaderOnly
+      ? `Provide header ${security.apiKeyHeaderName}`
+      : `Provide header ${security.apiKeyHeaderName}`;
+    return res.status(401).json({
+      error: "API key required for this endpoint",
+      hint
+    });
+  }
+
+  next();
+});
+
+app.use("/api", (req, res, next) => {
   const workspaceCode = resolveRequestedWorkspaceCode(req);
   if (!workspaceCode) {
     return res.status(403).json({ error: "workspace access code is not allowed" });
@@ -3430,6 +4132,74 @@ app.use("/api", (req, res, next) => {
   });
 });
 
+app.use("/api/admin", (req, res, next) => {
+  if (!adminDashboardToken) {
+    return res.status(503).json({ error: "Admin dashboard is disabled: set ADMIN_DASHBOARD_TOKEN" });
+  }
+
+  const provided = String(req.headers["x-admin-token"] || "").trim();
+  if (!provided || provided !== adminDashboardToken) {
+    return res.status(403).json({ error: "Invalid admin token" });
+  }
+
+  next();
+});
+
+app.get("/api/admin/security", async (_req, res) => {
+  try {
+    const settings = await loadAdminSecuritySettings();
+    return res.json({
+      apiKeyAuthEnabled: Boolean(settings.apiKeyAuthEnabled),
+      apiKeyHeaderName: String(settings.apiKeyHeaderName || "x-api-key").trim().toLowerCase() || "x-api-key",
+      apiKeys: normalizeApiKeyList(settings.apiKeys),
+      apiKeyProtectedPathPrefixes: normalizePathPrefixList(settings.apiKeyProtectedPathPrefixes),
+      apiKeyExemptPathPrefixes: normalizePathPrefixList(settings.apiKeyExemptPathPrefixes),
+      apiKeyRequireHeaderOnly: settings.apiKeyRequireHeaderOnly !== false,
+      agentMaxStepsOverrideCode: String(settings.agentMaxStepsOverrideCode || "").trim(),
+      workspaceUploadBypassCodesRaw: String(settings.workspaceUploadBypassCodesRaw || ""),
+      updatedAt: settings.updatedAt || null,
+      settingsDbPath: adminSettingsDbPath
+    });
+  } catch (error) {
+    return res.status(500).json({ error: String(error?.message || "Failed to read admin security settings") });
+  }
+});
+
+app.put("/api/admin/security", async (req, res) => {
+  try {
+    const payload = req.body && typeof req.body === "object" ? req.body : {};
+    const update = {
+      apiKeyAuthEnabled: payload.apiKeyAuthEnabled,
+      apiKeyHeaderName: payload.apiKeyHeaderName,
+      apiKeys: payload.apiKeys,
+      apiKeyProtectedPathPrefixes: payload.apiKeyProtectedPathPrefixes,
+      apiKeyExemptPathPrefixes: payload.apiKeyExemptPathPrefixes,
+      apiKeyRequireHeaderOnly: payload.apiKeyRequireHeaderOnly,
+      agentMaxStepsOverrideCode: payload.agentMaxStepsOverrideCode,
+      workspaceUploadBypassCodesRaw: payload.workspaceUploadBypassCodesRaw
+    };
+
+    const saved = await saveAdminSecuritySettings(update);
+    return res.json({
+      ok: true,
+      settings: {
+        apiKeyAuthEnabled: Boolean(saved.apiKeyAuthEnabled),
+        apiKeyHeaderName: String(saved.apiKeyHeaderName || "x-api-key").trim().toLowerCase() || "x-api-key",
+        apiKeys: normalizeApiKeyList(saved.apiKeys),
+        apiKeyProtectedPathPrefixes: normalizePathPrefixList(saved.apiKeyProtectedPathPrefixes),
+        apiKeyExemptPathPrefixes: normalizePathPrefixList(saved.apiKeyExemptPathPrefixes),
+        apiKeyRequireHeaderOnly: saved.apiKeyRequireHeaderOnly !== false,
+        agentMaxStepsOverrideCode: String(saved.agentMaxStepsOverrideCode || "").trim(),
+        workspaceUploadBypassCodesRaw: String(saved.workspaceUploadBypassCodesRaw || ""),
+        updatedAt: saved.updatedAt || null,
+        settingsDbPath: adminSettingsDbPath
+      }
+    });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to save admin security settings") });
+  }
+});
+
 app.use(
   "/api/chat",
   cors({
@@ -3441,19 +4211,28 @@ app.use(
       callback(new Error("Origin not allowed by CORS."));
     },
     methods: ["POST"],
-    allowedHeaders: ["Content-Type", "X-Workspace-Code"]
+    allowedHeaders: ["Content-Type", "X-Workspace-Code", "X-API-Key"]
   })
 );
 
 app.get("/api/session/workspace", async (req, res) => {
   const context = getWorkspaceContext();
   const currentBranch = await getCurrentBranchName().catch(() => "");
+  const host = workspaceGitSshHost || String(req.headers.host || "").split(":")[0].trim() || "";
+  const remoteSshUrl = host
+    ? `${workspaceGitSshUser}@${host}:${String(context.bareRepoPath || "").replaceAll("\\", "/")}`
+    : "";
   res.json({
     workspaceCode: context.code,
     cookieName: workspaceCookieName,
     constrainedByAllowList: allowedWorkspaceCodes.length > 0,
     autoSessionBranching: enableAutoSessionBranching,
-    currentBranch: currentBranch || workspaceBranchState.get(context.code) || null
+    currentBranch: currentBranch || workspaceBranchState.get(context.code) || null,
+    gitRemote: {
+      remoteName: workspaceGitRemoteName,
+      remotePath: context.bareRepoPath,
+      remoteSshUrl
+    }
   });
 });
 
@@ -3467,6 +4246,58 @@ app.post("/api/session/workspace", (req, res) => {
   }
   setWorkspaceCookie(res, code);
   return res.json({ ok: true, workspaceCode: code });
+});
+
+app.get("/api/session/workspace/git", async (req, res, next) => {
+  try {
+    const info = await ensureWorkspaceGitRemoteSetup(req);
+    return res.json({
+      workspaceCode: getWorkspaceContext().code,
+      ...info
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/session/workspace/git/pull", async (req, res, next) => {
+  try {
+    const info = await ensureWorkspaceGitRemoteSetup(req);
+    const result = await pullWorkspaceFromRemote({
+      remoteName: req.body?.remoteName || info.remoteName,
+      branch: req.body?.branch,
+      strategy: req.body?.strategy
+    });
+    await appendAuditLog(req, "workspace-git-pull", {
+      remoteName: result.remote,
+      branch: result.branch,
+      strategy: result.strategy,
+      head: result.head
+    });
+    return res.json({ workspaceCode: getWorkspaceContext().code, ...info, ...result });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/session/workspace/git/push", async (req, res, next) => {
+  try {
+    const info = await ensureWorkspaceGitRemoteSetup(req);
+    const result = await pushWorkspaceToRemote({
+      remoteName: req.body?.remoteName || info.remoteName,
+      branch: req.body?.branch,
+      setUpstream: req.body?.setUpstream,
+      forceWithLease: req.body?.forceWithLease
+    });
+    await appendAuditLog(req, "workspace-git-push", {
+      remoteName: result.remote,
+      branch: result.branch,
+      ok: result.ok
+    });
+    return res.json({ workspaceCode: getWorkspaceContext().code, ...info, ...result });
+  } catch (error) {
+    return next(error);
+  }
 });
 
 app.get("/api/session/branch", async (req, res, next) => {
@@ -3516,14 +4347,17 @@ app.post("/api/chat", async (req, res) => {
   try {
     if (provider === "openai") {
       const model = resolveModel(req.body?.model);
+      const stepBudget = agentMode ? resolveAgentStepBudget(req) : { maxSteps: agentMaxSteps, override: false };
 
       if (agentMode) {
-        const result = await runOpenAiAgentWithTools(req, model, messages);
+        const result = await runOpenAiAgentWithTools(req, model, messages, stepBudget.maxSteps);
         return res.json({
           reply: result.text,
           model,
           provider: "openai",
           agentMode: true,
+          agentMaxStepsUsed: stepBudget.maxSteps,
+          agentMaxStepsOverrideUsed: stepBudget.override,
           executedTools: result.executedTools
         });
       }
@@ -3614,11 +4448,13 @@ app.post("/api/chat", async (req, res) => {
     const status = error?.status || 500;
     const details = error?.message || "Unknown OpenAI error";
     console.error("Provider request failed:", details);
-    return res.status(status).json({ error: "Failed to generate response." });
+    const message = status >= 400 && status < 500 ? details : "Failed to generate response.";
+    return res.status(status).json({ error: message });
   }
 });
 
 app.get("/api/config", (_req, res) => {
+  const security = getEffectiveSecuritySettingsSync();
   const supportedProviders = ["openai"];
   if (githubPat) {
     supportedProviders.push("copilot");
@@ -3629,7 +4465,19 @@ app.get("/api/config", (_req, res) => {
     defaultModel,
     allowedModels,
     supportedProviders,
-    agentModeSupportedProviders: ["openai"]
+    agentModeSupportedProviders: ["openai"],
+    agentStepOverride: {
+      enabled: Boolean(security.agentMaxStepsOverrideCode),
+      baseMaxSteps: agentMaxSteps,
+      maxOverrideSteps: agentMaxStepsOverrideLimit
+    },
+    apiKeyAuth: {
+      enabled: security.apiKeyAuthEnabled && security.apiKeys.length > 0,
+      headerName: security.apiKeyHeaderName,
+      requireHeaderOnly: security.apiKeyRequireHeaderOnly,
+      protectedPathPrefixes: security.apiKeyProtectedPathPrefixes,
+      exemptPathPrefixes: security.apiKeyExemptPathPrefixes
+    }
   });
 });
 
@@ -3638,8 +4486,12 @@ app.get("/models.csv", (_req, res) => {
 });
 
 app.get("/api/tools", (_req, res) => {
+  const security = getEffectiveSecuritySettingsSync();
   const agentToolNames = agentToolDefinitions.map((tool) => tool.function.name);
   const context = getWorkspaceContext();
+  const workspaceRemotePath = context.bareRepoPath;
+  const host = workspaceGitSshHost || "<ssh-host>";
+  const workspaceRemoteSshUrl = `${workspaceGitSshUser}@${host}:${String(workspaceRemotePath || "").replaceAll("\\", "/")}`;
   res.json({
     sandboxRoot: context.sandboxRoot,
     workspaceCode: context.code,
@@ -3655,15 +4507,47 @@ app.get("/api/tools", (_req, res) => {
       utcHour: workspaceBackupUtcHour,
       retentionDays: workspaceBackupRetentionDays
     },
+    workspaceGitRemote: {
+      remoteName: workspaceGitRemoteName,
+      remotePath: workspaceRemotePath,
+      remoteSshUrl: workspaceRemoteSshUrl
+    },
+    uploadPolicy: {
+      defaultMaxBytes: defaultUploadMaxBytes,
+      bypassHeader: "X-Upload-Bypass-Code",
+      bypassConfiguredForWorkspace: security.workspaceUploadBypassCodes.has(context.code),
+      chunked: {
+        enabled: true,
+        thresholdBytes: chunkUploadThresholdBytes,
+        chunkSizeBytes: chunkUploadChunkSizeBytes,
+        sessionMaxAgeMs: chunkUploadSessionMaxAgeMs
+      }
+    },
+    apiKeyAuth: {
+      enabled: security.apiKeyAuthEnabled && security.apiKeys.length > 0,
+      headerName: security.apiKeyHeaderName,
+      requireHeaderOnly: security.apiKeyRequireHeaderOnly,
+      protectedPathPrefixes: security.apiKeyProtectedPathPrefixes,
+      exemptPathPrefixes: security.apiKeyExemptPathPrefixes
+    },
     terminal: {
       runtime: terminalRuntime,
-      dockerImage: terminalRuntime === "docker" ? terminalDockerImage : null
+      dockerImage: terminalRuntime === "docker" ? terminalDockerImage : null,
+      allowedCommands: Array.from(getAllowedTerminalCommands()).sort(),
+      hostFallbackCommands: Array.from(terminalHostFallbackCommands).sort(),
+      vfa: {
+        commandConfigured: Boolean(terminalVfaCommand),
+        scriptPath: terminalVfaScript
+      }
     },
     notes: [
       "All file operations are constrained to SANDBOX_ROOT and tracked in local git.",
       "Each workspace path is the source-of-truth git repository; optional auto session branches can isolate daily sessions.",
+      "Each workspace also has a bare git remote at WORKSPACE_GIT_REMOTE_ROOT/<workspace>.git for fast external push/pull workflows.",
+      "Optional per-workspace upload bypass codes can remove FILE_API_UPLOAD_MAX_BYTES when sent as X-Upload-Bypass-Code.",
       "Nightly workspace backups create git bundle archives and prune backups older than retention policy.",
       "Terminal tool runs with an isolated per-workspace HOME/cache/env and cannot execute host-admin commands like sudo/apt.",
+      "Archive helpers include 7z and vfa in the terminal allow-list; vfa can resolve from TERMINAL_VFA_COMMAND or TERMINAL_VFA_SCRIPT.",
       "Use /api/files/format before /api/files/write when you want prettified output.",
       "Use /api/files/git/log to inspect snapshots and /api/files/git/revert to roll back.",
       "Set agentMode=true in /api/chat (openai provider) to enable automatic tool-calling."
@@ -3686,6 +4570,7 @@ app.get("/api/tools", (_req, res) => {
       { toolName: "search_replace", description: "Regex-powered file operations", whyUseful: "Bulk edits" },
       { toolName: "export_import_workspace", description: "Save/load full project (ZIP)", whyUseful: "Sync, portability" },
       { toolName: "test_api", description: "API testing from chat", whyUseful: "Dev productivity" },
+      { toolName: "call_api", description: "Call internal server API routes", whyUseful: "Reliable in-app automation" },
       { toolName: "manage_permissions", description: "Set access controls", whyUseful: "Multi-user safety" },
       { toolName: "manage_snapshots", description: "List/create/restore snapshots", whyUseful: "Safe rollback points" },
       { toolName: "diff_merge", description: "Diff refs/paths and merge file from snapshot", whyUseful: "Review + controlled apply" },
@@ -3695,7 +4580,11 @@ app.get("/api/tools", (_req, res) => {
       { toolName: "notify_user", description: "Send alerts/updates", whyUseful: "Responsive UX" }
     ],
     tools: [
+      { method: "GET", path: "/api/openapi.json", purpose: "OpenAPI schema for external tooling and SDK generation" },
       { method: "GET", path: "/api/notifications?limit=100", purpose: "List recent notify_user notifications" },
+      { method: "GET", path: "/api/session/workspace/git", purpose: "Get workspace bare git remote path/URL" },
+      { method: "POST", path: "/api/session/workspace/git/pull", purpose: "Pull remote branch into workspace", body: { remoteName: "origin", branch: "main", strategy: "ff-only" } },
+      { method: "POST", path: "/api/session/workspace/git/push", purpose: "Push workspace branch to remote", body: { remoteName: "origin", branch: "main", setUpstream: true } },
       { method: "GET", path: "/api/files/list?path=src", purpose: "List directory contents" },
       { method: "GET", path: "/api/files/read?path=src/app.js", purpose: "Read UTF-8 text file" },
       { method: "POST", path: "/api/files/write", purpose: "Write file text", body: { path: "src/app.js", content: "..." } },
@@ -3722,6 +4611,107 @@ app.get("/api/tools", (_req, res) => {
       { method: "POST", path: "/api/tests/run", purpose: "Run automated test profile", body: { profile: "npm-test", cwd: "project" } }
     ]
   });
+});
+
+app.get("/api/openapi.json", (_req, res) => {
+  const security = getEffectiveSecuritySettingsSync();
+  const openapi = {
+    openapi: "3.1.0",
+    info: {
+      title: "Remote AI Access API",
+      version: "1.0.0",
+      description: "HTTP API for chat, workspace/file operations, tests, notifications, and admin security settings."
+    },
+    servers: [{ url: appBaseUrl }],
+    components: {
+      securitySchemes: {
+        ApiKeyAuth: {
+          type: "apiKey",
+          in: "header",
+          name: security.apiKeyHeaderName
+        },
+        AdminTokenAuth: {
+          type: "apiKey",
+          in: "header",
+          name: "x-admin-token"
+        }
+      }
+    },
+    paths: {
+      "/api/config": { get: { summary: "Get runtime config" } },
+      "/api/tools": { get: { summary: "Get tool catalog and API metadata" } },
+      "/api/openapi.json": { get: { summary: "Get OpenAPI spec" } },
+      "/api/chat": {
+        post: {
+          summary: "Run chat completion",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { type: "object" }
+              }
+            }
+          }
+        }
+      },
+      "/api/session/workspace": {
+        get: { summary: "Get workspace session info" },
+        post: { summary: "Set active workspace" }
+      },
+      "/api/session/workspace/git": { get: { summary: "Get workspace git remote info" } },
+      "/api/session/workspace/git/pull": { post: { summary: "Pull workspace git remote" } },
+      "/api/session/workspace/git/push": { post: { summary: "Push workspace git remote" } },
+      "/api/session/branch": {
+        get: { summary: "Get active branch" },
+        post: { summary: "Switch branch" }
+      },
+      "/api/notifications": { get: { summary: "List notifications" } },
+      "/api/files/list": { get: { summary: "List directory" } },
+      "/api/files/read": { get: { summary: "Read file" } },
+      "/api/files/write": { post: { summary: "Write file" } },
+      "/api/files/upload": { post: { summary: "Upload file(s)" } },
+      "/api/files/upload/chunk/start": { post: { summary: "Start chunked upload session" } },
+      "/api/files/upload/chunk/{uploadId}": {
+        post: { summary: "Upload chunk bytes" },
+        get: { summary: "Get chunk upload status" }
+      },
+      "/api/files/upload/chunk/{uploadId}/complete": { post: { summary: "Complete chunked upload" } },
+      "/api/files/download": { get: { summary: "Download file" } },
+      "/api/files/move": { post: { summary: "Move path" } },
+      "/api/files/rename": { post: { summary: "Rename path" } },
+      "/api/files/delete": { delete: { summary: "Delete path" } },
+      "/api/files/mkdir": { post: { summary: "Create directory" } },
+      "/api/files/format": { post: { summary: "Format text" } },
+      "/api/files/lint": { post: { summary: "Lint text" } },
+      "/api/files/terminal": { post: { summary: "Run safe terminal command" } },
+      "/api/files/audit": { get: { summary: "List audit entries" } },
+      "/api/files/git/log": { get: { summary: "List git commits" } },
+      "/api/files/git/revert": { post: { summary: "Revert sandbox git state" } },
+      "/api/files/snapshots": {
+        get: { summary: "List snapshots" },
+        post: { summary: "Create snapshot" }
+      },
+      "/api/files/snapshots/restore": { post: { summary: "Restore snapshot" } },
+      "/api/files/diff": { get: { summary: "Diff refs" } },
+      "/api/files/diff/paths": { post: { summary: "Diff paths" } },
+      "/api/files/merge/from-snapshot": { post: { summary: "Merge file from snapshot" } },
+      "/api/files/search": { get: { summary: "Search sandbox" } },
+      "/api/tests/profiles": { get: { summary: "List test profiles" } },
+      "/api/tests/run": { post: { summary: "Run test profile" } },
+      "/api/admin/security": {
+        get: {
+          summary: "Get admin security settings",
+          security: [{ AdminTokenAuth: [] }]
+        },
+        put: {
+          summary: "Update admin security settings",
+          security: [{ AdminTokenAuth: [] }]
+        }
+      }
+    }
+  };
+
+  return res.json(openapi);
 });
 
 app.get("/api/notifications", async (req, res) => {
@@ -3790,40 +4780,221 @@ app.post("/api/files/write", async (req, res) => {
   }
 });
 
-app.post("/api/files/upload", upload.any(), async (req, res) => {
+app.post("/api/files/upload", (req, res, next) => {
+  const requestContext = workspaceContextForCode(req.workspace?.code || defaultWorkspaceCode);
+  workspaceContextStore.run(requestContext, () => {
+    createUploadMiddlewareForRequest(req)(req, res, (error) => {
+      if (!error) {
+        next();
+        return;
+      }
+
+      if (error instanceof multer.MulterError) {
+        if (error.code === "LIMIT_FILE_SIZE") {
+          const bypassProvided = Boolean(getUploadBypassCode(req));
+          if (bypassProvided && !isUploadLimitBypassAllowed(req)) {
+            return res.status(413).json({ error: `unlock code is invalid for workspace '${getWorkspaceContext().code}'` });
+          }
+          return res.status(413).json({ error: `file exceeds max upload size (${defaultUploadMaxBytes} bytes)` });
+        }
+        return res.status(400).json({ error: `upload error: ${error.message}` });
+      }
+
+      return res.status(400).json({ error: String(error?.message || "Failed to parse upload") });
+    });
+  });
+}, async (req, res) => {
+  const requestContext = workspaceContextForCode(req.workspace?.code || defaultWorkspaceCode);
+  return workspaceContextStore.run(requestContext, async () => {
+    try {
+      const uploadedFiles = Array.isArray(req.files) ? req.files : [];
+      if (uploadedFiles.length === 0) {
+        return res.status(400).json({ error: "missing file upload field 'files' or 'file'" });
+      }
+
+      const uploadBase = req.body?.path || "";
+      const { rel: relBase } = resolveSandboxPath(uploadBase);
+      const relativePaths = toArray(req.body?.relativePaths).map((item) => String(item || ""));
+      const saved = [];
+
+      for (let i = 0; i < uploadedFiles.length; i += 1) {
+        const file = uploadedFiles[i];
+        const requestedRelative = normalizeSandboxRelativePath(relativePaths[i] || file.originalname || "upload.bin");
+        const fallbackName = path.basename(file.originalname || "upload.bin");
+        const fileRelative = requestedRelative || fallbackName;
+        const mergedRelative = normalizeSandboxRelativePath(path.join(relBase, fileRelative));
+        const { absolute: targetPath, rel: targetRel } = resolveSandboxPath(mergedRelative);
+        await fsp.mkdir(path.dirname(targetPath), { recursive: true });
+        await fsp.writeFile(targetPath, file.buffer);
+        saved.push({ path: targetRel, size: file.size });
+      }
+
+      await commitSandboxSnapshot(`upload ${saved.length} file(s)`);
+      await appendAuditLog(req, "upload", { base: relBase, count: saved.length, files: saved.map((item) => item.path) });
+
+      if (saved.length === 1) {
+        return res.json({ ok: true, workspaceCode: getWorkspaceContext().code, path: saved[0].path, size: saved[0].size, files: saved });
+      }
+
+      return res.json({ ok: true, workspaceCode: getWorkspaceContext().code, count: saved.length, files: saved });
+    } catch (error) {
+      return res.status(400).json({ error: String(error?.message || "Failed to upload file") });
+    }
+  });
+});
+
+app.post("/api/files/upload/chunk/start", async (req, res) => {
   try {
-    const uploadedFiles = Array.isArray(req.files) ? req.files : [];
-    if (uploadedFiles.length === 0) {
-      return res.status(400).json({ error: "missing file upload field 'files' or 'file'" });
+    cleanupExpiredUploadSessions();
+    const size = Math.max(0, Number(req.body?.size || 0));
+    const basePath = String(req.body?.path || "");
+    const requestedRelative = normalizeSandboxRelativePath(req.body?.relativePath || req.body?.name || "upload.bin");
+    const fallbackName = path.basename(String(req.body?.name || "upload.bin"));
+    const relName = requestedRelative || fallbackName;
+    const { rel: relBase } = resolveSandboxPath(basePath);
+    const mergedRelative = normalizeSandboxRelativePath(path.join(relBase, relName));
+    const { absolute: targetPath, rel: targetRel } = resolveSandboxPath(mergedRelative);
+
+    const bypassAllowed = isUploadLimitBypassAllowed(req);
+    if (!bypassAllowed && size > defaultUploadMaxBytes) {
+      return res.status(413).json({ error: `file exceeds max upload size (${defaultUploadMaxBytes} bytes)` });
     }
 
-    const uploadBase = req.body?.path || "";
-    const { rel: relBase } = resolveSandboxPath(uploadBase);
-    const relativePaths = toArray(req.body?.relativePaths).map((item) => String(item || ""));
-    const saved = [];
+    const uploadRoot = getChunkUploadRoot();
+    await fsp.mkdir(uploadRoot, { recursive: true });
+    const uploadId = makeUploadSessionId();
+    const tempPath = path.join(uploadRoot, `${uploadId}.part`);
+    await fsp.writeFile(tempPath, Buffer.alloc(0));
 
-    for (let i = 0; i < uploadedFiles.length; i += 1) {
-      const file = uploadedFiles[i];
-      const requestedRelative = normalizeSandboxRelativePath(relativePaths[i] || file.originalname || "upload.bin");
-      const fallbackName = path.basename(file.originalname || "upload.bin");
-      const fileRelative = requestedRelative || fallbackName;
-      const mergedRelative = normalizeSandboxRelativePath(path.join(relBase, fileRelative));
-      const { absolute: targetPath, rel: targetRel } = resolveSandboxPath(mergedRelative);
-      await fsp.mkdir(path.dirname(targetPath), { recursive: true });
-      await fsp.writeFile(targetPath, file.buffer);
-      saved.push({ path: targetRel, size: file.size });
-    }
+    const totalChunks = Math.max(1, Math.ceil(size / chunkUploadChunkSizeBytes));
+    uploadSessionStore.set(uploadId, {
+      id: uploadId,
+      workspaceCode: getWorkspaceContext().code,
+      targetRel,
+      targetPath,
+      tempPath,
+      expectedSize: size,
+      totalChunks,
+      nextChunkIndex: 0,
+      receivedBytes: 0,
+      updatedAt: Date.now()
+    });
 
-    await commitSandboxSnapshot(`upload ${saved.length} file(s)`);
-    await appendAuditLog(req, "upload", { base: relBase, count: saved.length, files: saved.map((item) => item.path) });
-
-    if (saved.length === 1) {
-      return res.json({ ok: true, path: saved[0].path, size: saved[0].size, files: saved });
-    }
-
-    return res.json({ ok: true, count: saved.length, files: saved });
+    return res.json({
+      ok: true,
+      workspaceCode: getWorkspaceContext().code,
+      uploadId,
+      path: targetRel,
+      chunkSizeBytes: chunkUploadChunkSizeBytes,
+      totalChunks
+    });
   } catch (error) {
-    return res.status(400).json({ error: String(error?.message || "Failed to upload file") });
+    return res.status(400).json({ error: String(error?.message || "Failed to start chunk upload") });
+  }
+});
+
+app.post("/api/files/upload/chunk/:uploadId", express.raw({ type: "application/octet-stream", limit: `${Math.max(1, Math.ceil(chunkUploadChunkSizeBytes / (1024 * 1024)) + 2)}mb` }), async (req, res) => {
+  try {
+    const uploadId = String(req.params.uploadId || "").trim();
+    if (!uploadId) {
+      return res.status(400).json({ error: "uploadId is required" });
+    }
+
+    const chunkIndex = Number(req.query?.index);
+    if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
+      return res.status(400).json({ error: "chunk index must be a non-negative integer" });
+    }
+
+    const session = getUploadSessionOrThrow(uploadId);
+    if (chunkIndex < session.nextChunkIndex) {
+      return res.json({
+        ok: true,
+        duplicate: true,
+        workspaceCode: getWorkspaceContext().code,
+        uploadId,
+        receivedChunks: session.nextChunkIndex,
+        totalChunks: session.totalChunks,
+        receivedBytes: session.receivedBytes
+      });
+    }
+    if (chunkIndex > session.nextChunkIndex) {
+      return res.status(409).json({ error: `expected chunk index ${session.nextChunkIndex}` });
+    }
+
+    const chunkBuffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || "");
+    if (!chunkBuffer.length) {
+      return res.status(400).json({ error: "chunk body is empty" });
+    }
+
+    await fsp.appendFile(session.tempPath, chunkBuffer);
+    session.nextChunkIndex += 1;
+    session.receivedBytes += chunkBuffer.length;
+    session.updatedAt = Date.now();
+
+    return res.json({
+      ok: true,
+      workspaceCode: getWorkspaceContext().code,
+      uploadId,
+      receivedChunks: session.nextChunkIndex,
+      totalChunks: session.totalChunks,
+      receivedBytes: session.receivedBytes
+    });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to upload chunk") });
+  }
+});
+
+app.get("/api/files/upload/chunk/:uploadId", async (req, res) => {
+  try {
+    const uploadId = String(req.params.uploadId || "").trim();
+    if (!uploadId) {
+      return res.status(400).json({ error: "uploadId is required" });
+    }
+
+    const session = getUploadSessionOrThrow(uploadId);
+    return res.json({
+      ok: true,
+      workspaceCode: getWorkspaceContext().code,
+      uploadId,
+      path: session.targetRel,
+      expectedSize: session.expectedSize,
+      receivedBytes: session.receivedBytes,
+      nextChunkIndex: session.nextChunkIndex,
+      totalChunks: session.totalChunks,
+      done: session.nextChunkIndex >= session.totalChunks
+    });
+  } catch (error) {
+    return res.status(404).json({ error: String(error?.message || "Upload session not found") });
+  }
+});
+
+app.post("/api/files/upload/chunk/:uploadId/complete", async (req, res) => {
+  try {
+    const uploadId = String(req.params.uploadId || "").trim();
+    if (!uploadId) {
+      return res.status(400).json({ error: "uploadId is required" });
+    }
+
+    const session = getUploadSessionOrThrow(uploadId);
+    if (session.nextChunkIndex !== session.totalChunks) {
+      return res.status(409).json({ error: `upload incomplete: ${session.nextChunkIndex}/${session.totalChunks} chunks received` });
+    }
+
+    const stat = await fsp.stat(session.tempPath);
+    if (session.expectedSize > 0 && stat.size !== session.expectedSize) {
+      return res.status(409).json({ error: `upload size mismatch: expected ${session.expectedSize}, got ${stat.size}` });
+    }
+
+    await fsp.mkdir(path.dirname(session.targetPath), { recursive: true });
+    await fsp.rename(session.tempPath, session.targetPath);
+    uploadSessionStore.delete(uploadId);
+
+    await commitSandboxSnapshot(`upload chunked 1 file (${session.targetRel})`);
+    await appendAuditLog(req, "upload-chunked", { path: session.targetRel, size: stat.size });
+
+    return res.json({ ok: true, workspaceCode: getWorkspaceContext().code, path: session.targetRel, size: stat.size });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to complete chunk upload") });
   }
 });
 
@@ -4182,6 +5353,7 @@ app.get("/health", (_req, res) => {
 });
 
 await ensureSandboxReady();
+await loadAdminSecuritySettings();
 scheduleNightlyWorkspaceBackups();
 
 app.listen(port, () => {

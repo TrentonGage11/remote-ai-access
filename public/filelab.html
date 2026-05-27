@@ -43,10 +43,14 @@
           <button id="downloadBtn" class="btn btn-soft" type="button">Download</button>
         </div>
 
+        <div class="path-row">
+          <input id="uploadBypassCodeInput" type="password" placeholder="Upload unlock code (optional)" autocomplete="off" />
+        </div>
+
         <ul id="fileList" class="file-list" aria-label="Directory entries"></ul>
 
-        <input id="fileUploadInput" type="file" multiple hidden />
-        <input id="folderUploadInput" type="file" webkitdirectory directory multiple hidden />
+        <input id="fileUploadInput" class="visually-hidden-file-input" type="file" multiple />
+        <input id="folderUploadInput" class="visually-hidden-file-input" type="file" webkitdirectory directory multiple />
       </section>
 
       <section class="workspace">
@@ -129,6 +133,7 @@
       </section>
     </main>
 
-    <script type="module" src="filelab.js"></script>
+    <script src="api-auth.js"></script>
+    <script type="module" src="filelab.js?v=20260525h"></script>
   </body>
 </html>

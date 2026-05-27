@@ -651,6 +651,15 @@ textarea:focus {
   background: rgba(10, 143, 86, 0.12);
 }
 
+.visually-hidden-file-input {
+  position: absolute;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .action-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -884,6 +893,129 @@ textarea:focus {
 .muted-inline {
   margin: 8px 0 0;
   color: var(--muted);
+}
+
+.overview-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 6px 0 10px;
+}
+
+.meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font: 600 0.78rem/1.2 "Space Grotesk", "Segoe UI", sans-serif;
+  background: rgba(255, 255, 255, 0.56);
+}
+
+[data-theme="dark"] .meta-chip {
+  background: rgba(22, 38, 31, 0.78);
+}
+
+.docs-filter-row input[type="text"] {
+  flex: 1 1 320px;
+  min-width: 220px;
+}
+
+.endpoint-groups {
+  display: grid;
+  gap: 14px;
+}
+
+.endpoint-group h3 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+.endpoint-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.endpoint-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.54);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+[data-theme="dark"] .endpoint-card {
+  background: rgba(19, 32, 26, 0.84);
+}
+
+.endpoint-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.endpoint-path {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.85rem;
+}
+
+.endpoint-purpose {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.method-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font: 700 0.72rem/1 "IBM Plex Mono", monospace;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--line);
+}
+
+.method-get {
+  color: #1468ba;
+  border-color: rgba(20, 104, 186, 0.35);
+  background: rgba(20, 104, 186, 0.08);
+}
+
+.method-post {
+  color: #0d8b58;
+  border-color: rgba(13, 139, 88, 0.35);
+  background: rgba(13, 139, 88, 0.08);
+}
+
+.method-put,
+.method-patch {
+  color: #9a6111;
+  border-color: rgba(154, 97, 17, 0.35);
+  background: rgba(154, 97, 17, 0.08);
+}
+
+.method-delete {
+  color: #bf2e2e;
+  border-color: rgba(191, 46, 46, 0.35);
+  background: rgba(191, 46, 46, 0.08);
+}
+
+.endpoint-details summary {
+  cursor: pointer;
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.endpoint-details .doc-json {
+  margin-top: 8px;
+  max-height: 38vh;
+}
+
+.copy-curl-btn {
+  margin-top: 8px;
 }
 
 .notify-toast-container {

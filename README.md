@@ -12,6 +12,7 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
 - File Lab page with sandboxed file editing and drag/drop upload
 - Local git snapshot tracking for file operations and rollback support
 - API tools reference page for agent/tool calling instructions
+- OpenAPI schema endpoint for machine-readable API discovery
 - Chat Archive page for cross-device export/import of chat history
 - Per-operation audit log page for file and git tool usage
 
@@ -88,6 +89,9 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
    - `search_replace`, `export_import_workspace`
    - `test_api`, `manage_permissions`, `schedule_task`, `notify_user`
 - Tool-calling metadata is exposed from `GET /api/tools`.
+- `run_terminal` now allow-lists `7z`, `7za`, `7zr`, and `vfa`.
+- If `TERMINAL_RUNTIME=docker`, archive tools can still run on host via `TERMINAL_HOST_FALLBACK_COMMANDS`.
+- `vfa` resolves from `TERMINAL_VFA_COMMAND` or falls back to `TERMINAL_VFA_SCRIPT` (default `../VFA/vfa.py`).
 
 ## File tool endpoints
 
@@ -105,6 +109,21 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
 - `POST /api/files/git/revert`
 
 Detailed tool docs are exposed at `api-tools.html` and `GET /api/tools`.
+
+## OpenAPI schema
+
+- `GET /api/openapi.json` returns an OpenAPI 3.1 schema for external tooling and SDK generation.
+
+## Python SDK
+
+- A Python package is included in `python-sdk/`.
+- Install locally:
+
+   pip install -e ./python-sdk
+
+- Import and use:
+
+   from remote_ai_access import RemoteAIAccessClient
 
 ## Deploy notes
 
