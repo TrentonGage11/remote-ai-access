@@ -93,7 +93,10 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
    - `search_replace`, `export_import_workspace`
    - `test_api`, `manage_permissions`, `schedule_task`, `notify_user`
 - Tool-calling metadata is exposed from `GET /api/tools`.
-- `run_terminal` now allow-lists `7z`, `7za`, `7zr`, and `vfa`.
+- `run_terminal` accepts either `{ command: "git", args: ["status"] }` or shell-like command strings such as `git clone https://github.com/org/repo.git repo`, `cd repo && grep -R TODO .`, and `pwd && ls -la && git status 2>&1 || echo "No git repo here"`.
+- `run_terminal` keeps host-admin commands blocked, but now allow-lists common agent setup/exploration tools including Git, package managers, build tools, file tools (`cd`, `cp`, `mv`, `rm`, `chmod`, `grep`, `rg`, `find`, `diff`, `patch`), archive helpers, `7z`, `7za`, `7zr`, and `vfa`.
+- When `TERMINAL_RUNTIME=docker`, additional container-only commands are allowed, including `sh`, `bash`, `dash`, `apt`, `apt-get`, `curl`, `wget`, and `jq`.
+- Set `TERMINAL_EXTRA_COMMANDS=cmd1,cmd2` to add local allow-list commands without changing code. On the server, add it to `/opt/remote-ai-access/.env`, then run `systemctl restart remote-ai-access`.
 - If `TERMINAL_RUNTIME=docker`, archive tools can still run on host via `TERMINAL_HOST_FALLBACK_COMMANDS`.
 - `vfa` resolves from `TERMINAL_VFA_COMMAND` or falls back to `TERMINAL_VFA_SCRIPT` (default `../VFA/vfa.py`).
 

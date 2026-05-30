@@ -51,11 +51,31 @@ const chunkUploadChunkSizeBytes = Math.max(256 * 1024, Number(process.env.FILE_A
 const chunkUploadSessionMaxAgeMs = Math.max(60_000, Number(process.env.FILE_API_CHUNK_SESSION_MAX_AGE_MS || 2 * 60 * 60 * 1000));
 
 const execFileAsync = promisify(execFile);
-const safeTerminalCommands = new Set(["node", "npm", "npx", "python", "python3", "pip", "pip3", "git", "ls", "pwd", "echo", "cat", "grep", "find", "head", "tail", "wc", "7z", "7za", "7zr", "vfa"]);
-const dockerOnlyTerminalCommands = new Set(["apt", "apt-get"]);
+const safeTerminalCommands = new Set([
+  "node", "npm", "npx", "pnpm", "yarn", "bun",
+  "python", "python3", "pip", "pip3", "pytest",
+  "git", "make", "cmake", "go", "cargo", "rustc",
+  "php", "composer", "ruby", "bundle", "java", "javac", "mvn", "gradle",
+  "cd", "ls", "dir", "pwd", "echo", "cat", "type", "grep", "rg", "find", "head", "tail", "wc",
+  "sed", "awk", "sort", "uniq", "cut", "tr", "xargs", "stat", "du", "df", "file",
+  "date", "whoami", "id", "uname", "which", "where", "tree", "env", "printenv",
+  "mkdir", "touch", "cp", "mv", "rm", "rmdir", "chmod",
+  "basename", "dirname", "realpath", "readlink", "tee", "cmp", "diff", "patch",
+  "tar", "zip", "unzip", "7z", "7za", "7zr", "vfa"
+]);
+const dockerOnlyTerminalCommands = new Set(["sh", "bash", "dash", "apt", "apt-get", "curl", "wget", "jq"]);
 const blockedTerminalCommandsAlways = new Set(["sudo", "su", "systemctl", "service", "docker", "podman", "mount", "umount", "chown"]);
 const blockedTerminalCommandsHostOnly = new Set(["apt", "apt-get", "dnf", "yum", "apk", "pacman"]);
 const blockedTerminalArgPatterns = [/^--prefix=/i, /^--root=/i, /^--target=/i];
+const blockedTerminalPathArgPatterns = [
+  /^[a-zA-Z]:[\\/]/,
+  /^[/\\]/,
+  /^~(?:[/\\]|$)/,
+  /(?:^|[/\\])\.\.(?:[/\\]|$)/,
+  /^--[^=]+=([a-zA-Z]:[\\/]|[/\\]|~(?:[/\\]|$))/i
+];
+const shellLikeConditionalOperators = new Set(["&&", "||", ";"]);
+const shellLikeRedirectionTokens = new Set(["2>&1", "1>&2", "1>/dev/null", "2>/dev/null", ">/dev/null"]);
 const scheduledTasks = new Map();
 const notificationStore = [];
 const uploadSessionStore = new Map();
@@ -2304,12 +2324,179 @@ async function unzipSandboxArchive(archivePath, targetPath) {
 
 function getAllowedTerminalCommands() {
   const allowed = new Set(safeTerminalCommands);
+  for (const cmd of String(process.env.TERMINAL_EXTRA_COMMANDS || "")
+    .split(",")
+    .map((item) => String(item || "").trim().toLowerCase())
+    .filter(Boolean)) {
+    allowed.add(cmd);
+  }
   if (terminalRuntime === "docker") {
     for (const cmd of dockerOnlyTerminalCommands) {
       allowed.add(cmd);
     }
   }
   return allowed;
+}
+
+function pushTerminalToken(tokens, token) {
+  if (token) {
+    tokens.push(token);
+  }
+}
+
+function tokenizeTerminalCommandLine(commandLine) {
+  const source = String(commandLine || "").trim();
+  const tokens = [];
+  let token = "";
+  let quote = "";
+  let escaping = false;
+
+  for (let i = 0; i < source.length; i += 1) {
+    const ch = source[i];
+    const next = source[i + 1] || "";
+
+    if (escaping) {
+      token += ch;
+      escaping = false;
+      continue;
+    }
+
+    if (ch === "\\" && quote !== "'") {
+      escaping = true;
+      continue;
+    }
+
+    if (quote) {
+      if (ch === quote) {
+        quote = "";
+      } else {
+        token += ch;
+      }
+      continue;
+    }
+
+    if (ch === "'" || ch === "\"") {
+      quote = ch;
+      continue;
+    }
+
+    if (/\s/.test(ch)) {
+      pushTerminalToken(tokens, token);
+      token = "";
+      continue;
+    }
+
+    if ((ch === "&" && next === "&") || (ch === "|" && next === "|")) {
+      pushTerminalToken(tokens, token);
+      token = "";
+      tokens.push(`${ch}${next}`);
+      i += 1;
+      continue;
+    }
+
+    if (ch === ";") {
+      pushTerminalToken(tokens, token);
+      token = "";
+      tokens.push(";");
+      continue;
+    }
+
+    token += ch;
+  }
+
+  if (escaping) {
+    token += "\\";
+  }
+
+  if (quote) {
+    throw new Error("command contains an unterminated quote");
+  }
+
+  pushTerminalToken(tokens, token);
+  return tokens;
+}
+
+function cleanTerminalArgs(tokens) {
+  return tokens.filter((token) => {
+    const value = String(token || "").trim();
+    return value && !shellLikeRedirectionTokens.has(value);
+  });
+}
+
+function parseTerminalCommandSegments(commandName, args) {
+  if (Array.isArray(args) && args.length > 0) {
+    return [{
+      operator: "start",
+      command: String(commandName || "").trim(),
+      args: args.map((item) => String(item))
+    }];
+  }
+
+  const tokens = tokenizeTerminalCommandLine(commandName);
+  if (tokens.length === 0) {
+    throw new Error("command is required");
+  }
+
+  const segments = [];
+  let pendingOperator = "start";
+  let current = [];
+
+  const pushSegment = () => {
+    const clean = cleanTerminalArgs(current);
+    if (clean.length === 0) {
+      throw new Error("command contains an empty segment");
+    }
+    segments.push({
+      operator: pendingOperator,
+      command: clean[0],
+      args: clean.slice(1)
+    });
+    current = [];
+  };
+
+  for (const token of tokens) {
+    if (shellLikeConditionalOperators.has(token)) {
+      pushSegment();
+      pendingOperator = token;
+      continue;
+    }
+    current.push(token);
+  }
+
+  pushSegment();
+  return segments;
+}
+
+function isTerminalArgOutsideWorkspace(arg) {
+  const value = String(arg || "").trim();
+  if (!value || /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value)) {
+    return false;
+  }
+  return blockedTerminalPathArgPatterns.some((pattern) => pattern.test(value));
+}
+
+function isAbsoluteOrHomeTerminalPath(value) {
+  return /^[a-zA-Z]:[\\/]/.test(value)
+    || /^[/\\]/.test(value)
+    || /^~(?:[/\\]|$)/.test(value);
+}
+
+async function resolveTerminalCwdPath(cwdPath, nextPath) {
+  const currentRel = resolveSandboxPath(cwdPath || "").rel;
+  const rawNext = String(nextPath || "").trim();
+  if (!rawNext || rawNext === ".") {
+    return currentRel;
+  }
+  if (isAbsoluteOrHomeTerminalPath(rawNext)) {
+    throw new Error(`cd target '${rawNext}' points outside the workspace`);
+  }
+  const joined = path.posix.normalize(path.posix.join((currentRel || "").replaceAll("\\", "/"), rawNext.replaceAll("\\", "/")));
+  const { absolute, rel } = resolveSandboxPath(joined);
+  const stat = await fsp.stat(absolute);
+  if (!stat.isDirectory()) {
+    throw new Error(`cd target '${rawNext}' is not a directory`);
+  }
+  return rel === "." ? "" : rel;
 }
 
 function looksLikePath(value) {
@@ -2398,7 +2585,7 @@ async function runWorkspaceCommandInDocker(commandName, commandArgs, cwdRel, tim
   return execFileAsync("docker", dockerArgs, { timeout });
 }
 
-async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
+async function runSingleSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
   const name = String(commandName || "").trim().toLowerCase();
   if (blockedTerminalCommandsAlways.has(name)) {
     throw new Error(`command '${name}' is blocked on this server`);
@@ -2413,6 +2600,24 @@ async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
     throw new Error(`command '${name}' is not allowed`);
   }
 
+  if (name === "cd") {
+    if (args.length > 1) {
+      throw new Error("cd accepts at most one target path");
+    }
+    const cwdRel = await resolveTerminalCwdPath(cwdPath || "", args[0] || "");
+    return {
+      ok: true,
+      command: name,
+      executable: "virtual-cd",
+      resolvedBy: "virtual-command",
+      args,
+      cwd: cwdRel,
+      runtime: "virtual",
+      stdout: "",
+      stderr: ""
+    };
+  }
+
   const invocation = resolveTerminalInvocation(name, args);
   const commandArgs = invocation.args;
   const commandToExecute = invocation.command;
@@ -2425,6 +2630,9 @@ async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
   for (const arg of commandArgs) {
     if (blockedTerminalArgPatterns.some((pattern) => pattern.test(arg))) {
       throw new Error(`argument '${arg}' is not allowed`);
+    }
+    if (isTerminalArgOutsideWorkspace(arg)) {
+      throw new Error(`argument '${arg}' points outside the workspace`);
     }
   }
 
@@ -2533,6 +2741,87 @@ async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
       stderr: String(error?.stderr || error?.message || "").slice(0, 12000)
     };
   }
+}
+
+function shouldRunTerminalSegment(operator, previousResult) {
+  if (!previousResult || operator === "start" || operator === ";") {
+    return true;
+  }
+  if (operator === "&&") {
+    return Boolean(previousResult.ok);
+  }
+  if (operator === "||") {
+    return !previousResult.ok;
+  }
+  return false;
+}
+
+function summarizeTerminalSegment(result) {
+  return {
+    command: result.command,
+    executable: result.executable,
+    resolvedBy: result.resolvedBy,
+    args: result.args,
+    cwd: result.cwd,
+    runtime: result.runtime,
+    ok: result.ok,
+    code: result.code || 0,
+    stdout: result.stdout,
+    stderr: result.stderr
+  };
+}
+
+async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
+  const segments = parseTerminalCommandSegments(commandName, args);
+
+  if (segments.length === 1) {
+    return runSingleSafeTerminalCommand(segments[0].command, segments[0].args, cwdPath, timeoutMs);
+  }
+
+  const results = [];
+  let previousResult = null;
+  let currentCwd = resolveSandboxPath(cwdPath || "").rel;
+
+  for (const segment of segments) {
+    if (!shouldRunTerminalSegment(segment.operator, previousResult)) {
+      results.push({
+        operator: segment.operator,
+        command: String(segment.command || "").trim().toLowerCase(),
+        args: segment.args,
+        skipped: true
+      });
+      continue;
+    }
+
+    const result = await runSingleSafeTerminalCommand(segment.command, segment.args, currentCwd, timeoutMs);
+    previousResult = result;
+    if (result.ok && typeof result.cwd === "string") {
+      currentCwd = result.cwd;
+    }
+    results.push({
+      operator: segment.operator,
+      ...summarizeTerminalSegment(result)
+    });
+  }
+
+  const executedResults = results.filter((result) => !result.skipped);
+  const finalResult = executedResults[executedResults.length - 1] || { ok: true, code: 0, cwd: "" };
+  const stdout = executedResults.map((result) => result.stdout || "").filter(Boolean).join("");
+  const stderr = executedResults.map((result) => result.stderr || "").filter(Boolean).join("");
+
+  return {
+    ok: Boolean(finalResult.ok),
+    command: String(commandName || "").trim(),
+    executable: "command-line",
+    resolvedBy: "parsed-command-line",
+    args: [],
+    cwd: finalResult.cwd || "",
+    runtime: "mixed",
+    code: finalResult.code || 0,
+    stdout: stdout.slice(0, 12000),
+    stderr: stderr.slice(0, 12000),
+    commands: results
+  };
 }
 
 async function runGitOperation(action, params) {
@@ -3524,7 +3813,7 @@ const agentToolDefinitions = [
     type: "function",
     function: {
       name: "run_terminal",
-      description: "Run a safe allow-listed terminal command without shell expansion.",
+      description: "Run safe allow-listed terminal commands. Accepts either command+args or a simple shell-like command line with quotes, &&, ||, and ;.",
       parameters: {
         type: "object",
         properties: {
@@ -5419,6 +5708,8 @@ app.get("/api/tools", (_req, res) => {
       "Optional per-workspace upload bypass codes can remove FILE_API_UPLOAD_MAX_BYTES when sent as X-Upload-Bypass-Code.",
       "Nightly workspace backups create git bundle archives and prune backups older than retention policy.",
       "Terminal tool runs with an isolated per-workspace HOME/cache/env and cannot execute host-admin commands like sudo/apt.",
+      "Terminal accepts command strings such as `git clone https://github.com/org/repo.git repo`, `cd repo && grep -R TODO .`, and simple conditional chains like `pwd && ls -la && git status 2>&1 || echo no repo`.",
+      "Set TERMINAL_EXTRA_COMMANDS=cmd1,cmd2 to add more allow-listed commands from server config.",
       "Archive helpers include 7z and vfa in the terminal allow-list; vfa can resolve from TERMINAL_VFA_COMMAND or TERMINAL_VFA_SCRIPT.",
       "Use /api/files/format before /api/files/write when you want prettified output.",
       "Use /api/files/git/log to inspect snapshots and /api/files/git/revert to roll back.",
@@ -5434,7 +5725,7 @@ app.get("/api/tools", (_req, res) => {
       { toolName: "rename_file", description: "Rename/move files/folders", whyUseful: "Reorganize easily" },
       { toolName: "create_directory", description: "Create new folders", whyUseful: "Structured workspace" },
       { toolName: "zip_unzip", description: "Archive/extract files/folders", whyUseful: "Export/import, backups" },
-      { toolName: "run_terminal", description: "Run safe shell commands", whyUseful: "Automation, scripts" },
+      { toolName: "run_terminal", description: "Run safe allow-listed terminal commands", whyUseful: "Automation, scripts" },
       { toolName: "git_ops", description: "Source control actions", whyUseful: "Versioning, collaboration" },
       { toolName: "preview_markdown", description: "Render Markdown/HTML", whyUseful: "See docs/output as intended" },
       { toolName: "convert_format", description: "Change between file formats", whyUseful: "Flexibility, data handling" },
@@ -5468,7 +5759,7 @@ app.get("/api/tools", (_req, res) => {
       { method: "POST", path: "/api/files/mkdir", purpose: "Create directory", body: { path: "docs" } },
       { method: "POST", path: "/api/files/format", purpose: "Format text using Prettier", body: { path: "src/app.js", content: "...", write: false } },
       { method: "POST", path: "/api/files/lint", purpose: "Lint JS/TS code with ESLint", body: { path: "src/app.ts", content: "..." } },
-      { method: "POST", path: "/api/files/terminal", purpose: "Run allow-listed command in isolated workspace terminal env", body: { command: "npm", args: ["install", "lodash"], cwd: "", timeoutMs: 20000 } },
+      { method: "POST", path: "/api/files/terminal", purpose: "Run allow-listed command in isolated workspace terminal env", body: { command: "git clone https://github.com/org/repo.git repo && git -C repo status", cwd: "", timeoutMs: 120000 } },
       { method: "GET", path: "/api/files/audit?limit=200", purpose: "Read per-operation audit entries" },
       { method: "GET", path: "/api/files/git/log?limit=20", purpose: "List sandbox commits" },
       { method: "POST", path: "/api/files/git/revert", purpose: "Hard reset sandbox to a commit", body: { ref: "HEAD~1" } },
