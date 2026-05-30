@@ -514,12 +514,14 @@ function updateMinimapViewport() {
   }
 
   const paneHeight = Math.max(1, minimapPaneEl.clientHeight);
-  const ratio = paneHeight / Math.max(1, scroller.scrollHeight);
-  const top = scroller.scrollTop * ratio;
-  const height = Math.max(18, scroller.clientHeight * ratio);
+  const scrollHeight = Math.max(1, scroller.scrollHeight);
+  const ratio = paneHeight / scrollHeight;
+  const viewportHeight = Math.min(paneHeight, Math.max(18, scroller.clientHeight * ratio));
+  const maxTop = Math.max(0, paneHeight - viewportHeight);
+  const top = Math.min(maxTop, Math.max(0, scroller.scrollTop * ratio));
 
-  minimapViewportEl.style.top = `${Math.min(top, Math.max(0, paneHeight - 18))}px`;
-  minimapViewportEl.style.height = `${Math.min(paneHeight, height)}px`;
+  minimapViewportEl.style.top = `${top}px`;
+  minimapViewportEl.style.height = `${viewportHeight}px`;
 }
 
 function bindMinimapScroller() {
@@ -558,7 +560,16 @@ function renderMinimap() {
   ctx.fillRect(0, 0, width, height);
 
   const lines = view.state.doc.toString().split("\n");
-  const lineCount = Math.max(1, lines.length);
+  const scroller = getEditorScroller();
+  const computedLineHeight = Number.parseFloat(window.getComputedStyle(view.contentDOM).lineHeight);
+  const fallbackLineHeight = Math.max(1, currentFontSize * 1.4);
+  const lineHeightPx = Number.isFinite(computedLineHeight) && computedLineHeight > 0
+    ? computedLineHeight
+    : fallbackLineHeight;
+  const visualLineCount = scroller
+    ? Math.max(lines.length, Math.ceil(scroller.scrollHeight / lineHeightPx))
+    : lines.length;
+  const lineCount = Math.max(1, visualLineCount);
   const lineStep = Math.max(height / lineCount, 0.5);
   const barHeight = Math.max(1, lineStep * 0.9);
 
@@ -654,6 +665,25 @@ function initTheme() {
 
 function setStatus(text) {
   fileStatusEl.textContent = text;
+}
+
+function getStoredApiAuthHeader() {
+  try {
+    const authApi = window.RemoteAiAuth;
+    if (!authApi || typeof authApi.getApiKey !== "function") {
+      return null;
+    }
+    const key = String(authApi.getApiKey() || "").trim();
+    if (!key) {
+      return null;
+    }
+    const headerName = typeof authApi.getApiKeyHeaderName === "function"
+      ? String(authApi.getApiKeyHeaderName() || "x-api-key").trim() || "x-api-key"
+      : "x-api-key";
+    return { headerName, key };
+  } catch {
+    return null;
+  }
 }
 
 function normalizeUploadBypassCode(value) {
@@ -852,9 +882,65 @@ async function apiJson(url, options = {}) {
   const response = await fetch(url, options);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      const base = data.error || "Access denied.";
+      throw new Error(`${base} Set your API key in Security Admin, then retry.`);
+    }
     throw new Error(data.error || `Request failed (${response.status})`);
   }
   return data;
+}
+
+function parseDownloadFilename(contentDisposition, fallbackPath) {
+  const fallbackName = String(fallbackPath || "download").split(/[\\/]/).pop() || "download";
+  const header = String(contentDisposition || "");
+
+  const utf8Match = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+
+  const basicMatch = header.match(/filename="?([^";]+)"?/i);
+  if (basicMatch?.[1]) {
+    return basicMatch[1];
+  }
+
+  return fallbackName;
+}
+
+async function downloadActiveFile(path) {
+  const query = new URLSearchParams({ path }).toString();
+  const headers = {};
+  const apiAuth = getStoredApiAuthHeader();
+  if (apiAuth) {
+    headers[apiAuth.headerName] = apiAuth.key;
+  }
+
+  const response = await fetch(`/api/files/download?${query}`, {
+    method: "GET",
+    headers
+  });
+
+  if (!response.ok) {
+    const maybeJson = await response.json().catch(() => null);
+    const message = maybeJson?.error || `Download failed (${response.status})`;
+    throw new Error(message);
+  }
+
+  const blob = await response.blob();
+  const name = parseDownloadFilename(response.headers.get("content-disposition"), path);
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(objectUrl);
 }
 
 function normalizeRelativePath(value) {
@@ -988,6 +1074,10 @@ async function uploadFilesChunked(files, bypassCode, totalBytes) {
   const requestHeaders = {};
   if (bypassCode) {
     requestHeaders["X-Upload-Bypass-Code"] = bypassCode;
+  }
+  const apiAuth = getStoredApiAuthHeader();
+  if (apiAuth) {
+    requestHeaders[apiAuth.headerName] = apiAuth.key;
   }
 
   let uploadedOverall = 0;
@@ -1572,13 +1662,17 @@ deleteBtnEl.addEventListener("click", () => {
   deleteSelected().catch((error) => setStatus(`Error: ${error.message}`));
 });
 
-downloadBtnEl.addEventListener("click", () => {
+downloadBtnEl.addEventListener("click", async () => {
   if (!activeFilePath) {
     setStatus("Select a file first.");
     return;
   }
-  const query = new URLSearchParams({ path: activeFilePath }).toString();
-  window.location.href = `/api/files/download?${query}`;
+  try {
+    await downloadActiveFile(activeFilePath);
+    setStatus(`Downloaded ${activeFilePath}`);
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
 });
 
 gitLogBtnEl.addEventListener("click", async () => {

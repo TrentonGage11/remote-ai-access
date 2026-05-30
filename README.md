@@ -45,6 +45,10 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
 - `APP_BASE_URL`: for CSP/connect settings, ex: `http://localhost:8787`
 - `OPENAI_API_KEY`: required
 - `OPENAI_MODEL`: default `gpt-4.1` (change to your preferred available model)
+- `XAI_API_KEY`: optional; enables `xai` provider (Grok)
+- `XAI_MODEL`: default xAI model (default `grok-4.3`)
+- `XAI_API_BASE_URL`: xAI OpenAI-compatible base URL (default `https://api.x.ai/v1`)
+- `XAI_ALLOWED_MODELS`: optional comma-separated xAI allow-list
 - `ENABLE_BASIC_AUTH`: `true` or `false`
 - `BASIC_AUTH_USER`, `BASIC_AUTH_PASS`: only used if basic auth enabled
 - `ALLOWED_ORIGINS`: optional comma-separated CORS allowlist for `/api/chat`

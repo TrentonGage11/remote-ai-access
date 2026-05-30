@@ -59,7 +59,9 @@ const blockedTerminalArgPatterns = [/^--prefix=/i, /^--root=/i, /^--target=/i];
 const scheduledTasks = new Map();
 const notificationStore = [];
 const uploadSessionStore = new Map();
+const chatJobStore = new Map();
 let scheduledTaskCounter = 0;
+let chatJobCounter = 0;
 const workspaceContextStore = new AsyncLocalStorage();
 const workspaceReadyPromises = new Map();
 const workspaceBranchState = new Map();
@@ -78,20 +80,34 @@ const terminalHostFallbackCommands = new Set(
 const terminalVfaCommand = String(process.env.TERMINAL_VFA_COMMAND || "").trim();
 const terminalVfaScript = String(process.env.TERMINAL_VFA_SCRIPT || "../VFA/vfa.py").trim() || "../VFA/vfa.py";
 let workspaceBackupTimer = null;
+let lastAuditRetentionRunAt = 0;
 
 const port = Number(process.env.PORT || 8787);
 const appBaseUrl = process.env.APP_BASE_URL || `http://localhost:${port}`;
 const defaultModel = process.env.OPENAI_MODEL || "gpt-4.1";
 const defaultProvider = "openai";
+const xaiDefaultModel = process.env.XAI_MODEL || "grok-4.3";
 const agentMaxStepsHardLimit = Math.max(16, Math.min(4096, Number(process.env.AGENT_MAX_STEPS_HARD_LIMIT || 1024)));
 const agentMaxSteps = Math.max(1, Math.min(agentMaxStepsHardLimit, Number(process.env.AGENT_MAX_STEPS || 16)));
 const agentMaxStepsOverrideLimit = Math.max(agentMaxSteps, Math.min(agentMaxStepsHardLimit, Number(process.env.AGENT_MAX_STEPS_OVERRIDE_LIMIT || 40)));
 const agentMaxStepsOverrideCode = String(process.env.AGENT_MAX_STEPS_OVERRIDE_CODE || "").trim();
-const agentWebTimeoutMs = Math.max(1000, Math.min(20000, Number(process.env.AGENT_WEB_TIMEOUT_MS || 8000)));
+const agentWebTimeoutMs = Math.max(1000, Math.min(40000, Number(process.env.AGENT_WEB_TIMEOUT_MS || 16000)));
+const chatJobMaxAgeMs = Math.max(60_000, Math.min(24 * 60 * 60 * 1000, Number(process.env.CHAT_JOB_MAX_AGE_MS || 2 * 60 * 60 * 1000)));
+const chatJobMaxEntries = Math.max(20, Math.min(2000, Number(process.env.CHAT_JOB_MAX_ENTRIES || 300)));
+const chatJobEventHistoryMax = Math.max(20, Math.min(4000, Number(process.env.CHAT_JOB_EVENT_HISTORY_MAX || 240)));
+const auditLogMaxBytes = Math.max(128 * 1024, Math.min(64 * 1024 * 1024, Number(process.env.AUDIT_LOG_MAX_BYTES || 8 * 1024 * 1024)));
+const auditRetentionDays = Math.max(1, Math.min(365, Number(process.env.AUDIT_RETENTION_DAYS || 14)));
+const auditRetentionPruneIntervalMs = Math.max(30_000, Math.min(60 * 60 * 1000, Number(process.env.AUDIT_RETENTION_PRUNE_INTERVAL_MS || 5 * 60 * 1000)));
 const githubPat = String(process.env.GITHUB_PAT || process.env.GITHUB_TOKEN || "").trim();
+const xaiApiKey = String(process.env.XAI_API_KEY || "").trim();
+const xaiApiBaseUrl = String(process.env.XAI_API_BASE_URL || "https://api.x.ai/v1").trim().replace(/\/+$/, "");
 const copilotApiBaseUrl = String(process.env.COPILOT_API_BASE_URL || "https://models.github.ai/inference").trim();
 const copilotApiVersion = String(process.env.COPILOT_API_VERSION || "2026-03-10").trim();
 const allowedModels = String(process.env.OPENAI_ALLOWED_MODELS || "")
+  .split(",")
+  .map((item) => item.trim())
+  .filter(Boolean);
+const xaiAllowedModels = String(process.env.XAI_ALLOWED_MODELS || "")
   .split(",")
   .map((item) => item.trim())
   .filter(Boolean);
@@ -122,12 +138,12 @@ let adminSettingsCache = null;
 let adminSettingsLoaded = false;
 
 const openaiApiKey = process.env.OPENAI_API_KEY;
-if (!openaiApiKey) {
-  console.error("Missing OPENAI_API_KEY in environment.");
+if (!openaiApiKey && !xaiApiKey && !githubPat) {
+  console.error("Missing provider credentials. Set at least one of OPENAI_API_KEY, XAI_API_KEY, or GITHUB_PAT/GITHUB_TOKEN.");
   process.exit(1);
 }
 
-const client = new OpenAI({ apiKey: openaiApiKey });
+const client = openaiApiKey ? new OpenAI({ apiKey: openaiApiKey }) : null;
 
 // This app runs behind Apache reverse proxy in production.
 app.set("trust proxy", 1);
@@ -150,6 +166,33 @@ function resolveModel(requestedModel) {
   }
 
   return requestedModel;
+}
+
+function isValidXaiModelName(value) {
+  return typeof value === "string" && /^[a-zA-Z0-9._-]{2,80}$/.test(value);
+}
+
+function resolveXaiModel(requestedModel) {
+  if (!isValidXaiModelName(requestedModel)) {
+    return xaiDefaultModel;
+  }
+
+  if (xaiAllowedModels.length > 0 && !xaiAllowedModels.includes(requestedModel)) {
+    return xaiDefaultModel;
+  }
+
+  return requestedModel;
+}
+
+function normalizeReasoningEffort(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (["none", "minimal", "low", "medium", "high", "xhigh"].includes(normalized)) {
+    return normalized;
+  }
+  return null;
 }
 
 function normalizeSandboxRelativePath(inputPath) {
@@ -850,32 +893,367 @@ async function commitSandboxSnapshot(message) {
   }
 }
 
+function createTraceId() {
+  return `tr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function resolveRequestTraceId(req) {
+  const fromReq = String(req?.traceId || "").trim();
+  if (fromReq) {
+    return fromReq;
+  }
+  const fromHeader = String(req?.headers?.["x-trace-id"] || req?.headers?.["x-request-id"] || "").trim();
+  if (fromHeader) {
+    return fromHeader.slice(0, 120);
+  }
+  const fromBody = String(req?.body?.traceId || "").trim();
+  if (fromBody) {
+    return fromBody.slice(0, 120);
+  }
+  return "";
+}
+
+function isSensitiveKeyName(keyPath) {
+  return /(authorization|api[_-]?key|token|secret|password|passwd|cookie|session|bearer|private[_-]?key|client[_-]?secret)/i.test(String(keyPath || ""));
+}
+
+function looksSensitiveString(value) {
+  const text = String(value || "");
+  if (!text) {
+    return false;
+  }
+  if (/^bearer\s+/i.test(text)) {
+    return true;
+  }
+  if (/^sk-[A-Za-z0-9]/.test(text)) {
+    return true;
+  }
+  if (/gh[pousr]_[A-Za-z0-9_]+/i.test(text)) {
+    return true;
+  }
+  if (/-----BEGIN [A-Z ]+PRIVATE KEY-----/.test(text)) {
+    return true;
+  }
+  return false;
+}
+
+function redactString(value) {
+  const text = String(value || "");
+  if (!text) {
+    return "[redacted]";
+  }
+  const visible = Math.min(4, Math.max(0, text.length - 4));
+  if (visible <= 0) {
+    return "[redacted]";
+  }
+  return `[redacted:${text.slice(0, visible)}...len=${text.length}]`;
+}
+
 async function appendAuditLog(req, operation, details = {}) {
   const auditLogPath = getAuditLogPath();
   const workspace = getWorkspaceContext();
   const entry = {
     timestamp: new Date().toISOString(),
     operation,
+    traceId: resolveRequestTraceId(req) || createTraceId(),
     workspaceCode: workspace.code,
     ip: req.ip,
     userAgent: String(req.headers["user-agent"] || "").slice(0, 240),
-    details
+    details: sanitizeAuditPayload(details)
   };
   try {
     await fsp.appendFile(auditLogPath, `${JSON.stringify(entry)}\n`, "utf8");
+    const now = Date.now();
+    if (now - lastAuditRetentionRunAt > auditRetentionPruneIntervalMs) {
+      lastAuditRetentionRunAt = now;
+      await pruneAuditEntries();
+    }
   } catch (error) {
     console.error("Failed to append audit log:", error?.message || error);
   }
 }
 
-async function readAuditEntries(limit = 200) {
+function sanitizeAuditPayload(value, depth = 0, keyPath = "") {
+  if (value == null) {
+    return value;
+  }
+  if (depth > 6) {
+    return "[depth-limit]";
+  }
+  const type = typeof value;
+  if (type === "number" || type === "boolean") {
+    return value;
+  }
+  if (type === "string") {
+    if (isSensitiveKeyName(keyPath) || looksSensitiveString(value)) {
+      return redactString(value);
+    }
+    return value.length > 2000 ? `${value.slice(0, 2000)}...[truncated]` : value;
+  }
+  if (Array.isArray(value)) {
+    const limited = value.slice(0, 50).map((item, index) => sanitizeAuditPayload(item, depth + 1, `${keyPath}[${index}]`));
+    if (value.length > 50) {
+      limited.push(`[+${value.length - 50} more items]`);
+    }
+    return limited;
+  }
+  if (type === "object") {
+    const out = {};
+    const entries = Object.entries(value).slice(0, 80);
+    for (const [key, item] of entries) {
+      const nextPath = keyPath ? `${keyPath}.${key}` : key;
+      if (isSensitiveKeyName(nextPath)) {
+        out[key] = redactString(item);
+      } else {
+        out[key] = sanitizeAuditPayload(item, depth + 1, nextPath);
+      }
+    }
+    const remaining = Object.keys(value).length - entries.length;
+    if (remaining > 0) {
+      out.__truncatedKeys = remaining;
+    }
+    return out;
+  }
+  return String(value);
+}
+
+function pruneChatJobs() {
+  const now = Date.now();
+  for (const [id, job] of chatJobStore.entries()) {
+    const age = now - Number(new Date(job.updatedAt || job.createdAt || 0).getTime() || 0);
+    if (age > chatJobMaxAgeMs) {
+      closeChatJobStreams(job);
+      chatJobStore.delete(id);
+    }
+  }
+
+  if (chatJobStore.size <= chatJobMaxEntries) {
+    return;
+  }
+
+  const sorted = [...chatJobStore.values()]
+    .sort((a, b) => Number(new Date(a.createdAt).getTime()) - Number(new Date(b.createdAt).getTime()));
+  const removeCount = chatJobStore.size - chatJobMaxEntries;
+  for (let i = 0; i < removeCount; i += 1) {
+    const id = sorted[i]?.id;
+    if (id) {
+      closeChatJobStreams(chatJobStore.get(id));
+      chatJobStore.delete(id);
+    }
+  }
+}
+
+function createChatJob(req, provider, agentMode) {
+  pruneChatJobs();
+  const id = `job-${Date.now()}-${chatJobCounter++}`;
+  const traceId = resolveRequestTraceId(req) || createTraceId();
+  const workspace = getWorkspaceContext();
+  const createdAt = new Date().toISOString();
+  const job = {
+    id,
+    traceId,
+    status: "queued",
+    provider,
+    agentMode: Boolean(agentMode),
+    workspaceCode: workspace.code,
+    createdAt,
+    updatedAt: createdAt,
+    cancelRequested: false,
+    cancelledAt: null,
+    listeners: new Set(),
+    events: [],
+    abortController: null,
+    result: null,
+    error: null
+  };
+  recordChatJobEvent(job, "queued", { provider, agentMode: Boolean(agentMode), traceId });
+  chatJobStore.set(id, job);
+  return job;
+}
+
+function recordChatJobEvent(job, type, payload = {}) {
+  if (!job) {
+    return;
+  }
+  const event = {
+    id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    jobId: job.id,
+    traceId: job.traceId,
+    type: String(type || "event"),
+    timestamp: new Date().toISOString(),
+    payload: sanitizeAuditPayload(payload)
+  };
+  job.events.push(event);
+  if (job.events.length > chatJobEventHistoryMax) {
+    job.events.splice(0, job.events.length - chatJobEventHistoryMax);
+  }
+
+  const lines = [
+    `id: ${event.id}`,
+    `event: ${event.type}`,
+    `data: ${JSON.stringify(event)}`,
+    ""
+  ].join("\n");
+  for (const stream of job.listeners) {
+    try {
+      stream.write(lines);
+    } catch {
+      // Ignore broken streams.
+    }
+  }
+}
+
+function closeChatJobStreams(job) {
+  if (!job || !(job.listeners instanceof Set)) {
+    return;
+  }
+  for (const stream of job.listeners) {
+    try {
+      stream.end();
+    } catch {
+      // Ignore stream close errors.
+    }
+  }
+  job.listeners.clear();
+}
+
+function setChatJobStatus(job, status, extra = {}) {
+  if (!job) {
+    return;
+  }
+  job.status = status;
+  job.updatedAt = new Date().toISOString();
+  if (Object.prototype.hasOwnProperty.call(extra, "result")) {
+    job.result = extra.result;
+  }
+  if (Object.prototype.hasOwnProperty.call(extra, "error")) {
+    job.error = extra.error;
+  }
+  if (Object.prototype.hasOwnProperty.call(extra, "cancelRequested")) {
+    job.cancelRequested = Boolean(extra.cancelRequested);
+  }
+  if (Object.prototype.hasOwnProperty.call(extra, "cancelledAt")) {
+    job.cancelledAt = extra.cancelledAt;
+  }
+  recordChatJobEvent(job, status, extra.eventPayload || {});
+  if (["completed", "failed", "cancelled"].includes(status)) {
+    closeChatJobStreams(job);
+  }
+}
+
+function cancelChatJob(job, reason = "Cancelled by user") {
+  if (!job) {
+    return false;
+  }
+  if (["completed", "failed", "cancelled"].includes(job.status)) {
+    return false;
+  }
+  if (job.abortController) {
+    try {
+      job.abortController.abort(reason);
+    } catch {
+      // Ignore abort errors.
+    }
+  }
+
+  setChatJobStatus(job, "cancelled", {
+    cancelRequested: true,
+    cancelledAt: new Date().toISOString(),
+    error: {
+      message: reason,
+      status: 499,
+      cancelled: true
+    },
+    eventPayload: { reason }
+  });
+  return true;
+}
+
+function getChatJobResponse(job) {
+  if (!job) {
+    return null;
+  }
+  return {
+    id: job.id,
+    traceId: job.traceId,
+    status: job.status,
+    provider: job.provider,
+    agentMode: job.agentMode,
+    workspaceCode: job.workspaceCode,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    cancelRequested: Boolean(job.cancelRequested),
+    cancelledAt: job.cancelledAt || null,
+    result: job.status === "completed" ? job.result : null,
+    error: ["failed", "cancelled"].includes(job.status) ? job.error : null
+  };
+}
+
+async function pruneAuditEntries() {
   const auditLogPath = getAuditLogPath();
   if (!fs.existsSync(auditLogPath)) {
-    return [];
+    return;
+  }
+
+  const raw = await fsp.readFile(auditLogPath, "utf8");
+  if (!raw) {
+    return;
+  }
+
+  const cutoffMs = Date.now() - (auditRetentionDays * 24 * 60 * 60 * 1000);
+  const lines = raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const kept = [];
+  for (const line of lines) {
+    try {
+      const parsed = JSON.parse(line);
+      const tsMs = Number(new Date(parsed?.timestamp || 0).getTime() || 0);
+      if (tsMs && tsMs < cutoffMs) {
+        continue;
+      }
+      kept.push(line);
+    } catch {
+      // Drop malformed lines during retention compaction.
+    }
+  }
+
+  let totalBytes = 0;
+  const byBytes = [];
+  for (let i = kept.length - 1; i >= 0; i -= 1) {
+    const line = kept[i];
+    totalBytes += Buffer.byteLength(line, "utf8") + 1;
+    if (totalBytes > auditLogMaxBytes) {
+      break;
+    }
+    byBytes.push(line);
+  }
+  byBytes.reverse();
+
+  const compacted = byBytes.length > 0 ? `${byBytes.join("\n")}\n` : "";
+  await fsp.writeFile(auditLogPath, compacted, "utf8");
+}
+
+async function readAuditEntries(limitOrOptions = 200) {
+  const isLegacyNumeric = typeof limitOrOptions === "number";
+  const options = isLegacyNumeric
+    ? { limit: limitOrOptions }
+    : (limitOrOptions && typeof limitOrOptions === "object" ? limitOrOptions : {});
+  const auditLogPath = getAuditLogPath();
+  if (!fs.existsSync(auditLogPath)) {
+    return isLegacyNumeric
+      ? []
+      : { entries: [], hasMore: false, nextBefore: null };
   }
 
   const text = await fsp.readFile(auditLogPath, "utf8");
-  return text
+  const limit = Math.max(1, Math.min(1000, Number(options.limit || 200)));
+  const beforeRaw = String(options.before || "").trim();
+  const beforeMs = beforeRaw ? Number(new Date(beforeRaw).getTime() || 0) : 0;
+
+  const parsed = text
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean)
@@ -887,8 +1265,24 @@ async function readAuditEntries(limit = 200) {
       }
     })
     .filter(Boolean)
-    .slice(-Math.max(1, Math.min(1000, Number(limit || 200))))
     .reverse();
+
+  const filtered = beforeMs > 0
+    ? parsed.filter((entry) => {
+      const entryMs = Number(new Date(entry?.timestamp || 0).getTime() || 0);
+      return entryMs > 0 && entryMs < beforeMs;
+    })
+    : parsed;
+
+  const page = filtered.slice(0, limit + 1);
+  const hasMore = page.length > limit;
+  const entries = hasMore ? page.slice(0, limit) : page;
+  const nextBefore = hasMore ? String(entries[entries.length - 1]?.timestamp || "") || null : null;
+
+  if (isLegacyNumeric) {
+    return entries;
+  }
+  return { entries, hasMore, nextBefore };
 }
 
 function detectPrettierParser(filePath) {
@@ -2420,6 +2814,9 @@ async function runAutomatedTestProfile(args = {}) {
   if (profile === "node-test") {
     command = "node";
     commandArgs = ["--test"];
+  } else if (profile === "chat-jobs-smoke") {
+    command = "node";
+    commandArgs = ["--test", "tests/chat-jobs.test.mjs"];
   } else if (profile === "npm-lint") {
     command = "npm";
     commandArgs = ["run", "lint"];
@@ -2427,7 +2824,7 @@ async function runAutomatedTestProfile(args = {}) {
     command = "npm";
     commandArgs = ["test"];
   } else {
-    throw new Error("Unsupported profile. Use npm-test, npm-lint, or node-test.");
+    throw new Error("Unsupported profile. Use npm-test, npm-lint, node-test, or chat-jobs-smoke.");
   }
 
   try {
@@ -3424,7 +3821,7 @@ async function executeAgentTool(req, callName, args) {
       const result = {
         apis: [
           { method: "GET", path: "/api/config", purpose: "Runtime model/provider configuration" },
-          { method: "POST", path: "/api/chat", purpose: "Chat endpoint (supports agentMode for OpenAI)" },
+          { method: "POST", path: "/api/chat", purpose: "Chat endpoint (supports agentMode for OpenAI and xAI)" },
           { method: "GET", path: "/api/tools", purpose: "Tool catalog and capabilities" },
           { method: "GET", path: "/api/notifications?limit=...", purpose: "Recent notify_user entries" },
           { method: "GET", path: "/api/files/list?path=...", purpose: "List directory" },
@@ -3895,8 +4292,28 @@ function resolveAgentStepBudget(req) {
   return { maxSteps: requested, override: true };
 }
 
+function assertNotAborted(req) {
+  if (req?.abortSignal?.aborted) {
+    const error = new Error("Chat job cancelled");
+    error.status = 499;
+    error.cancelled = true;
+    throw error;
+  }
+}
+
+function emitJobProgress(req, type, payload = {}) {
+  if (typeof req?.onJobEvent === "function") {
+    try {
+      req.onJobEvent(type, payload);
+    } catch {
+      // Ignore event callback errors.
+    }
+  }
+}
+
 async function runOpenAiAgentWithTools(req, model, messages, maxSteps = agentMaxSteps) {
   const executedTools = [];
+  const traceId = resolveRequestTraceId(req) || createTraceId();
   const latestUserText = [...messages]
     .reverse()
     .find((item) => item.role === "user")?.content || "";
@@ -3911,6 +4328,8 @@ async function runOpenAiAgentWithTools(req, model, messages, maxSteps = agentMax
   ];
 
   for (let step = 0; step < maxSteps; step += 1) {
+    assertNotAborted(req);
+    emitJobProgress(req, "agent-step", { step: step + 1, maxSteps, provider: "openai", traceId });
     const completion = await client.chat.completions.create({
       model,
       messages: conversation,
@@ -3931,6 +4350,7 @@ async function runOpenAiAgentWithTools(req, model, messages, maxSteps = agentMax
       });
 
       for (const toolCall of assistant.tool_calls) {
+        assertNotAborted(req);
         const name = toolCall?.function?.name;
         let args = {};
         try {
@@ -3939,19 +4359,47 @@ async function runOpenAiAgentWithTools(req, model, messages, maxSteps = agentMax
           args = {};
         }
 
+        const startedAt = Date.now();
         let output;
+        let ok = true;
+        emitJobProgress(req, "tool-start", {
+          provider: "openai",
+          name: String(name || ""),
+          args: sanitizeAuditPayload(args),
+          traceId
+        });
         try {
           output = await executeAgentTool(req, name, args);
           executedTools.push(name);
         } catch (error) {
           output = { error: String(error?.message || error) };
+          ok = false;
           executedTools.push(`${name}:error`);
           await appendAuditLog(req, "agent-tool-error", {
             name: String(name || ""),
+            traceId,
             args,
             error: String(error?.message || error)
           });
         }
+
+        const durationMs = Date.now() - startedAt;
+        await appendAuditLog(req, "agent-tool-record", {
+          name: String(name || ""),
+          traceId,
+          ok,
+          durationMs,
+          args: sanitizeAuditPayload(args),
+          output: sanitizeAuditPayload(output)
+        });
+        emitJobProgress(req, "tool-end", {
+          provider: "openai",
+          name: String(name || ""),
+          ok,
+          durationMs,
+          output: sanitizeAuditPayload(output),
+          traceId
+        });
 
         conversation.push({
           role: "tool",
@@ -4005,6 +4453,191 @@ async function runOpenAiAgentWithTools(req, model, messages, maxSteps = agentMax
   };
 }
 
+async function createXaiChatCompletion(model, conversation, options = {}) {
+  const payload = {
+    model,
+    messages: conversation,
+    ...options
+  };
+  const abortSignal = options.abortSignal;
+  if (Object.prototype.hasOwnProperty.call(payload, "abortSignal")) {
+    delete payload.abortSignal;
+  }
+
+  const response = await fetch(`${xaiApiBaseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${xaiApiKey}`
+    },
+    signal: abortSignal,
+    body: JSON.stringify(payload)
+  });
+
+  const rawBody = await response.text();
+  const data = (() => {
+    try {
+      return JSON.parse(rawBody);
+    } catch {
+      return {};
+    }
+  })();
+
+  if (!response.ok) {
+    const details = data?.error?.message
+      || data?.message
+      || rawBody
+      || `HTTP ${response.status}`;
+    const error = new Error(`xAI request failed: ${details}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  return data;
+}
+
+async function runXaiAgentWithTools(req, model, messages, maxSteps = agentMaxSteps, reasoningEffort = null) {
+  const executedTools = [];
+  const traceId = resolveRequestTraceId(req) || createTraceId();
+  const latestUserText = [...messages]
+    .reverse()
+    .find((item) => item.role === "user")?.content || "";
+  const likelyToolIntent = /\b(create|write|edit|update|delete|remove|rename|move|read|list|file|folder|directory|search|fetch|format|lint|zip|unzip|git|api|permission|schedule|notify|snapshot|restore|rollback|revert|diff|merge|test|testing|suite)\b/i.test(latestUserText);
+  let nudgedForToolUse = false;
+  const conversation = [
+    {
+      role: "system",
+      content: "You are a coding agent. If the user asks for file operations, web/API fetches, git operations, conversions, scheduling, or notifications, you must call the appropriate tool first and then summarize the real result. Never simulate tool calls or describe hypothetical actions as completed."
+    },
+    ...messages.map((item) => ({ role: item.role, content: item.content }))
+  ];
+
+  for (let step = 0; step < maxSteps; step += 1) {
+    assertNotAborted(req);
+    emitJobProgress(req, "agent-step", { step: step + 1, maxSteps, provider: "xai", traceId });
+    const completion = await createXaiChatCompletion(model, conversation, {
+      tools: agentToolDefinitions,
+      tool_choice: "auto",
+      abortSignal: req?.abortSignal,
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
+    });
+
+    const assistant = completion?.choices?.[0]?.message;
+    if (!assistant) {
+      break;
+    }
+
+    if (Array.isArray(assistant.tool_calls) && assistant.tool_calls.length > 0) {
+      conversation.push({
+        role: "assistant",
+        content: assistant.content || "",
+        tool_calls: assistant.tool_calls
+      });
+
+      for (const toolCall of assistant.tool_calls) {
+        assertNotAborted(req);
+        const name = toolCall?.function?.name;
+        let args = {};
+        try {
+          args = JSON.parse(toolCall?.function?.arguments || "{}");
+        } catch {
+          args = {};
+        }
+
+        const startedAt = Date.now();
+        let output;
+        let ok = true;
+        emitJobProgress(req, "tool-start", {
+          provider: "xai",
+          name: String(name || ""),
+          args: sanitizeAuditPayload(args),
+          traceId
+        });
+        try {
+          output = await executeAgentTool(req, name, args);
+          executedTools.push(name);
+        } catch (error) {
+          output = { error: String(error?.message || error) };
+          ok = false;
+          executedTools.push(`${name}:error`);
+          await appendAuditLog(req, "agent-tool-error", {
+            name: String(name || ""),
+            traceId,
+            args,
+            error: String(error?.message || error)
+          });
+        }
+
+        const durationMs = Date.now() - startedAt;
+        await appendAuditLog(req, "agent-tool-record", {
+          name: String(name || ""),
+          traceId,
+          ok,
+          durationMs,
+          args: sanitizeAuditPayload(args),
+          output: sanitizeAuditPayload(output)
+        });
+        emitJobProgress(req, "tool-end", {
+          provider: "xai",
+          name: String(name || ""),
+          ok,
+          durationMs,
+          output: sanitizeAuditPayload(output),
+          traceId
+        });
+
+        conversation.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(output)
+        });
+      }
+
+      continue;
+    }
+
+    if (likelyToolIntent && executedTools.length === 0 && !nudgedForToolUse) {
+      nudgedForToolUse = true;
+      conversation.push({
+        role: "system",
+        content: "The user request requires real tool execution. Call at least one relevant tool now before giving a final answer."
+      });
+      continue;
+    }
+
+    return { text: assistant.content || "", executedTools };
+  }
+
+  try {
+    conversation.push({
+      role: "system",
+      content: "Tool execution budget has been reached. Do not call tools. Provide a concise final answer summarizing completed actions, outputs, and any remaining blockers."
+    });
+
+    const finalize = await createXaiChatCompletion(model, conversation, {
+      tools: agentToolDefinitions,
+      tool_choice: "none",
+      abortSignal: req?.abortSignal,
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
+    });
+    const finalAssistant = finalize?.choices?.[0]?.message;
+    const finalText = String(finalAssistant?.content || "").trim();
+    if (finalText) {
+      return { text: finalText, executedTools };
+    }
+  } catch {
+    // Fall through to deterministic fallback message.
+  }
+
+  const count = executedTools.length;
+  return {
+    text: count > 0
+      ? `Agent step limit reached after executing ${count} tool call(s). Please ask me to continue from current state.`
+      : "Reached agent step limit before producing a final answer.",
+    executedTools
+  };
+}
+
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -4021,6 +4654,13 @@ app.use(helmet({
 }));
 
 app.use(express.json({ limit: "1mb" }));
+
+app.use((req, res, next) => {
+  const traceId = resolveRequestTraceId(req) || createTraceId();
+  req.traceId = traceId;
+  res.setHeader("x-trace-id", traceId);
+  next();
+});
 
 app.use((req, res, next) => {
   const queryCode = normalizeWorkspaceCode(req.query?.access_code || req.query?.workspace || req.query?.code);
@@ -4328,79 +4968,100 @@ app.post("/api/session/branch", async (req, res, next) => {
   }
 });
 
-app.post("/api/chat", async (req, res) => {
+async function generateChatResponse(req) {
+  const traceId = resolveRequestTraceId(req) || createTraceId();
+  req.traceId = traceId;
+  assertNotAborted(req);
   const provider = String(req.body?.provider || defaultProvider).trim().toLowerCase();
   const agentMode = Boolean(req.body?.agentMode);
-  if (provider !== "openai" && provider !== "copilot") {
-    return res.status(400).json({
-      error: `provider '${provider}' is not configured on this server yet`
-    });
+  if (provider !== "openai" && provider !== "copilot" && provider !== "xai") {
+    const error = new Error(`provider '${provider}' is not configured on this server yet`);
+    error.status = 400;
+    throw error;
   }
 
   const messages = normalizeMessages(req.body);
   if (!messages) {
-    return res.status(400).json({
-      error: "messages must contain non-empty user or assistant items within size limits"
-    });
+    const error = new Error("messages must contain non-empty user or assistant items within size limits");
+    error.status = 400;
+    throw error;
   }
 
-  try {
-    if (provider === "openai") {
-      const model = resolveModel(req.body?.model);
-      const stepBudget = agentMode ? resolveAgentStepBudget(req) : { maxSteps: agentMaxSteps, override: false };
-
-      if (agentMode) {
-        const result = await runOpenAiAgentWithTools(req, model, messages, stepBudget.maxSteps);
-        return res.json({
-          reply: result.text,
-          model,
-          provider: "openai",
-          agentMode: true,
-          agentMaxStepsUsed: stepBudget.maxSteps,
-          agentMaxStepsOverrideUsed: stepBudget.override,
-          executedTools: result.executedTools
-        });
-      }
-
-      const response = await client.responses.create({
-        model,
-        input: [
-          {
-            role: "system",
-            content: [
-              {
-                type: "input_text",
-                text: "You are a concise, helpful assistant for work-safe usage."
-              }
-            ]
-          },
-          ...messages.map((entry) => ({
-            role: entry.role,
-            content: [
-              {
-                type: entry.role === "assistant" ? "output_text" : "input_text",
-                text: entry.content
-              }
-            ]
-          }))
-        ]
-      });
-
-      const text = response.output_text || "";
-      return res.json({ reply: text, model, provider: "openai" });
+  if (provider === "openai") {
+    if (!client) {
+      const error = new Error("openai provider is not enabled: missing OPENAI_API_KEY");
+      error.status = 400;
+      throw error;
     }
 
+    const model = resolveModel(req.body?.model);
+    const reasoningEffort = normalizeReasoningEffort(req.body?.reasoningEffort || req.body?.reasoning_effort);
+    if ((req.body?.reasoningEffort || req.body?.reasoning_effort) && !reasoningEffort) {
+      const error = new Error("reasoningEffort must be one of: none, minimal, low, medium, high, xhigh");
+      error.status = 400;
+      throw error;
+    }
+    const stepBudget = agentMode ? resolveAgentStepBudget(req) : { maxSteps: agentMaxSteps, override: false };
+
+    if (agentMode) {
+      const result = await runOpenAiAgentWithTools(req, model, messages, stepBudget.maxSteps);
+      return {
+        reply: result.text,
+        model,
+        provider: "openai",
+        traceId,
+        agentMode: true,
+        agentMaxStepsUsed: stepBudget.maxSteps,
+        agentMaxStepsOverrideUsed: stepBudget.override,
+        executedTools: result.executedTools
+      };
+    }
+
+    const responseRequest = {
+      model,
+      input: [
+        {
+          role: "system",
+          content: [
+            {
+              type: "input_text",
+              text: "You are a concise, helpful assistant for work-safe usage."
+            }
+          ]
+        },
+        ...messages.map((entry) => ({
+          role: entry.role,
+          content: [
+            {
+              type: entry.role === "assistant" ? "output_text" : "input_text",
+              text: entry.content
+            }
+          ]
+        }))
+      ]
+    };
+
+    if (reasoningEffort) {
+      responseRequest.reasoning = { effort: reasoningEffort };
+    }
+
+    const response = await client.responses.create(responseRequest);
+    const text = response.output_text || "";
+    return { reply: text, model, provider: "openai", traceId, reasoningEffort: reasoningEffort || null };
+  }
+
+  if (provider === "copilot") {
     if (!githubPat) {
-      return res.status(400).json({
-        error: "copilot provider is not enabled: missing GITHUB_PAT or GITHUB_TOKEN"
-      });
+      const error = new Error("copilot provider is not enabled: missing GITHUB_PAT or GITHUB_TOKEN");
+      error.status = 400;
+      throw error;
     }
 
     const requestedModel = String(req.body?.model || "").trim();
     if (!isValidCopilotModelName(requestedModel)) {
-      return res.status(400).json({
-        error: "copilot model must be a valid string, like openai/gpt-4.1"
-      });
+      const error = new Error("copilot model must be a valid string, like openai/gpt-4.1");
+      error.status = 400;
+      throw error;
     }
 
     const copilotResponse = await fetch(`${copilotApiBaseUrl}/chat/completions`, {
@@ -4411,6 +5072,7 @@ app.post("/api/chat", async (req, res) => {
         "Authorization": `Bearer ${githubPat}`,
         "X-GitHub-Api-Version": copilotApiVersion
       },
+      signal: req?.abortSignal,
       body: JSON.stringify({
         model: requestedModel,
         messages
@@ -4431,26 +5093,231 @@ app.post("/api/chat", async (req, res) => {
         || copilotData?.message
         || rawCopilotBody
         || `HTTP ${copilotResponse.status}`;
-      console.error("Copilot request failed:", details);
-      return res.status(copilotResponse.status).json({ error: `Copilot request failed: ${details}` });
+      const error = new Error(`Copilot request failed: ${details}`);
+      error.status = copilotResponse.status;
+      throw error;
     }
 
     const text = Array.isArray(copilotData?.choices)
       ? (copilotData.choices[0]?.message?.content || "")
       : "";
 
-    return res.json({
+    return {
       reply: typeof text === "string" ? text : JSON.stringify(text),
       model: requestedModel,
-      provider: "copilot"
-    });
+      provider: "copilot",
+      traceId
+    };
+  }
+
+  if (!xaiApiKey) {
+    const error = new Error("xai provider is not enabled: missing XAI_API_KEY");
+    error.status = 400;
+    throw error;
+  }
+
+  const model = resolveXaiModel(req.body?.model);
+  const reasoningEffort = normalizeReasoningEffort(req.body?.reasoningEffort || req.body?.reasoning_effort);
+  if ((req.body?.reasoningEffort || req.body?.reasoning_effort) && !reasoningEffort) {
+    const error = new Error("reasoningEffort must be one of: none, minimal, low, medium, high, xhigh");
+    error.status = 400;
+    throw error;
+  }
+
+  const stepBudget = agentMode ? resolveAgentStepBudget(req) : { maxSteps: agentMaxSteps, override: false };
+  if (agentMode) {
+    const result = await runXaiAgentWithTools(req, model, messages, stepBudget.maxSteps, reasoningEffort);
+    return {
+      reply: result.text,
+      model,
+      provider: "xai",
+      traceId,
+      agentMode: true,
+      agentMaxStepsUsed: stepBudget.maxSteps,
+      agentMaxStepsOverrideUsed: stepBudget.override,
+      reasoningEffort: reasoningEffort || null,
+      executedTools: result.executedTools
+    };
+  }
+
+  const xaiBody = {
+    model,
+    messages
+  };
+  if (reasoningEffort) {
+    xaiBody.reasoning_effort = reasoningEffort;
+  }
+  const xaiData = await createXaiChatCompletion(model, messages, {
+    ...xaiBody,
+    abortSignal: req?.abortSignal
+  });
+  const text = Array.isArray(xaiData?.choices)
+    ? (xaiData.choices[0]?.message?.content || "")
+    : "";
+
+  return {
+    reply: typeof text === "string" ? text : JSON.stringify(text),
+    model,
+    provider: "xai",
+    traceId,
+    reasoningEffort: reasoningEffort || null
+  };
+}
+
+app.post("/api/chat", async (req, res) => {
+  try {
+    const result = await generateChatResponse(req);
+    return res.json(result);
   } catch (error) {
     const status = error?.status || 500;
-    const details = error?.message || "Unknown OpenAI error";
+    const details = error?.message || "Unknown provider error";
+    const traceId = resolveRequestTraceId(req) || createTraceId();
     console.error("Provider request failed:", details);
     const message = status >= 400 && status < 500 ? details : "Failed to generate response.";
-    return res.status(status).json({ error: message });
+    return res.status(status).json({ error: message, traceId });
   }
+});
+
+app.post("/api/chat/jobs", async (req, res) => {
+  const provider = String(req.body?.provider || defaultProvider).trim().toLowerCase();
+  const agentMode = Boolean(req.body?.agentMode);
+  const job = createChatJob(req, provider, agentMode);
+
+  const context = getWorkspaceContext();
+  const abortController = new AbortController();
+  const reqClone = {
+    body: JSON.parse(JSON.stringify(req.body || {})),
+    headers: { ...(req.headers || {}) },
+    ip: req.ip,
+    workspace: req.workspace || null,
+    traceId: job.traceId,
+    chatJobId: job.id,
+    abortSignal: abortController.signal,
+    onJobEvent: (type, payload) => {
+      const current = chatJobStore.get(job.id);
+      if (current) {
+        recordChatJobEvent(current, type, payload);
+      }
+    }
+  };
+
+  queueMicrotask(() => {
+    workspaceContextStore.run(context, async () => {
+      const current = chatJobStore.get(job.id);
+      if (!current) {
+        return;
+      }
+      current.abortController = abortController;
+      if (current.cancelRequested || current.status === "cancelled") {
+        return;
+      }
+      setChatJobStatus(current, "running", { eventPayload: { provider, traceId: current.traceId } });
+      try {
+        const result = await generateChatResponse(reqClone);
+        if (current.status !== "cancelled") {
+          setChatJobStatus(current, "completed", { result, eventPayload: { traceId: current.traceId } });
+        }
+      } catch (error) {
+        if (current.status !== "cancelled") {
+          setChatJobStatus(current, "failed", {
+            error: {
+              message: String(error?.message || error),
+              status: Number(error?.status || 500),
+              traceId: current.traceId
+            },
+            eventPayload: { traceId: current.traceId }
+          });
+        }
+      } finally {
+        current.abortController = null;
+      }
+    });
+  });
+
+  return res.status(202).json({
+    ok: true,
+    job: getChatJobResponse(job)
+  });
+});
+
+app.get("/api/chat/jobs/:jobId", async (req, res) => {
+  pruneChatJobs();
+  const jobId = String(req.params.jobId || "").trim();
+  const job = chatJobStore.get(jobId);
+  if (!job) {
+    return res.status(404).json({ error: "chat job not found" });
+  }
+
+  if (job.workspaceCode !== getWorkspaceContext().code) {
+    return res.status(403).json({ error: "chat job belongs to a different workspace" });
+  }
+
+  return res.json({ ok: true, job: getChatJobResponse(job) });
+});
+
+app.delete("/api/chat/jobs/:jobId", async (req, res) => {
+  pruneChatJobs();
+  const jobId = String(req.params.jobId || "").trim();
+  const job = chatJobStore.get(jobId);
+  if (!job) {
+    return res.status(404).json({ error: "chat job not found" });
+  }
+  if (job.workspaceCode !== getWorkspaceContext().code) {
+    return res.status(403).json({ error: "chat job belongs to a different workspace" });
+  }
+
+  const cancelled = cancelChatJob(job, "Cancelled by user");
+  return res.json({ ok: true, cancelled, job: getChatJobResponse(job) });
+});
+
+app.get("/api/chat/jobs/:jobId/events", async (req, res) => {
+  pruneChatJobs();
+  const jobId = String(req.params.jobId || "").trim();
+  const job = chatJobStore.get(jobId);
+  if (!job) {
+    return res.status(404).json({ error: "chat job not found" });
+  }
+  if (job.workspaceCode !== getWorkspaceContext().code) {
+    return res.status(403).json({ error: "chat job belongs to a different workspace" });
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  const initial = {
+    id: `evt-init-${Date.now()}`,
+    jobId: job.id,
+    traceId: job.traceId,
+    type: "snapshot",
+    timestamp: new Date().toISOString(),
+    payload: {
+      job: getChatJobResponse(job),
+      events: job.events.slice(-Math.min(chatJobEventHistoryMax, 240))
+    }
+  };
+  res.write(`id: ${initial.id}\n`);
+  res.write(`event: snapshot\n`);
+  res.write(`data: ${JSON.stringify(initial)}\n\n`);
+
+  if (!(job.listeners instanceof Set)) {
+    job.listeners = new Set();
+  }
+  job.listeners.add(res);
+
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`event: ping\ndata: ${JSON.stringify({ ts: Date.now(), jobId: job.id })}\n\n`);
+    } catch {
+      // Ignore heartbeat errors.
+    }
+  }, 15000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    job.listeners.delete(res);
+  });
 });
 
 app.get("/api/config", (_req, res) => {
@@ -4459,13 +5326,18 @@ app.get("/api/config", (_req, res) => {
   if (githubPat) {
     supportedProviders.push("copilot");
   }
+  if (xaiApiKey) {
+    supportedProviders.push("xai");
+  }
 
   res.json({
     defaultProvider,
     defaultModel,
     allowedModels,
+    xaiDefaultModel,
+    xaiAllowedModels,
     supportedProviders,
-    agentModeSupportedProviders: ["openai"],
+    agentModeSupportedProviders: xaiApiKey ? ["openai", "xai"] : ["openai"],
     agentStepOverride: {
       enabled: Boolean(security.agentMaxStepsOverrideCode),
       baseMaxSteps: agentMaxSteps,
@@ -4550,7 +5422,7 @@ app.get("/api/tools", (_req, res) => {
       "Archive helpers include 7z and vfa in the terminal allow-list; vfa can resolve from TERMINAL_VFA_COMMAND or TERMINAL_VFA_SCRIPT.",
       "Use /api/files/format before /api/files/write when you want prettified output.",
       "Use /api/files/git/log to inspect snapshots and /api/files/git/revert to roll back.",
-      "Set agentMode=true in /api/chat (openai provider) to enable automatic tool-calling."
+      "Set agentMode=true in /api/chat (openai or xai provider) to enable automatic tool-calling."
     ],
     agentToolCalling: {
       enabled: true,
@@ -5156,9 +6028,54 @@ app.post("/api/files/terminal", async (req, res) => {
 app.get("/api/files/audit", async (req, res) => {
   try {
     const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 200)));
-    const entries = await readAuditEntries(limit);
+    const before = String(req.query.before || "").trim();
+    const operationFilter = String(req.query.operation || "").trim().toLowerCase();
+    const toolNameFilter = String(req.query.tool || "").trim();
+    const traceIdFilter = String(req.query.traceId || req.query.trace || "").trim();
+    const onlyErrors = String(req.query.onlyErrors || "").trim().toLowerCase() === "true";
+    const pageSize = Math.max(limit * 4, 400);
+    const batch = await readAuditEntries({ limit: pageSize, before, returnMeta: true });
+    const filtered = batch.entries
+      .filter((entry) => {
+        if (operationFilter && String(entry?.operation || "").toLowerCase() !== operationFilter) {
+          return false;
+        }
+        if (toolNameFilter && String(entry?.details?.name || "") !== toolNameFilter) {
+          return false;
+        }
+        if (traceIdFilter && String(entry?.traceId || "") !== traceIdFilter) {
+          return false;
+        }
+        if (onlyErrors) {
+          const op = String(entry?.operation || "");
+          const okFlag = entry?.details?.ok;
+          const isErrorRecord = op === "agent-tool-error" || okFlag === false || String(okFlag).toLowerCase() === "false";
+          if (!isErrorRecord) {
+            return false;
+          }
+        }
+        return true;
+      })
+      .slice(0, limit);
 
-    return res.json({ entries });
+    const hasMore = batch.hasMore || (batch.entries.length > filtered.length);
+    const nextBefore = filtered.length > 0 ? String(filtered[filtered.length - 1]?.timestamp || "") || null : null;
+
+    return res.json({
+      entries: filtered,
+      paging: {
+        limit,
+        before: before || null,
+        hasMore,
+        nextBefore
+      },
+      filters: {
+        operation: operationFilter || null,
+        tool: toolNameFilter || null,
+        traceId: traceIdFilter || null,
+        onlyErrors
+      }
+    });
   } catch (error) {
     return res.status(400).json({ error: String(error?.message || "Failed to read audit log") });
   }
@@ -5321,6 +6238,12 @@ app.get("/api/tests/profiles", (_req, res) => {
         command: "node --test",
         description: "Run Node built-in test runner",
         supportedCwd: ["project", "sandbox"]
+      },
+      {
+        profile: "chat-jobs-smoke",
+        command: "node --test tests/chat-jobs.test.mjs",
+        description: "Validate async chat job create/poll/cancel flow",
+        supportedCwd: ["project"]
       }
     ]
   });

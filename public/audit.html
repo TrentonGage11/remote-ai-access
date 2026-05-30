@@ -31,13 +31,52 @@
       </section>
 
       <section class="card reveal" style="--d: 70ms">
-        <div class="path-row" style="max-width: 280px;">
+        <div class="path-row" style="max-width: 980px; gap: 10px; flex-wrap: wrap;">
           <input id="limitInput" type="number" min="1" max="1000" value="200" />
+          <select id="operationFilterSelect">
+            <option value="">All operations</option>
+            <option value="agent-tool-record">agent-tool-record</option>
+            <option value="agent-tool-error">agent-tool-error</option>
+            <option value="agent-tool">agent-tool</option>
+            <option value="git_ops">git_ops</option>
+            <option value="notifications-list">notifications-list</option>
+          </select>
+          <input id="toolNameInput" type="text" placeholder="tool name (optional)" />
+          <input id="traceIdInput" type="text" placeholder="trace id (optional)" />
+          <label class="switch" style="padding: 0 8px;">
+            <input id="onlyErrorsToggle" type="checkbox" />
+            <span>Only errors</span>
+          </label>
           <button id="loadAuditBtn" class="btn btn-soft" type="button">Load</button>
         </div>
       </section>
 
       <section class="card reveal" style="--d: 100ms">
+        <h3 style="margin-top: 0;">Records</h3>
+        <ul id="auditList" class="tool-runs-list" style="max-height: 260px; overflow: auto;"></ul>
+      </section>
+
+      <section class="card reveal" style="--d: 120ms">
+        <div class="topbar" style="align-items: center; gap: 12px;">
+          <h3 style="margin-top: 0; margin-bottom: 0;">Selected record</h3>
+          <div class="top-actions" style="flex-wrap: wrap; gap: 8px;">
+            <input id="detailSearchInput" type="text" placeholder="search in selected JSON" />
+            <button id="copyArgsBtn" class="btn btn-soft" type="button">Copy Args</button>
+            <button id="copyOutputBtn" class="btn btn-soft" type="button">Copy Output</button>
+            <button id="exportJsonBtn" class="btn btn-soft" type="button">Export JSON</button>
+            <button id="exportCsvBtn" class="btn btn-soft" type="button">Export CSV</button>
+          </div>
+        </div>
+        <pre id="auditDetail" class="doc-json">Select a record to inspect args/output.</pre>
+      </section>
+
+      <section class="card reveal" style="--d: 140ms">
+        <div class="topbar" style="align-items: center; gap: 12px;">
+          <h3 style="margin-top: 0; margin-bottom: 0;">Raw JSON</h3>
+          <div class="top-actions">
+            <button id="loadMoreAuditBtn" class="btn btn-soft" type="button">Load More</button>
+          </div>
+        </div>
         <pre id="auditJson" class="doc-json">Loading...</pre>
       </section>
     </main>

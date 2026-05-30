@@ -3,10 +3,13 @@ const newChatBtnEl = document.getElementById("newChatBtn");
 const messageListEl = document.getElementById("messageList");
 const promptEl = document.getElementById("prompt");
 const sendBtnEl = document.getElementById("sendBtn");
+const cancelJobBtnEl = document.getElementById("cancelJobBtn");
 const statusEl = document.getElementById("status");
 const themeToggleEl = document.getElementById("themeToggle");
 const providerSelectEl = document.getElementById("providerSelect");
 const modelSelectEl = document.getElementById("modelSelect");
+const reasoningEffortFieldEl = document.getElementById("reasoningEffortField");
+const reasoningEffortSelectEl = document.getElementById("reasoningEffortSelect");
 const agentModeToggleEl = document.getElementById("agentModeToggle");
 const agentStepOverrideInputEl = document.getElementById("agentStepOverrideInput");
 const agentStepOverrideCodeInputEl = document.getElementById("agentStepOverrideCodeInput");
@@ -25,8 +28,14 @@ const notifyDebounceInputEl = document.getElementById("notifyDebounceInput");
 const workspaceCodeInputEl = document.getElementById("workspaceCodeInput");
 const workspaceSwitchBtnEl = document.getElementById("workspaceSwitchBtn");
 const workspaceBadgeEl = document.getElementById("workspaceBadge");
+const traceStatusChipEl = document.getElementById("traceStatusChip");
+const openTraceAuditBtnEl = document.getElementById("openTraceAuditBtn");
+const copyTraceBtnEl = document.getElementById("copyTraceBtn");
+const copyTraceAuditUrlBtnEl = document.getElementById("copyTraceAuditUrlBtn");
+const autoOpenTraceAuditToggleEl = document.getElementById("autoOpenTraceAuditToggle");
 
 const THEME_STORAGE_KEY = "remote-ai-access-theme";
+const FILELAB_SYNTAX_THEME_KEY = "filelab-syntax-theme";
 const CHAT_STATE_KEY = "remote-ai-access-chat-state-v1";
 const HISTORY_EXPORT_KEY = "remote-ai-access-history-v1";
 const CHAT_BACKUPS_KEY = "remote-ai-access-chat-backups-v1";
@@ -44,14 +53,25 @@ const NOTIFICATIONS_SOUND_ENABLED_KEY = "remote-ai-access-notifications-sound-en
 const NOTIFICATIONS_LEVELS_KEY = "remote-ai-access-notifications-levels-v1";
 const NOTIFICATIONS_DEBOUNCE_MS_KEY = "remote-ai-access-notifications-debounce-ms-v1";
 const NOTIFICATION_RULES_KEY = "remote-ai-access-notification-rules-v1";
+const AUTO_OPEN_TRACE_AUDIT_KEY = "remote-ai-access-auto-open-trace-audit-v1";
 
 const FALLBACK_MODELS = ["gpt-5.5", "gpt-5.3-codex", "gpt-5", "gpt-4.1"];
 const CHAT_CAPABLE_TYPES = new Set(["text", "code", "chatgpt", "research", "open-weight", "search", "tool"]);
+const SUPPORTED_CODE_THEMES = new Set(["verdant", "cyberpunk-hc", "ember", "oceanic", "mono", "preparing"]);
+const GENERIC_CODE_KEYWORDS = [
+  "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "return",
+  "try", "catch", "finally", "throw", "throws", "new", "class", "interface", "extends", "implements",
+  "public", "private", "protected", "static", "const", "let", "var", "function", "async", "await",
+  "import", "export", "from", "as", "type", "enum", "struct", "trait", "fn", "def", "lambda",
+  "true", "false", "null", "none", "undefined", "this", "super", "yield"
+];
 
 let config = {
   defaultProvider: "openai",
   defaultModel: "gpt-4.1",
+  xaiDefaultModel: "grok-4.3",
   allowedModels: [],
+  xaiAllowedModels: [],
   supportedProviders: ["openai"],
   agentModeSupportedProviders: ["openai"],
   agentStepOverride: {
@@ -70,6 +90,48 @@ let notificationToastContainer = null;
 let lastNotificationShownAt = 0;
 const recentlyShownNotificationKeys = new Map();
 const notificationRuleLastRunAt = new Map();
+let activeChatJob = null;
+let currentTraceId = "";
+
+function autoOpenTraceAuditEnabled() {
+  return localStorage.getItem(AUTO_OPEN_TRACE_AUDIT_KEY) === "true";
+}
+
+function getFilteredAuditUrl(traceId) {
+  const normalized = String(traceId || "").trim();
+  if (!normalized) {
+    return "audit.html";
+  }
+  const params = new URLSearchParams();
+  params.set("operation", "agent-tool-record");
+  params.set("traceId", normalized);
+  params.set("limit", "200");
+  return `audit.html?${params.toString()}`;
+}
+
+function maybeAutoOpenFilteredAudit(traceId) {
+  if (!autoOpenTraceAuditEnabled()) {
+    return;
+  }
+  const url = getFilteredAuditUrl(traceId);
+  const popup = window.open(url, "_blank", "noopener,noreferrer");
+  if (!popup) {
+    statusEl.textContent = "Auto-open audit was blocked by your browser popup settings.";
+  }
+}
+
+function updateTracePanel(traceId, status = "") {
+  currentTraceId = String(traceId || "").trim();
+  if (traceStatusChipEl) {
+    traceStatusChipEl.textContent = currentTraceId
+      ? `${currentTraceId}${status ? ` (${status})` : ""}`
+      : "No trace yet";
+  }
+
+  if (openTraceAuditBtnEl) {
+    openTraceAuditBtnEl.href = getFilteredAuditUrl(currentTraceId);
+  }
+}
 
 function uid() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -81,6 +143,7 @@ function createChat(overrides = {}) {
     title: "New chat",
     provider: config.defaultProvider,
     model: config.defaultModel,
+    reasoningEffort: "",
     createdAt: new Date().toISOString(),
     messages: [],
     ...overrides
@@ -89,6 +152,14 @@ function createChat(overrides = {}) {
 
 function normalizeProvider(value) {
   return String(value || "").trim().toLowerCase();
+}
+
+function normalizeReasoningEffort(value) {
+  const effort = String(value || "").trim().toLowerCase();
+  if (!effort) {
+    return "";
+  }
+  return /^[a-z][a-z0-9_-]{1,15}$/.test(effort) ? effort : "";
 }
 
 function normalizeWorkspaceCode(value) {
@@ -162,6 +233,7 @@ function normalizeStateShape(parsed) {
     ...chat,
     provider: normalizeProvider(chat?.provider) || "openai",
     model: typeof chat?.model === "string" && chat.model ? chat.model : config.defaultModel,
+    reasoningEffort: normalizeReasoningEffort(chat?.reasoningEffort),
     agentMaxStepsOverride: Number.isInteger(Number(chat?.agentMaxStepsOverride)) ? Number(chat.agentMaxStepsOverride) : null,
     agentMaxStepsOverrideCode: typeof chat?.agentMaxStepsOverrideCode === "string" ? chat.agentMaxStepsOverrideCode : "",
     messages: Array.isArray(chat?.messages) ? chat.messages : []
@@ -339,6 +411,15 @@ function initTheme() {
   applyTheme(prefersDark ? "dark" : "light");
 }
 
+function getFileLabSyntaxTheme() {
+  const stored = String(localStorage.getItem(FILELAB_SYNTAX_THEME_KEY) || "").trim().toLowerCase();
+  return SUPPORTED_CODE_THEMES.has(stored) ? stored : "verdant";
+}
+
+function applyCodeThemeFromFileLab() {
+  document.documentElement.setAttribute("data-code-theme", getFileLabSyntaxTheme());
+}
+
 function escapeHtml(value) {
   return value
     .replaceAll("&", "&amp;")
@@ -348,8 +429,88 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function escapeCodeHtml(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function normalizeCodeLanguage(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function replaceTokenMatches(text, regex, className, placeholders) {
+  return text.replace(regex, (match) => {
+    const token = `@@CODETOKEN_${placeholders.length}@@`;
+    placeholders.push(`<span class="tok-${className}">${match}</span>`);
+    return token;
+  });
+}
+
+function restoreTokenMatches(text, placeholders) {
+  let output = text;
+  for (let i = 0; i < placeholders.length; i += 1) {
+    output = output.replaceAll(`@@CODETOKEN_${i}@@`, placeholders[i]);
+  }
+  return output;
+}
+
+function highlightJsonCode(rawCode) {
+  const placeholders = [];
+  let text = escapeCodeHtml(rawCode);
+
+  text = replaceTokenMatches(text, /"(?:\\.|[^"\\])*"(?=\s*:)/g, "key", placeholders);
+  text = replaceTokenMatches(text, /"(?:\\.|[^"\\])*"/g, "string", placeholders);
+  text = replaceTokenMatches(text, /\b-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/g, "number", placeholders);
+  text = replaceTokenMatches(text, /\b(?:true|false|null)\b/g, "keyword", placeholders);
+
+  return restoreTokenMatches(text, placeholders);
+}
+
+function highlightGenericCode(rawCode) {
+  const placeholders = [];
+  let text = escapeCodeHtml(rawCode);
+
+  text = replaceTokenMatches(text, /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)/g, "string", placeholders);
+  text = replaceTokenMatches(text, /\/\/[^\n]*/g, "comment", placeholders);
+  text = text.replace(/(^|\s)(#[^\n]*)/gm, (_full, prefix, comment) => {
+    const token = `@@CODETOKEN_${placeholders.length}@@`;
+    placeholders.push(`<span class="tok-comment">${comment}</span>`);
+    return `${prefix}${token}`;
+  });
+
+  const keywordPattern = new RegExp(`\\b(?:${GENERIC_CODE_KEYWORDS.join("|")})\\b`, "g");
+  text = replaceTokenMatches(text, keywordPattern, "keyword", placeholders);
+  text = replaceTokenMatches(text, /\b-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/g, "number", placeholders);
+  text = replaceTokenMatches(text, /\b[A-Z][A-Za-z0-9_]*\b/g, "type", placeholders);
+  text = replaceTokenMatches(text, /\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()/g, "fn", placeholders);
+
+  return restoreTokenMatches(text, placeholders);
+}
+
+function highlightCodeBlock(rawCode, language) {
+  const normalized = normalizeCodeLanguage(language);
+  if (normalized === "json" || normalized === "jsonc") {
+    return highlightJsonCode(rawCode);
+  }
+  return highlightGenericCode(rawCode);
+}
+
+function renderCodeFence(rawCode, language) {
+  const normalizedLanguage = normalizeCodeLanguage(language);
+  const safeLang = normalizedLanguage && /^[a-z0-9_+-]{1,24}$/.test(normalizedLanguage)
+    ? normalizedLanguage
+    : "";
+  const code = String(rawCode || "").replace(/\r/g, "").replace(/\n$/, "");
+  const highlighted = highlightCodeBlock(code, safeLang);
+  const langBadge = safeLang ? `<span class="md-code-lang">${escapeHtml(safeLang)}</span>` : "";
+  const langClass = safeLang ? ` language-${safeLang}` : "";
+  return `<pre class="md-code-block">${langBadge}<code class="md-code${langClass}">${highlighted}</code></pre>`;
+}
+
 function renderMarkdown(markdown) {
-  let text = escapeHtml(markdown || "");
+  let source = String(markdown || "");
   const fences = [];
 
   const isTableDivider = (line) => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line || "");
@@ -365,11 +526,13 @@ function renderMarkdown(markdown) {
     return "left";
   };
 
-  text = text.replace(/```([\s\S]*?)```/g, (_match, code) => {
+  source = source.replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (_match, language, code) => {
     const token = `@@FENCE_${fences.length}@@`;
-    fences.push(`<pre><code>${code.trim()}</code></pre>`);
+    fences.push(renderCodeFence(code, language));
     return token;
   });
+
+  let text = escapeHtml(source);
 
   text = text.replace(/`([^`]+)`/g, "<code>$1</code>");
   text = text.replace(/^### (.*)$/gm, "<h3>$1</h3>");
@@ -594,12 +757,19 @@ function updateModelSelect() {
 
   let opts = providerModels.length > 0
     ? [...new Set(providerModels)]
-    : [...new Set([config.defaultModel, ...FALLBACK_MODELS])];
+    : [...new Set([
+      provider === "xai" ? config.xaiDefaultModel : config.defaultModel,
+      ...FALLBACK_MODELS
+    ])];
 
-  if (config.allowedModels.length > 0) {
-    opts = opts.filter((item) => config.allowedModels.includes(item));
+  const providerAllowedModels = provider === "xai"
+    ? config.xaiAllowedModels
+    : config.allowedModels;
+
+  if (providerAllowedModels.length > 0) {
+    opts = opts.filter((item) => providerAllowedModels.includes(item));
     if (opts.length === 0) {
-      opts = [...config.allowedModels];
+      opts = [...providerAllowedModels];
     }
   }
 
@@ -620,9 +790,16 @@ function updateModelSelect() {
 }
 
 function updateProviderSelect() {
-  const providerSet = new Set(config.supportedProviders.map((item) => normalizeProvider(item)).filter(Boolean));
+  const configuredProviders = config.supportedProviders
+    .map((item) => normalizeProvider(item))
+    .filter(Boolean);
+  const configuredProviderSet = new Set(configuredProviders);
+  const providerSet = new Set(configuredProviders.length > 0 ? configuredProviders : ["openai"]);
+
   for (const entry of modelCatalog) {
-    providerSet.add(entry.provider);
+    if (configuredProviderSet.size === 0 || configuredProviderSet.has(entry.provider)) {
+      providerSet.add(entry.provider);
+    }
   }
 
   const providers = [...providerSet];
@@ -647,8 +824,65 @@ function renderAll() {
   renderTabs();
   updateProviderSelect();
   updateModelSelect();
+  syncReasoningEffortControl();
   syncAgentModeToggle();
   renderMessages();
+}
+
+function getReasoningEffortOptions(provider, model) {
+  const normalizedProvider = normalizeProvider(provider);
+  const normalizedModel = String(model || "").trim();
+  if (!normalizedProvider || !normalizedModel) {
+    return [];
+  }
+
+  const fromCatalog = modelCatalog.find((entry) => entry.provider === normalizedProvider && entry.tag === normalizedModel);
+  if (fromCatalog && Array.isArray(fromCatalog.reasoningEfforts) && fromCatalog.reasoningEfforts.length > 0) {
+    return fromCatalog.reasoningEfforts;
+  }
+  return [];
+}
+
+function syncReasoningEffortControl() {
+  if (!reasoningEffortFieldEl || !reasoningEffortSelectEl) {
+    return;
+  }
+
+  const chat = getActiveChat();
+  const options = getReasoningEffortOptions(chat.provider, chat.model);
+
+  if (options.length === 0) {
+    reasoningEffortFieldEl.hidden = true;
+    reasoningEffortSelectEl.innerHTML = "";
+    reasoningEffortSelectEl.disabled = true;
+    if (chat.reasoningEffort) {
+      chat.reasoningEffort = "";
+      saveState();
+    }
+    return;
+  }
+
+  reasoningEffortFieldEl.hidden = false;
+  reasoningEffortSelectEl.disabled = false;
+  reasoningEffortSelectEl.innerHTML = "";
+
+  const autoOption = document.createElement("option");
+  autoOption.value = "";
+  autoOption.textContent = "Default";
+  reasoningEffortSelectEl.appendChild(autoOption);
+
+  for (const effort of options) {
+    const opt = document.createElement("option");
+    opt.value = effort;
+    opt.textContent = effort;
+    reasoningEffortSelectEl.appendChild(opt);
+  }
+
+  if (!options.includes(chat.reasoningEffort)) {
+    chat.reasoningEffort = "";
+    saveState();
+  }
+  reasoningEffortSelectEl.value = chat.reasoningEffort || "";
 }
 
 function timeAgo(value) {
@@ -1075,16 +1309,17 @@ async function loadToolRuns() {
     const latestByTool = new Map();
     for (const entry of entries) {
       const operation = String(entry?.operation || "").trim();
+      const isAgentTool = operation === "agent-tool-record" || operation === "agent-tool" || operation === "agent-tool-error";
 
-      if (filter === "agent" && operation !== "agent-tool") {
+      if (filter === "agent" && !isAgentTool) {
         continue;
       }
 
-      if (filter === "file" && operation === "agent-tool") {
+      if (filter === "file" && isAgentTool) {
         continue;
       }
 
-      const label = operation === "agent-tool"
+      const label = isAgentTool
         ? String(entry?.details?.name || "").trim()
         : operation;
 
@@ -1098,7 +1333,7 @@ async function loadToolRuns() {
     if (latestByTool.size === 0) {
       const li = document.createElement("li");
       li.className = "tool-run-item";
-      li.textContent = "No agent-tool runs yet.";
+      li.textContent = "No tool runs yet.";
       toolRunsListEl.appendChild(li);
       return;
     }
@@ -1221,8 +1456,14 @@ async function loadConfig() {
     if (typeof data?.defaultModel === "string") {
       config.defaultModel = data.defaultModel;
     }
+    if (typeof data?.xaiDefaultModel === "string") {
+      config.xaiDefaultModel = data.xaiDefaultModel;
+    }
     if (Array.isArray(data?.allowedModels)) {
       config.allowedModels = data.allowedModels.filter((item) => typeof item === "string" && item);
+    }
+    if (Array.isArray(data?.xaiAllowedModels)) {
+      config.xaiAllowedModels = data.xaiAllowedModels.filter((item) => typeof item === "string" && item);
     }
     if (Array.isArray(data?.supportedProviders)) {
       config.supportedProviders = data.supportedProviders
@@ -1297,8 +1538,143 @@ async function parseJsonResponse(response) {
   } catch {
     const compact = bodyText.replace(/\s+/g, " ").trim();
     const snippet = compact.slice(0, 180);
+    if (response.status === 499 || /cancelled|canceled/i.test(snippet)) {
+      throw new Error("Request was cancelled.");
+    }
+    if (response.status === 524 || /cloudflare|timeout|gateway/i.test(snippet)) {
+      throw new Error("Request timed out at the edge. Try agent mode, which now uses async job polling for long tasks.");
+    }
     throw new Error(`Server returned non-JSON response (${response.status}): ${snippet || "empty body"}`);
   }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function stopActiveJobTracking() {
+  if (!activeChatJob) {
+    if (cancelJobBtnEl) {
+      cancelJobBtnEl.hidden = true;
+      cancelJobBtnEl.disabled = true;
+    }
+    return;
+  }
+
+  if (activeChatJob.eventSource) {
+    try {
+      activeChatJob.eventSource.close();
+    } catch {
+      // Ignore close errors.
+    }
+  }
+  activeChatJob = null;
+  if (cancelJobBtnEl) {
+    cancelJobBtnEl.hidden = true;
+    cancelJobBtnEl.disabled = true;
+  }
+}
+
+function startChatJobEventStream(jobId) {
+  if (typeof EventSource === "undefined") {
+    return;
+  }
+  if (!activeChatJob || activeChatJob.id !== jobId) {
+    return;
+  }
+
+  const source = new EventSource(`/api/chat/jobs/${encodeURIComponent(jobId)}/events`);
+  activeChatJob.eventSource = source;
+
+  source.addEventListener("tool-start", (event) => {
+    try {
+      const parsed = JSON.parse(event.data || "{}");
+      const name = parsed?.payload?.name || "tool";
+      statusEl.textContent = `Running tool: ${name}`;
+    } catch {
+      // Ignore malformed event payloads.
+    }
+  });
+
+  source.addEventListener("tool-end", (event) => {
+    try {
+      const parsed = JSON.parse(event.data || "{}");
+      const name = parsed?.payload?.name || "tool";
+      const durationMs = Number(parsed?.payload?.durationMs || 0);
+      statusEl.textContent = `Finished tool: ${name} (${durationMs}ms)`;
+    } catch {
+      // Ignore malformed event payloads.
+    }
+  });
+
+  source.addEventListener("failed", () => {
+    updateTracePanel(currentTraceId, "failed");
+    stopActiveJobTracking();
+  });
+  source.addEventListener("completed", () => {
+    updateTracePanel(currentTraceId, "completed");
+    stopActiveJobTracking();
+  });
+  source.addEventListener("cancelled", () => {
+    updateTracePanel(currentTraceId, "cancelled");
+    stopActiveJobTracking();
+  });
+
+  source.onerror = () => {
+    // Keep normal polling as the source of truth if stream drops.
+    if (activeChatJob && activeChatJob.id === jobId && activeChatJob.eventSource === source) {
+      try {
+        source.close();
+      } catch {
+        // Ignore close errors.
+      }
+      activeChatJob.eventSource = null;
+    }
+  };
+}
+
+async function startChatJob(body) {
+  const response = await fetch("/api/chat/jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const data = await parseJsonResponse(response);
+  return { response, data };
+}
+
+async function pollChatJob(jobId, timeoutMs = 18 * 60 * 1000) {
+  const started = Date.now();
+  let delayMs = 900;
+
+  while (Date.now() - started < timeoutMs) {
+    if (activeChatJob && activeChatJob.id === jobId && activeChatJob.cancelRequested) {
+      throw new Error("Chat job cancelled.");
+    }
+
+    const response = await fetch(`/api/chat/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+    const data = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(data.error || `Failed to poll chat job (${response.status})`);
+    }
+
+    const job = data?.job || {};
+    if (job.status === "completed") {
+      return job.result || {};
+    }
+    if (job.status === "failed") {
+      throw new Error(job?.error?.message || "Chat job failed");
+    }
+    if (job.status === "cancelled") {
+      throw new Error(job?.error?.message || "Chat job cancelled");
+    }
+
+    statusEl.textContent = `Working (${job.status || "running"})${job.traceId ? ` [${job.traceId}]` : ""}...`;
+    await delay(delayMs);
+    delayMs = Math.min(2200, delayMs + 180);
+  }
+
+  throw new Error("Chat job is still running. Please retry in a moment.");
 }
 
 async function postChatWithRetry(body, retries = 1) {
@@ -1315,6 +1691,58 @@ async function postChatWithRetry(body, retries = 1) {
 
   const data = await parseJsonResponse(response);
   return { response, data };
+}
+
+async function sendPromptViaJob(body) {
+  stopActiveJobTracking();
+  const started = await startChatJob(body);
+  if (!started.response.ok) {
+    throw new Error(started.data?.error || "Failed to start chat job");
+  }
+  const job = started.data?.job || {};
+  const jobId = job.id;
+  if (!jobId) {
+    throw new Error("Server returned an invalid chat job id");
+  }
+  activeChatJob = { id: jobId, eventSource: null, cancelRequested: false };
+  updateTracePanel(job.traceId, "running");
+  if (cancelJobBtnEl) {
+    cancelJobBtnEl.hidden = false;
+    cancelJobBtnEl.disabled = false;
+  }
+  startChatJobEventStream(jobId);
+  statusEl.textContent = `Long task started${job.traceId ? ` [${job.traceId}]` : ""}. Polling for completion...`;
+  try {
+    const result = await pollChatJob(jobId);
+    updateTracePanel(result?.traceId || job.traceId || "", "completed");
+    maybeAutoOpenFilteredAudit(result?.traceId || job.traceId || "");
+    return { response: { ok: true, status: 200 }, data: result };
+  } finally {
+    stopActiveJobTracking();
+  }
+}
+
+async function cancelActiveChatJob() {
+  if (!activeChatJob?.id) {
+    return;
+  }
+  const jobId = activeChatJob.id;
+  activeChatJob.cancelRequested = true;
+  if (cancelJobBtnEl) {
+    cancelJobBtnEl.disabled = true;
+  }
+  try {
+    const response = await fetch(`/api/chat/jobs/${encodeURIComponent(jobId)}`, {
+      method: "DELETE"
+    });
+    const data = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(data.error || "Failed to cancel job");
+    }
+    statusEl.textContent = "Job cancelled.";
+  } catch (error) {
+    statusEl.textContent = `Cancel failed: ${error.message}`;
+  }
 }
 
 async function loadModelCatalog() {
@@ -1336,6 +1764,7 @@ async function loadModelCatalog() {
     const modelNameIndex = header.indexOf("Name");
     const tagIndex = header.indexOf("Model Tag");
     const typeIndex = header.indexOf("Type");
+    const reasoningEffortsIndex = header.indexOf("Reasoning Efforts");
 
     if (tagIndex < 0 || typeIndex < 0) {
       return;
@@ -1352,7 +1781,13 @@ async function loadModelCatalog() {
         ) || "openai",
         name: modelNameIndex >= 0 ? parts[modelNameIndex] : "",
         tag: parts[tagIndex],
-        type: normalizeProvider(parts[typeIndex])
+        type: normalizeProvider(parts[typeIndex]),
+        reasoningEfforts: reasoningEffortsIndex >= 0
+          ? String(parts[reasoningEffortsIndex] || "")
+            .split(/[|,]/)
+            .map((item) => normalizeReasoningEffort(item))
+            .filter(Boolean)
+          : []
       }))
       .filter((entry) => /^[a-zA-Z0-9._/-]{2,120}$/.test(entry.tag));
   } catch {
@@ -1392,16 +1827,23 @@ async function sendPrompt() {
       content: item.content
     }));
 
-    const { response, data } = await postChatWithRetry({
+    const requestBody = {
       provider: chat.provider,
       model: chat.model,
+      reasoningEffort: getReasoningEffortOptions(chat.provider, chat.model).includes(chat.reasoningEffort)
+        ? chat.reasoningEffort
+        : undefined,
       agentMode: agentModeToggleEl.checked,
       agentMaxStepsOverride: Number.isInteger(Number(chat.agentMaxStepsOverride)) && Number(chat.agentMaxStepsOverride) > 0
         ? Number(chat.agentMaxStepsOverride)
         : undefined,
       agentMaxStepsOverrideCode: chat.agentMaxStepsOverrideCode || undefined,
       messages: payloadMessages
-    });
+    };
+
+    const { response, data } = agentModeToggleEl.checked
+      ? await sendPromptViaJob(requestBody)
+      : await postChatWithRetry(requestBody);
     if (!response.ok) {
       throw new Error(data.error || "Request failed");
     }
@@ -1411,8 +1853,10 @@ async function sendPrompt() {
       role: "assistant",
       content: data.reply || "(No output returned)",
       createdAt: new Date().toISOString(),
+      traceId: String(data.traceId || ""),
       executedTools: Array.isArray(data.executedTools) ? data.executedTools : []
     });
+    updateTracePanel(data.traceId || "", "done");
 
     if (data.model) {
       chat.model = data.model;
@@ -1428,6 +1872,7 @@ async function sendPrompt() {
       statusEl.textContent = "Done.";
     }
   } catch (error) {
+    updateTracePanel(currentTraceId, "error");
     statusEl.textContent = `Error: ${error.message}`;
   } finally {
     sendBtnEl.disabled = false;
@@ -1567,8 +2012,21 @@ modelSelectEl.addEventListener("change", () => {
   const chat = getActiveChat();
   chat.model = modelSelectEl.value;
   saveState();
-  renderTabs();
+  renderAll();
 });
+
+if (reasoningEffortSelectEl) {
+  reasoningEffortSelectEl.addEventListener("change", () => {
+    const chat = getActiveChat();
+    const value = normalizeReasoningEffort(reasoningEffortSelectEl.value);
+    const options = getReasoningEffortOptions(chat.provider, chat.model);
+    chat.reasoningEffort = options.includes(value) ? value : "";
+    saveState();
+    statusEl.textContent = chat.reasoningEffort
+      ? `Reasoning effort set to ${chat.reasoningEffort}.`
+      : "Reasoning effort set to model default.";
+  });
+}
 
 if (agentStepOverrideInputEl) {
   agentStepOverrideInputEl.addEventListener("change", () => {
@@ -1672,6 +2130,44 @@ if (notifyDebounceInputEl) {
 }
 
 sendBtnEl.addEventListener("click", sendPrompt);
+if (cancelJobBtnEl) {
+  cancelJobBtnEl.addEventListener("click", cancelActiveChatJob);
+}
+if (copyTraceBtnEl) {
+  copyTraceBtnEl.addEventListener("click", async () => {
+    if (!currentTraceId) {
+      statusEl.textContent = "No trace ID available yet.";
+      return;
+    }
+    try {
+  if (copyTraceAuditUrlBtnEl) {
+    copyTraceAuditUrlBtnEl.addEventListener("click", async () => {
+      const url = getFilteredAuditUrl(currentTraceId);
+      const absolute = new URL(url, window.location.href).toString();
+      try {
+        await navigator.clipboard.writeText(absolute);
+        statusEl.textContent = "Filtered audit URL copied.";
+      } catch {
+        statusEl.textContent = "Clipboard copy failed.";
+      }
+    });
+  }
+  if (autoOpenTraceAuditToggleEl) {
+    autoOpenTraceAuditToggleEl.checked = autoOpenTraceAuditEnabled();
+    autoOpenTraceAuditToggleEl.addEventListener("change", () => {
+      localStorage.setItem(AUTO_OPEN_TRACE_AUDIT_KEY, autoOpenTraceAuditToggleEl.checked ? "true" : "false");
+      statusEl.textContent = autoOpenTraceAuditToggleEl.checked
+        ? "Auto-open filtered audit enabled."
+        : "Auto-open filtered audit disabled.";
+    });
+  }
+      await navigator.clipboard.writeText(currentTraceId);
+      statusEl.textContent = "Trace ID copied.";
+    } catch {
+      statusEl.textContent = "Clipboard copy failed.";
+    }
+  });
+}
 promptEl.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
     sendPrompt();
@@ -1691,12 +2187,19 @@ if (workspaceCodeInputEl) {
   });
 }
 
+window.addEventListener("storage", (event) => {
+  if (event.key === FILELAB_SYNTAX_THEME_KEY) {
+    applyCodeThemeFromFileLab();
+  }
+});
+
 initTheme();
+applyCodeThemeFromFileLab();
 await loadConfig();
 await loadModelCatalog();
 await loadWorkspaceInfo();
 saveState();
 renderAll();
 loadToolRuns();
+updateTracePanel("", "");
 startNotificationPolling();
-N1FmanhxdkR1OTJOUk1T

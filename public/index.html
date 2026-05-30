@@ -46,6 +46,10 @@
               <span>Model</span>
               <select id="modelSelect" aria-label="Model selector"></select>
             </label>
+            <label class="model-field" id="reasoningEffortField" for="reasoningEffortSelect" hidden>
+              <span>Reasoning</span>
+              <select id="reasoningEffortSelect" aria-label="Reasoning effort selector"></select>
+            </label>
             <label class="model-field model-check" for="agentModeToggle">
               <span>Agent Tools</span>
               <input id="agentModeToggle" type="checkbox" aria-label="Enable agent tool calling" />
@@ -135,6 +139,24 @@
           </div>
         </section>
 
+        <section class="card tool-status-panel">
+          <div class="tool-status-head">
+            <h2>Run Trace</h2>
+            <div class="top-actions">
+              <a id="openTraceAuditBtn" class="btn btn-soft" href="audit.html" target="_blank" rel="noreferrer">Open Filtered Audit</a>
+              <button id="copyTraceAuditUrlBtn" class="btn btn-soft" type="button">Copy Audit Link</button>
+            </div>
+          </div>
+          <div class="top-actions" style="align-items: center; gap: 8px;">
+            <span id="traceStatusChip" class="tool-chip">No trace yet</span>
+            <button id="copyTraceBtn" class="btn btn-soft" type="button">Copy Trace ID</button>
+            <label class="model-field model-check" for="autoOpenTraceAuditToggle" style="margin: 0;">
+              <span>Auto-open Audit</span>
+              <input id="autoOpenTraceAuditToggle" type="checkbox" aria-label="Auto-open filtered audit when run completes" />
+            </label>
+          </div>
+        </section>
+
         <section class="card composer">
           <label for="prompt">Message</label>
           <textarea
@@ -146,6 +168,7 @@
 
           <div class="actions">
             <button id="sendBtn" class="btn">Send</button>
+            <button id="cancelJobBtn" class="btn btn-soft" type="button" hidden>Cancel Job</button>
             <span id="status" role="status" aria-live="polite"></span>
           </div>
         </section>
@@ -153,6 +176,6 @@
     </main>
 
     <script src="api-auth.js"></script>
-    <script type="module" src="app.js?v=20260525b"></script>
+    <script type="module" src="app.js?v=20260530c"></script>
   </body>
 </html>

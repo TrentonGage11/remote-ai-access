@@ -8,6 +8,13 @@
   --muted: #4d6356;
   --bubble-user: #dcf5e6;
   --bubble-assistant: #ffffff;
+  --code-keyword: #0b6b42;
+  --code-string: #8a2d12;
+  --code-number: #0b5ea8;
+  --code-comment: #5a7868;
+  --code-fn: #6c2ac2;
+  --code-type: #134f8b;
+  --code-key: #0b6b42;
 }
 
 [data-theme="dark"] {
@@ -20,6 +27,113 @@
   --muted: #9ac0ad;
   --bubble-user: #17372a;
   --bubble-assistant: #14231e;
+  --code-keyword: #7de4b0;
+  --code-string: #f7b79a;
+  --code-number: #8ad0ff;
+  --code-comment: #88a99a;
+  --code-fn: #d2a5ff;
+  --code-type: #9fcdf7;
+  --code-key: #7de4b0;
+}
+
+html[data-code-theme="cyberpunk-hc"] {
+  --code-keyword: #d94a00;
+  --code-string: #8f00c9;
+  --code-number: #006ad6;
+  --code-comment: #b70d2b;
+  --code-fn: #4734de;
+  --code-type: #c21f42;
+  --code-key: #d94a00;
+}
+
+html[data-theme="dark"][data-code-theme="cyberpunk-hc"] {
+  --code-keyword: #ff7a00;
+  --code-string: #d100ff;
+  --code-number: #28a7ff;
+  --code-comment: #ff4d64;
+  --code-fn: #7a63ff;
+  --code-type: #ff2f57;
+  --code-key: #ff7a00;
+}
+
+html[data-code-theme="ember"] {
+  --code-keyword: #8f3a08;
+  --code-string: #7f1d1d;
+  --code-number: #2a5bbf;
+  --code-comment: #6f6b66;
+  --code-fn: #8f2d74;
+  --code-type: #7a4414;
+  --code-key: #8f3a08;
+}
+
+html[data-theme="dark"][data-code-theme="ember"] {
+  --code-keyword: #ffb07f;
+  --code-string: #ff9e9e;
+  --code-number: #9ec6ff;
+  --code-comment: #b8a99e;
+  --code-fn: #ffb0ef;
+  --code-type: #ffd3a6;
+  --code-key: #ffb07f;
+}
+
+html[data-code-theme="oceanic"] {
+  --code-keyword: #045b8f;
+  --code-string: #12564e;
+  --code-number: #3f3fa9;
+  --code-comment: #5b7480;
+  --code-fn: #0a6a8f;
+  --code-type: #18508f;
+  --code-key: #045b8f;
+}
+
+html[data-theme="dark"][data-code-theme="oceanic"] {
+  --code-keyword: #87dcff;
+  --code-string: #91ecd2;
+  --code-number: #b8b8ff;
+  --code-comment: #8fa8bb;
+  --code-fn: #87dfff;
+  --code-type: #9ac2ff;
+  --code-key: #87dcff;
+}
+
+html[data-code-theme="mono"] {
+  --code-keyword: #1f2a35;
+  --code-string: #2d3944;
+  --code-number: #283646;
+  --code-comment: #66717c;
+  --code-fn: #1e2e3d;
+  --code-type: #1f2a35;
+  --code-key: #1f2a35;
+}
+
+html[data-theme="dark"][data-code-theme="mono"] {
+  --code-keyword: #dce8f2;
+  --code-string: #cdd9e4;
+  --code-number: #d3deea;
+  --code-comment: #8ea0b2;
+  --code-fn: #d9e4ef;
+  --code-type: #ddeaf8;
+  --code-key: #dce8f2;
+}
+
+html[data-code-theme="preparing"] {
+  --code-keyword: #c45a16;
+  --code-string: #9f2f5d;
+  --code-number: #1f6fa6;
+  --code-comment: #6d6a76;
+  --code-fn: #7a3aa6;
+  --code-type: #7a4a1f;
+  --code-key: #c45a16;
+}
+
+html[data-theme="dark"][data-code-theme="preparing"] {
+  --code-keyword: #ffb86b;
+  --code-string: #ff8fb3;
+  --code-number: #8bc8ff;
+  --code-comment: #9b91a8;
+  --code-fn: #cda7ff;
+  --code-type: #ffd19a;
+  --code-key: #ffb86b;
 }
 
 * {
@@ -299,6 +413,7 @@ label {
   border-radius: 14px;
   padding: 10px 12px;
   overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 .msg.user {
@@ -343,6 +458,10 @@ label {
   margin: 0 0 8px;
 }
 
+.md {
+  min-width: 0;
+}
+
 .md p:last-child {
   margin-bottom: 0;
 }
@@ -358,6 +477,7 @@ label {
   border-radius: 10px;
   padding: 10px;
   overflow-x: auto;
+  max-width: 100%;
 }
 
 [data-theme="dark"] .md pre {
@@ -368,6 +488,81 @@ label {
   background: rgba(16, 34, 24, 0.08);
   border-radius: 6px;
   padding: 1px 4px;
+}
+
+.md :not(pre) > code {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  color: color-mix(in srgb, var(--ink) 88%, var(--accent-strong) 12%);
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 8px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+[data-theme="dark"] .md :not(pre) > code {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 56%, transparent);
+  color: color-mix(in srgb, var(--ink) 82%, white 18%);
+}
+
+.md pre code {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font-weight: 500;
+  padding: 0;
+  border-radius: 0;
+}
+
+.md pre.md-code-block {
+  position: relative;
+  padding-top: 30px;
+}
+
+.md pre.md-code-block code.md-code {
+  display: block;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.md .md-code-lang {
+  position: absolute;
+  top: 6px;
+  right: 10px;
+  font: 600 0.68rem/1 "IBM Plex Mono", monospace;
+  color: var(--muted);
+  opacity: 0.9;
+  text-transform: uppercase;
+}
+
+.md .tok-key,
+.md .tok-keyword {
+  color: var(--code-keyword);
+  font-weight: 700;
+}
+
+.md .tok-string {
+  color: var(--code-string);
+}
+
+.md .tok-number {
+  color: var(--code-number);
+}
+
+.md .tok-comment {
+  color: var(--code-comment);
+  font-style: italic;
+}
+
+.md .tok-fn {
+  color: var(--code-fn);
+}
+
+.md .tok-type {
+  color: var(--code-type);
 }
 
 .md ul,
@@ -505,6 +700,13 @@ textarea:focus {
   background: rgba(23, 36, 30, 0.8);
 }
 
+#traceStatusChip {
+  max-width: 56ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .btn {
   appearance: none;
   border: 0;
@@ -602,7 +804,7 @@ textarea:focus {
 .file-sidebar {
   min-height: calc(100vh - 40px);
   display: grid;
-  grid-template-rows: auto auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
   gap: 10px;
 }
 
