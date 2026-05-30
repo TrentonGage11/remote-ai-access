@@ -88,14 +88,17 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
    - `search_web` (Stack Overflow + web snippets)
    - `fetch_webpage`
    - `delete_file`, `rename_file`, `create_directory`
-   - `zip_unzip`, `run_terminal`, `git_ops`
+   - `zip_unzip`, `run_terminal`, `run_build`, `git_ops`
    - `preview_markdown`, `convert_format`, `process_image`
    - `search_replace`, `export_import_workspace`
    - `test_api`, `manage_permissions`, `schedule_task`, `notify_user`
 - Tool-calling metadata is exposed from `GET /api/tools`.
-- `run_terminal` accepts either `{ command: "git", args: ["status"] }` or shell-like command strings such as `git clone https://github.com/org/repo.git repo`, `cd repo && grep -R TODO .`, and `pwd && ls -la && git status 2>&1 || echo "No git repo here"`.
-- `run_terminal` keeps host-admin commands blocked, but now allow-lists common agent setup/exploration tools including Git, package managers, build tools, file tools (`cd`, `cp`, `mv`, `rm`, `chmod`, `grep`, `rg`, `find`, `diff`, `patch`), archive helpers, `7z`, `7za`, `7zr`, and `vfa`.
-- When `TERMINAL_RUNTIME=docker`, additional container-only commands are allowed, including `sh`, `bash`, `dash`, `apt`, `apt-get`, `curl`, `wget`, and `jq`.
+- `run_terminal` accepts either `{ command: "git", args: ["status"] }` or command strings such as `git clone https://github.com/org/repo.git repo`, `cd repo && grep -R TODO .`, and `pwd && ls -la && git status 2>&1 || echo "No git repo here"`.
+- When `TERMINAL_RUNTIME=docker`, command strings run through `sh -lc` inside the container, so normal shell syntax works: `&&`, `||`, pipes, redirects, multiline backslashes, command substitution, and flags.
+- `run_terminal` keeps host-admin commands blocked in host mode, but now allow-lists common agent setup/exploration tools including Git, package managers, C/C++ build tools (`gcc`, `g++`, `cc`, `c++`, `cmake`, `ctest`, `cpack`, `make`, `ninja`), file tools (`cd`, `cp`, `mv`, `rm`, `chmod`, `grep`, `rg`, `find`, `diff`, `patch`), Python venv/pip tools, archive helpers, `7z`, `7za`, `7zr`, and `vfa`.
+- When `TERMINAL_RUNTIME=docker`, additional container-only commands are allowed, including `sh`, `bash`, `dash`, `apt`, `apt-get`, `dpkg`, `dpkg-query`, `curl`, `wget`, `jq`, `ctags`, `gdb`, `lldb`, `strace`, and `ldd`. Docker mode can inspect container paths such as `/usr/bin`.
+- `run_build` provides build profiles for `cmake-configure`, `cmake-build`, `cmake-test`, `make`, `ninja`, compiler commands, `python-venv`, `pip-install`, and Docker-only `apt-install`.
+- `git_ops` supports branch/worktree management: `branch_list`, `branch_create`, `branch_checkout`, `branch_delete`, `worktree_list`, `worktree_add`, `worktree_remove`, and `worktree_prune`.
 - Set `TERMINAL_EXTRA_COMMANDS=cmd1,cmd2` to add local allow-list commands without changing code. On the server, add it to `/opt/remote-ai-access/.env`, then run `systemctl restart remote-ai-access`.
 - If `TERMINAL_RUNTIME=docker`, archive tools can still run on host via `TERMINAL_HOST_FALLBACK_COMMANDS`.
 - `vfa` resolves from `TERMINAL_VFA_COMMAND` or falls back to `TERMINAL_VFA_SCRIPT` (default `../VFA/vfa.py`).

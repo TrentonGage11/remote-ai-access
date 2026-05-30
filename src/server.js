@@ -53,8 +53,8 @@ const chunkUploadSessionMaxAgeMs = Math.max(60_000, Number(process.env.FILE_API_
 const execFileAsync = promisify(execFile);
 const safeTerminalCommands = new Set([
   "node", "npm", "npx", "pnpm", "yarn", "bun",
-  "python", "python3", "pip", "pip3", "pytest",
-  "git", "make", "cmake", "go", "cargo", "rustc",
+  "python", "python3", "pip", "pip3", "pytest", "virtualenv",
+  "git", "make", "cmake", "ctest", "cpack", "ccmake", "ninja", "gcc", "g++", "cc", "c++", "clang", "clang++", "go", "cargo", "rustc",
   "php", "composer", "ruby", "bundle", "java", "javac", "mvn", "gradle",
   "cd", "ls", "dir", "pwd", "echo", "cat", "type", "grep", "rg", "find", "head", "tail", "wc",
   "sed", "awk", "sort", "uniq", "cut", "tr", "xargs", "stat", "du", "df", "file",
@@ -63,10 +63,11 @@ const safeTerminalCommands = new Set([
   "basename", "dirname", "realpath", "readlink", "tee", "cmp", "diff", "patch",
   "tar", "zip", "unzip", "7z", "7za", "7zr", "vfa"
 ]);
-const dockerOnlyTerminalCommands = new Set(["sh", "bash", "dash", "apt", "apt-get", "curl", "wget", "jq"]);
+const dockerOnlyTerminalCommands = new Set(["sh", "bash", "dash", "apt", "apt-get", "dpkg", "dpkg-query", "curl", "wget", "jq", "ctags", "gdb", "lldb", "strace", "ldd", "ldconfig"]);
 const blockedTerminalCommandsAlways = new Set(["sudo", "su", "systemctl", "service", "docker", "podman", "mount", "umount", "chown"]);
 const blockedTerminalCommandsHostOnly = new Set(["apt", "apt-get", "dnf", "yum", "apk", "pacman"]);
 const blockedTerminalArgPatterns = [/^--prefix=/i, /^--root=/i, /^--target=/i];
+const allowedDockerAbsolutePathPrefixes = ["/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/lib", "/lib64", "/usr/lib", "/usr/lib64", "/etc/apt", "/var/lib/apt", "/var/cache/apt", "/tmp", "/workspace"];
 const blockedTerminalPathArgPatterns = [
   /^[a-zA-Z]:[\\/]/,
   /^[/\\]/,
@@ -91,6 +92,7 @@ const terminalDockerMemory = String(process.env.TERMINAL_DOCKER_MEMORY || "1g").
 const terminalDockerCpus = String(process.env.TERMINAL_DOCKER_CPUS || "1.0").trim() || "1.0";
 const terminalDockerPidsLimit = Math.max(64, Math.min(2048, Number(process.env.TERMINAL_DOCKER_PIDS_LIMIT || 256)));
 const terminalDockerNetwork = String(process.env.TERMINAL_DOCKER_NETWORK || "bridge").trim() || "bridge";
+const terminalDockerShellCommandLines = String(process.env.TERMINAL_DOCKER_SHELL_COMMAND_LINES || "true").trim().toLowerCase() !== "false";
 const terminalHostFallbackCommands = new Set(
   String(process.env.TERMINAL_HOST_FALLBACK_COMMANDS || "7z,7za,7zr,vfa")
     .split(",")
@@ -2467,9 +2469,17 @@ function parseTerminalCommandSegments(commandName, args) {
   return segments;
 }
 
-function isTerminalArgOutsideWorkspace(arg) {
+function isAllowedDockerAbsolutePath(value) {
+  const normalized = String(value || "").replaceAll("\\", "/").replace(/\/+$/, "") || "/";
+  return allowedDockerAbsolutePathPrefixes.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`));
+}
+
+function isTerminalArgOutsideWorkspace(arg, runtime = terminalRuntime) {
   const value = String(arg || "").trim();
   if (!value || /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value)) {
+    return false;
+  }
+  if (runtime === "docker" && isAllowedDockerAbsolutePath(value)) {
     return false;
   }
   return blockedTerminalPathArgPatterns.some((pattern) => pattern.test(value));
@@ -2585,6 +2595,106 @@ async function runWorkspaceCommandInDocker(commandName, commandArgs, cwdRel, tim
   return execFileAsync("docker", dockerArgs, { timeout });
 }
 
+async function prepareTerminalExecution(cwdPath) {
+  const { absolute: cwdAbs, rel: cwdRel } = resolveSandboxPath(cwdPath || "");
+  const sandboxRoot = getSandboxRoot();
+
+  const {
+    homeDir,
+    cacheDir,
+    npmPrefixDir,
+    pythonPackagesDir,
+    pythonScriptsDir,
+    npmBinDir
+  } = getTerminalIsolationDirs(sandboxRoot);
+
+  await fsp.mkdir(homeDir, { recursive: true });
+  await fsp.mkdir(cacheDir, { recursive: true });
+  await fsp.mkdir(npmPrefixDir, { recursive: true });
+  await fsp.mkdir(pythonPackagesDir, { recursive: true });
+  await fsp.mkdir(pythonScriptsDir, { recursive: true });
+
+  const basePath = String(process.env.PATH || "");
+  const toolPath = [pythonScriptsDir, npmBinDir, basePath].filter(Boolean).join(path.delimiter);
+  const hostExecEnv = {
+    ...process.env,
+    PATH: toolPath,
+    HOME: homeDir,
+    TMPDIR: cacheDir,
+    TEMP: cacheDir,
+    TMP: cacheDir,
+    LANG: process.env.LANG || "C.UTF-8",
+    LC_ALL: process.env.LC_ALL || "C.UTF-8",
+    TERM: "dumb",
+    NO_COLOR: "1",
+    PIP_DISABLE_PIP_VERSION_CHECK: "1",
+    PIP_CACHE_DIR: path.join(cacheDir, "pip"),
+    PIP_TARGET: pythonPackagesDir,
+    PYTHONPATH: pythonPackagesDir,
+    npm_config_prefix: npmPrefixDir,
+    npm_config_cache: path.join(cacheDir, "npm")
+  };
+
+  const containerExecEnv = {
+    PATH: "/workspace/.venv/bin:/workspace/venv/bin:/workspace/.python-packages/bin:/workspace/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    HOME: "/workspace/.home",
+    TMPDIR: "/workspace/.cache",
+    TEMP: "/workspace/.cache",
+    TMP: "/workspace/.cache",
+    LANG: process.env.LANG || "C.UTF-8",
+    LC_ALL: process.env.LC_ALL || "C.UTF-8",
+    TERM: "dumb",
+    NO_COLOR: "1",
+    PIP_DISABLE_PIP_VERSION_CHECK: "1",
+    PIP_CACHE_DIR: "/workspace/.cache/pip",
+    PYTHONPATH: "/workspace/.python-packages",
+    npm_config_prefix: "/workspace/.npm-global",
+    npm_config_cache: "/workspace/.cache/npm"
+  };
+
+  return { cwdAbs, cwdRel, sandboxRoot, hostExecEnv, containerExecEnv };
+}
+
+async function runDockerShellCommand(commandLine, cwdPath, timeoutMs) {
+  const command = String(commandLine || "").trim();
+  if (!command) {
+    throw new Error("command is required");
+  }
+
+  const maxTimeout = 900000;
+  const defaultTimeout = 60000;
+  const timeout = Math.max(1000, Math.min(maxTimeout, Number(timeoutMs || defaultTimeout)));
+  const { cwdRel, sandboxRoot, containerExecEnv } = await prepareTerminalExecution(cwdPath || "");
+
+  try {
+    const result = await runWorkspaceCommandInDocker("sh", ["-lc", command], cwdRel, timeout, sandboxRoot, containerExecEnv);
+    return {
+      ok: true,
+      command,
+      executable: "sh",
+      resolvedBy: "docker-shell",
+      args: ["-lc", command],
+      cwd: cwdRel,
+      runtime: "docker",
+      stdout: String(result.stdout || "").slice(0, 12000),
+      stderr: String(result.stderr || "").slice(0, 12000)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      command,
+      executable: "sh",
+      resolvedBy: "docker-shell",
+      args: ["-lc", command],
+      cwd: cwdRel,
+      runtime: "docker",
+      code: Number(error?.code || 1),
+      stdout: String(error?.stdout || "").slice(0, 12000),
+      stderr: String(error?.stderr || error?.message || "").slice(0, 12000)
+    };
+  }
+}
+
 async function runSingleSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
   const name = String(commandName || "").trim().toLowerCase();
   if (blockedTerminalCommandsAlways.has(name)) {
@@ -2628,23 +2738,24 @@ async function runSingleSafeTerminalCommand(commandName, args, cwdPath, timeoutM
   }
 
   for (const arg of commandArgs) {
-    if (blockedTerminalArgPatterns.some((pattern) => pattern.test(arg))) {
+    if (effectiveRuntime !== "docker" && blockedTerminalArgPatterns.some((pattern) => pattern.test(arg))) {
       throw new Error(`argument '${arg}' is not allowed`);
     }
-    if (isTerminalArgOutsideWorkspace(arg)) {
+    if (isTerminalArgOutsideWorkspace(arg, effectiveRuntime)) {
       throw new Error(`argument '${arg}' points outside the workspace`);
     }
   }
 
-  if (name === "npm" && commandArgs.some((arg) => arg === "-g" || arg === "--global")) {
+  if (effectiveRuntime !== "docker" && name === "npm" && commandArgs.some((arg) => arg === "-g" || arg === "--global")) {
     throw new Error("npm global installs are blocked; use workspace-local installs only");
   }
 
-  if ((name === "pip" || name === "pip3") && commandArgs.some((arg) => /^--(prefix|root|target)=?/i.test(arg))) {
+  if (effectiveRuntime !== "docker" && (name === "pip" || name === "pip3") && commandArgs.some((arg) => /^--(prefix|root|target)=?/i.test(arg))) {
     throw new Error("pip path overrides are blocked");
   }
 
-  if ((name === "python" || name === "python3")
+  if (effectiveRuntime !== "docker"
+    && (name === "python" || name === "python3")
     && commandArgs.length >= 2
     && commandArgs[0] === "-m"
     && commandArgs[1] === "pip"
@@ -2655,62 +2766,7 @@ async function runSingleSafeTerminalCommand(commandName, args, cwdPath, timeoutM
   const maxTimeout = effectiveRuntime === "docker" ? 300000 : 60000;
   const defaultTimeout = effectiveRuntime === "docker" ? 45000 : 15000;
   const timeout = Math.max(1000, Math.min(maxTimeout, Number(timeoutMs || defaultTimeout)));
-  const { absolute: cwdAbs, rel: cwdRel } = resolveSandboxPath(cwdPath || "");
-  const sandboxRoot = getSandboxRoot();
-
-  const {
-    homeDir,
-    cacheDir,
-    npmPrefixDir,
-    pythonPackagesDir,
-    pythonScriptsDir,
-    npmBinDir
-  } = getTerminalIsolationDirs(sandboxRoot);
-
-  await fsp.mkdir(homeDir, { recursive: true });
-  await fsp.mkdir(cacheDir, { recursive: true });
-  await fsp.mkdir(npmPrefixDir, { recursive: true });
-  await fsp.mkdir(pythonPackagesDir, { recursive: true });
-  await fsp.mkdir(pythonScriptsDir, { recursive: true });
-
-  const basePath = String(process.env.PATH || "");
-  const toolPath = [pythonScriptsDir, npmBinDir, basePath].filter(Boolean).join(path.delimiter);
-  const hostExecEnv = {
-    ...process.env,
-    PATH: toolPath,
-    HOME: homeDir,
-    TMPDIR: cacheDir,
-    TEMP: cacheDir,
-    TMP: cacheDir,
-    LANG: process.env.LANG || "C.UTF-8",
-    LC_ALL: process.env.LC_ALL || "C.UTF-8",
-    TERM: "dumb",
-    NO_COLOR: "1",
-    PIP_DISABLE_PIP_VERSION_CHECK: "1",
-    PIP_CACHE_DIR: path.join(cacheDir, "pip"),
-    PIP_TARGET: pythonPackagesDir,
-    PYTHONPATH: pythonPackagesDir,
-    npm_config_prefix: npmPrefixDir,
-    npm_config_cache: path.join(cacheDir, "npm")
-  };
-
-  const containerExecEnv = {
-    PATH: "/workspace/.python-packages/bin:/workspace/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    HOME: "/workspace/.home",
-    TMPDIR: "/workspace/.cache",
-    TEMP: "/workspace/.cache",
-    TMP: "/workspace/.cache",
-    LANG: process.env.LANG || "C.UTF-8",
-    LC_ALL: process.env.LC_ALL || "C.UTF-8",
-    TERM: "dumb",
-    NO_COLOR: "1",
-    PIP_DISABLE_PIP_VERSION_CHECK: "1",
-    PIP_CACHE_DIR: "/workspace/.cache/pip",
-    PIP_TARGET: "/workspace/.python-packages",
-    PYTHONPATH: "/workspace/.python-packages",
-    npm_config_prefix: "/workspace/.npm-global",
-    npm_config_cache: "/workspace/.cache/npm"
-  };
+  const { cwdAbs, cwdRel, sandboxRoot, hostExecEnv, containerExecEnv } = await prepareTerminalExecution(cwdPath || "");
 
   try {
     const result = effectiveRuntime === "docker"
@@ -2772,6 +2828,10 @@ function summarizeTerminalSegment(result) {
 }
 
 async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
+  if (terminalRuntime === "docker" && terminalDockerShellCommandLines && (!Array.isArray(args) || args.length === 0)) {
+    return runDockerShellCommand(commandName, cwdPath, timeoutMs);
+  }
+
   const segments = parseTerminalCommandSegments(commandName, args);
 
   if (segments.length === 1) {
@@ -2822,6 +2882,121 @@ async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
     stderr: stderr.slice(0, 12000),
     commands: results
   };
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+function normalizeBuildPath(value, fallback) {
+  const raw = String(value || fallback || "").trim();
+  if (!raw) {
+    return "";
+  }
+  if (isTerminalArgOutsideWorkspace(raw, terminalRuntime)) {
+    throw new Error(`build path '${raw}' points outside the workspace`);
+  }
+  return raw.replaceAll("\\", "/");
+}
+
+function normalizeBuildJobs(value) {
+  const jobs = Number(value || 0);
+  if (!Number.isFinite(jobs) || jobs <= 0) {
+    return "$(nproc 2>/dev/null || echo 2)";
+  }
+  return String(Math.max(1, Math.min(64, Math.floor(jobs))));
+}
+
+function normalizePackageNames(packages) {
+  const list = Array.isArray(packages) ? packages : String(packages || "").split(/[,\s]+/);
+  const normalized = list
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  for (const item of normalized) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9+._:-]*$/.test(item)) {
+      throw new Error(`package name '${item}' is not allowed`);
+    }
+  }
+  return normalized;
+}
+
+async function runBuildTool(params = {}) {
+  const profile = String(params?.profile || params?.action || "custom").trim().toLowerCase();
+  const cwd = String(params?.cwd || "").trim();
+  const timeoutMs = Number(params?.timeoutMs || 600000);
+  const sourceDir = normalizeBuildPath(params?.sourceDir, ".");
+  const buildDir = normalizeBuildPath(params?.buildDir, "build");
+  const target = String(params?.target || "").trim();
+  const jobs = normalizeBuildJobs(params?.jobs);
+  const extraArgs = Array.isArray(params?.args) ? params.args.map((item) => String(item)).filter(Boolean) : [];
+  let command = "";
+
+  switch (profile) {
+    case "custom":
+    case "command":
+      command = String(params?.command || "").trim();
+      if (!command) {
+        throw new Error("command is required for custom build profile");
+      }
+      break;
+    case "cmake-configure":
+      command = ["cmake", "-S", shellQuote(sourceDir), "-B", shellQuote(buildDir), ...extraArgs.map(shellQuote)].join(" ");
+      break;
+    case "cmake-build":
+      command = ["cmake", "--build", shellQuote(buildDir), "--parallel", jobs, target ? "--target" : "", target ? shellQuote(target) : "", ...extraArgs.map(shellQuote)].filter(Boolean).join(" ");
+      break;
+    case "cmake-test":
+    case "ctest":
+      command = ["ctest", "--test-dir", shellQuote(buildDir), "--output-on-failure", ...extraArgs.map(shellQuote)].join(" ");
+      break;
+    case "make":
+      command = ["make", `-j${jobs}`, target ? shellQuote(target) : "", ...extraArgs.map(shellQuote)].filter(Boolean).join(" ");
+      break;
+    case "ninja":
+      command = ["ninja", "-C", shellQuote(buildDir), target ? shellQuote(target) : "", ...extraArgs.map(shellQuote)].filter(Boolean).join(" ");
+      break;
+    case "gcc":
+    case "g++":
+    case "cc":
+    case "c++":
+      command = [profile, ...extraArgs.map(shellQuote)].join(" ");
+      break;
+    case "python-venv":
+      command = "python3 -m venv .venv && . .venv/bin/activate && python -m pip install --upgrade pip setuptools wheel";
+      break;
+    case "pip-install": {
+      const packages = normalizePackageNames(params?.packages || extraArgs);
+      if (packages.length === 0) {
+        throw new Error("packages are required for pip-install");
+      }
+      command = `. .venv/bin/activate 2>/dev/null || true; python -m pip install ${packages.map(shellQuote).join(" ")}`;
+      break;
+    }
+    case "apt-install": {
+      if (terminalRuntime !== "docker") {
+        throw new Error("apt-install build profile is only available when TERMINAL_RUNTIME=docker");
+      }
+      const packages = normalizePackageNames(params?.packages || extraArgs);
+      if (packages.length === 0) {
+        throw new Error("packages are required for apt-install");
+      }
+      command = `apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ${packages.map(shellQuote).join(" ")}`;
+      break;
+    }
+    default:
+      throw new Error("unsupported build profile");
+  }
+
+  const result = await runSafeTerminalCommand(command, [], cwd, timeoutMs);
+  return { ...result, profile, buildCommand: command };
+}
+
+function normalizeGitRefName(value, label = "ref") {
+  const ref = String(value || "").trim();
+  if (!ref || !/^[A-Za-z0-9._/@-]{1,200}$/.test(ref) || ref.includes("..") || ref.endsWith(".lock")) {
+    throw new Error(`${label} is invalid`);
+  }
+  return ref;
 }
 
 async function runGitOperation(action, params) {
@@ -2883,8 +3058,65 @@ async function runGitOperation(action, params) {
       });
       return { action: op, ...result, remotePath: info.remotePath, remoteSshUrl: info.remoteSshUrl };
     }
+    case "branch_list": {
+      const result = await runGit(["branch", "--all", "--verbose", "--no-abbrev"], true);
+      return { ok: !result.code, action: op, output: `${result.stdout || ""}${result.stderr || ""}`.trim() };
+    }
+    case "branch_create": {
+      const branch = normalizeGitRefName(params?.branch, "branch");
+      const startPoint = params?.startPoint ? normalizeGitRefName(params.startPoint, "startPoint") : null;
+      const result = await runGit(["branch", branch, ...(startPoint ? [startPoint] : [])], true);
+      return { ok: !result.code, action: op, branch, output: `${result.stdout || ""}${result.stderr || ""}`.trim() };
+    }
+    case "branch_checkout": {
+      const branch = normalizeGitRefName(params?.branch, "branch");
+      const create = Boolean(params?.create);
+      const result = await runGit([create ? "checkout" : "switch", ...(create ? ["-b", branch] : [branch])], true);
+      return { ok: !result.code, action: op, branch, output: `${result.stdout || ""}${result.stderr || ""}`.trim() };
+    }
+    case "branch_delete": {
+      const branch = normalizeGitRefName(params?.branch, "branch");
+      const force = Boolean(params?.force);
+      const result = await runGit(["branch", force ? "-D" : "-d", branch], true);
+      return { ok: !result.code, action: op, branch, force, output: `${result.stdout || ""}${result.stderr || ""}`.trim() };
+    }
+    case "worktree_list": {
+      const result = await runGit(["worktree", "list", "--porcelain"], true);
+      return { ok: !result.code, action: op, output: `${result.stdout || ""}${result.stderr || ""}`.trim() };
+    }
+    case "worktree_add": {
+      const { rel } = resolveSandboxPath(params?.path || "");
+      if (!rel) {
+        throw new Error("path is required for worktree_add");
+      }
+      const branch = params?.branch ? normalizeGitRefName(params.branch, "branch") : null;
+      const startPoint = params?.startPoint ? normalizeGitRefName(params.startPoint, "startPoint") : null;
+      const args = ["worktree", "add"];
+      if (branch) {
+        args.push("-b", branch);
+      }
+      args.push(rel);
+      if (startPoint) {
+        args.push(startPoint);
+      }
+      const result = await runGit(args, true);
+      return { ok: !result.code, action: op, path: rel, branch, output: `${result.stdout || ""}${result.stderr || ""}`.trim() };
+    }
+    case "worktree_remove": {
+      const { rel } = resolveSandboxPath(params?.path || "");
+      if (!rel) {
+        throw new Error("path is required for worktree_remove");
+      }
+      const force = Boolean(params?.force);
+      const result = await runGit(["worktree", "remove", ...(force ? ["--force"] : []), rel], true);
+      return { ok: !result.code, action: op, path: rel, force, output: `${result.stdout || ""}${result.stderr || ""}`.trim() };
+    }
+    case "worktree_prune": {
+      const result = await runGit(["worktree", "prune"], true);
+      return { ok: !result.code, action: op, output: `${result.stdout || ""}${result.stderr || ""}`.trim() };
+    }
     default:
-      throw new Error("Unsupported git action. Use status, log, diff, add, commit, remote_info, pull, or push.");
+      throw new Error("Unsupported git action. Use status, log, diff, add, commit, remote_info, pull, push, branch_list, branch_create, branch_checkout, branch_delete, worktree_list, worktree_add, worktree_remove, or worktree_prune.");
   }
 }
 
@@ -3813,7 +4045,7 @@ const agentToolDefinitions = [
     type: "function",
     function: {
       name: "run_terminal",
-      description: "Run safe allow-listed terminal commands. Accepts either command+args or a simple shell-like command line with quotes, &&, ||, and ;.",
+      description: "Run safe terminal commands. In Docker runtime, command strings run through sh -lc for normal shell syntax including &&, ||, pipes, redirects, and backslashes.",
       parameters: {
         type: "object",
         properties: {
@@ -3829,14 +4061,41 @@ const agentToolDefinitions = [
   {
     type: "function",
     function: {
+      name: "run_build",
+      description: "Run common sandboxed build/debug setup profiles such as cmake, make, ninja, compiler commands, Python venv/pip, and Docker-only apt installs.",
+      parameters: {
+        type: "object",
+        properties: {
+          profile: { type: "string", description: "custom|cmake-configure|cmake-build|cmake-test|make|ninja|gcc|g++|cc|c++|python-venv|pip-install|apt-install" },
+          command: { type: "string", description: "custom shell command for profile=custom" },
+          cwd: { type: "string" },
+          sourceDir: { type: "string" },
+          buildDir: { type: "string" },
+          target: { type: "string" },
+          jobs: { type: "number" },
+          packages: { type: "array", items: { type: "string" } },
+          args: { type: "array", items: { type: "string" } },
+          timeoutMs: { type: "number" }
+        },
+        required: ["profile"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
       name: "git_ops",
       description: "Run safe git operations in sandbox repo.",
       parameters: {
         type: "object",
         properties: {
-          action: { type: "string", description: "status|log|diff|add|commit" },
+          action: { type: "string", description: "status|log|diff|add|commit|remote_info|pull|push|branch_list|branch_create|branch_checkout|branch_delete|worktree_list|worktree_add|worktree_remove|worktree_prune" },
           path: { type: "string" },
           paths: { type: "array", items: { type: "string" } },
+          branch: { type: "string" },
+          startPoint: { type: "string" },
+          create: { type: "boolean" },
+          force: { type: "boolean" },
           message: { type: "string" },
           limit: { type: "number" }
         },
@@ -4265,6 +4524,11 @@ async function executeAgentTool(req, callName, args) {
     case "run_terminal": {
       const result = await runSafeTerminalCommand(args?.command, args?.args, args?.cwd, args?.timeoutMs);
       await appendAuditLog(req, "agent-tool", { name: callName, command: result.command, ok: result.ok, cwd: result.cwd });
+      return result;
+    }
+    case "run_build": {
+      const result = await runBuildTool(args || {});
+      await appendAuditLog(req, "agent-tool", { name: callName, profile: result.profile, command: result.buildCommand, ok: result.ok, cwd: result.cwd });
       return result;
     }
     case "git_ops": {
@@ -5694,6 +5958,7 @@ app.get("/api/tools", (_req, res) => {
     terminal: {
       runtime: terminalRuntime,
       dockerImage: terminalRuntime === "docker" ? terminalDockerImage : null,
+      dockerShellCommandLines: terminalRuntime === "docker" ? terminalDockerShellCommandLines : false,
       allowedCommands: Array.from(getAllowedTerminalCommands()).sort(),
       hostFallbackCommands: Array.from(terminalHostFallbackCommands).sort(),
       vfa: {
@@ -5707,7 +5972,9 @@ app.get("/api/tools", (_req, res) => {
       "Each workspace also has a bare git remote at WORKSPACE_GIT_REMOTE_ROOT/<workspace>.git for fast external push/pull workflows.",
       "Optional per-workspace upload bypass codes can remove FILE_API_UPLOAD_MAX_BYTES when sent as X-Upload-Bypass-Code.",
       "Nightly workspace backups create git bundle archives and prune backups older than retention policy.",
-      "Terminal tool runs with an isolated per-workspace HOME/cache/env and cannot execute host-admin commands like sudo/apt.",
+      "Terminal tool runs with an isolated per-workspace HOME/cache/env and host runtime cannot execute host-admin commands like sudo/apt.",
+      "When TERMINAL_RUNTIME=docker, run_terminal command strings execute through sh -lc inside the container, so normal shell syntax like &&, ||, pipes, redirects, multiline backslashes, and flags works.",
+      "Docker runtime commands may inspect normal container tool paths like /usr/bin and can use apt-get/dpkg inside the container.",
       "Terminal accepts command strings such as `git clone https://github.com/org/repo.git repo`, `cd repo && grep -R TODO .`, and simple conditional chains like `pwd && ls -la && git status 2>&1 || echo no repo`.",
       "Set TERMINAL_EXTRA_COMMANDS=cmd1,cmd2 to add more allow-listed commands from server config.",
       "Archive helpers include 7z and vfa in the terminal allow-list; vfa can resolve from TERMINAL_VFA_COMMAND or TERMINAL_VFA_SCRIPT.",
@@ -5726,6 +5993,7 @@ app.get("/api/tools", (_req, res) => {
       { toolName: "create_directory", description: "Create new folders", whyUseful: "Structured workspace" },
       { toolName: "zip_unzip", description: "Archive/extract files/folders", whyUseful: "Export/import, backups" },
       { toolName: "run_terminal", description: "Run safe allow-listed terminal commands", whyUseful: "Automation, scripts" },
+      { toolName: "run_build", description: "Run build/debug setup profiles", whyUseful: "C/C++/CMake/Python builds" },
       { toolName: "git_ops", description: "Source control actions", whyUseful: "Versioning, collaboration" },
       { toolName: "preview_markdown", description: "Render Markdown/HTML", whyUseful: "See docs/output as intended" },
       { toolName: "convert_format", description: "Change between file formats", whyUseful: "Flexibility, data handling" },
