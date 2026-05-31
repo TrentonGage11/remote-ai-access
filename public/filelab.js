@@ -1405,6 +1405,10 @@ async function uploadFiles(files) {
   if (bypassCode) {
     requestHeaders["X-Upload-Bypass-Code"] = bypassCode;
   }
+  const apiAuth = getStoredApiAuthHeader();
+  if (apiAuth) {
+    requestHeaders[apiAuth.headerName] = apiAuth.key;
+  }
 
   const uploadUrl = bypassCode
     ? `/api/files/upload?upload_code=${encodeURIComponent(bypassCode)}`
