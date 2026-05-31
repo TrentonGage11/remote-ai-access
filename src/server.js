@@ -93,6 +93,28 @@ const terminalDockerCpus = String(process.env.TERMINAL_DOCKER_CPUS || "1.0").tri
 const terminalDockerPidsLimit = Math.max(64, Math.min(2048, Number(process.env.TERMINAL_DOCKER_PIDS_LIMIT || 256)));
 const terminalDockerNetwork = String(process.env.TERMINAL_DOCKER_NETWORK || "bridge").trim() || "bridge";
 const terminalDockerShellCommandLines = String(process.env.TERMINAL_DOCKER_SHELL_COMMAND_LINES || "true").trim().toLowerCase() !== "false";
+const defaultTerminalDockerAllowedImages = [
+  terminalDockerImage,
+  "node:20-bookworm",
+  "dockcross/linux-x64",
+  "dockcross/linux-arm64",
+  "dockcross/linux-armv7",
+  "dockcross/windows-static-x64",
+  "dockcross/windows-shared-x64",
+  "dockcross/windows-static-x86",
+  "dockcross/windows-shared-x86",
+  "dockcross/manylinux_2_28-x64",
+  "mstorsjo/llvm-mingw"
+];
+const terminalDockerAllowedImages = new Set(
+  [
+    ...defaultTerminalDockerAllowedImages,
+    ...String(process.env.TERMINAL_DOCKER_ALLOWED_IMAGES || "")
+      .split(",")
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+  ].filter((item) => isValidDockerImageName(item))
+);
 const terminalHostFallbackCommands = new Set(
   String(process.env.TERMINAL_HOST_FALLBACK_COMMANDS || "7z,7za,7zr,vfa")
     .split(",")
@@ -2696,7 +2718,26 @@ function getTerminalIsolationDirs(sandboxRoot) {
   };
 }
 
-async function runWorkspaceCommandInDocker(commandName, commandArgs, cwdRel, timeout, sandboxRoot, envVars) {
+function isValidDockerImageName(value) {
+  const image = String(value || "").trim();
+  return /^[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$/.test(image)
+    && image.length <= 240
+    && !image.includes("..");
+}
+
+function normalizeRequestedDockerImage(value) {
+  const image = String(value || terminalDockerImage).trim() || terminalDockerImage;
+  if (!isValidDockerImageName(image)) {
+    throw new Error(`docker image '${image}' is invalid`);
+  }
+  if (!terminalDockerAllowedImages.has(image)) {
+    throw new Error(`docker image '${image}' is not allow-listed`);
+  }
+  return image;
+}
+
+async function runWorkspaceCommandInDocker(commandName, commandArgs, cwdRel, timeout, sandboxRoot, envVars, dockerImage) {
+  const image = normalizeRequestedDockerImage(dockerImage);
   const inContainerCwd = cwdRel ? `/workspace/${cwdRel}` : "/workspace";
   const dockerArgs = [
     "run",
@@ -2714,7 +2755,7 @@ async function runWorkspaceCommandInDocker(commandName, commandArgs, cwdRel, tim
     dockerArgs.push("-e", `${key}=${value}`);
   }
 
-  dockerArgs.push(terminalDockerImage, commandName, ...commandArgs);
+  dockerArgs.push(image, commandName, ...commandArgs);
   return execFileAsync("docker", dockerArgs, { timeout });
 }
 
@@ -2778,11 +2819,12 @@ async function prepareTerminalExecution(cwdPath) {
   return { cwdAbs, cwdRel, sandboxRoot, hostExecEnv, containerExecEnv };
 }
 
-async function runDockerShellCommand(commandLine, cwdPath, timeoutMs) {
+async function runDockerShellCommand(commandLine, cwdPath, timeoutMs, options = {}) {
   const command = String(commandLine || "").trim();
   if (!command) {
     throw new Error("command is required");
   }
+  const dockerImage = normalizeRequestedDockerImage(options?.dockerImage);
 
   const maxTimeout = 900000;
   const defaultTimeout = 60000;
@@ -2790,7 +2832,7 @@ async function runDockerShellCommand(commandLine, cwdPath, timeoutMs) {
   const { cwdRel, sandboxRoot, containerExecEnv } = await prepareTerminalExecution(cwdPath || "");
 
   try {
-    const result = await runWorkspaceCommandInDocker("sh", ["-lc", command], cwdRel, timeout, sandboxRoot, containerExecEnv);
+    const result = await runWorkspaceCommandInDocker("sh", ["-lc", command], cwdRel, timeout, sandboxRoot, containerExecEnv, dockerImage);
     return {
       ok: true,
       command,
@@ -2799,6 +2841,7 @@ async function runDockerShellCommand(commandLine, cwdPath, timeoutMs) {
       args: ["-lc", command],
       cwd: cwdRel,
       runtime: "docker",
+      dockerImage,
       stdout: String(result.stdout || "").slice(0, 12000),
       stderr: String(result.stderr || "").slice(0, 12000)
     };
@@ -2811,6 +2854,7 @@ async function runDockerShellCommand(commandLine, cwdPath, timeoutMs) {
       args: ["-lc", command],
       cwd: cwdRel,
       runtime: "docker",
+      dockerImage,
       code: Number(error?.code || 1),
       stdout: String(error?.stdout || "").slice(0, 12000),
       stderr: String(error?.stderr || error?.message || "").slice(0, 12000)
@@ -2818,7 +2862,7 @@ async function runDockerShellCommand(commandLine, cwdPath, timeoutMs) {
   }
 }
 
-async function runSingleSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
+async function runSingleSafeTerminalCommand(commandName, args, cwdPath, timeoutMs, options = {}) {
   const name = String(commandName || "").trim().toLowerCase();
   if (blockedTerminalCommandsAlways.has(name)) {
     throw new Error(`command '${name}' is blocked on this server`);
@@ -2855,6 +2899,12 @@ async function runSingleSafeTerminalCommand(commandName, args, cwdPath, timeoutM
   const commandArgs = invocation.args;
   const commandToExecute = invocation.command;
   const effectiveRuntime = terminalRuntime === "docker" && !invocation.preferHostRuntime ? "docker" : "host";
+  const requestedDockerImage = String(options?.dockerImage || "").trim();
+  const dockerImage = effectiveRuntime === "docker" ? normalizeRequestedDockerImage(requestedDockerImage) : null;
+
+  if (requestedDockerImage && effectiveRuntime !== "docker") {
+    throw new Error("dockerImage is only available for commands that run in Docker runtime");
+  }
 
   if (effectiveRuntime === "host" && blockedTerminalCommandsHostOnly.has(name)) {
     throw new Error(`command '${name}' is blocked in host terminal runtime`);
@@ -2893,7 +2943,7 @@ async function runSingleSafeTerminalCommand(commandName, args, cwdPath, timeoutM
 
   try {
     const result = effectiveRuntime === "docker"
-      ? await runWorkspaceCommandInDocker(commandToExecute, commandArgs, cwdRel, timeout, sandboxRoot, containerExecEnv)
+      ? await runWorkspaceCommandInDocker(commandToExecute, commandArgs, cwdRel, timeout, sandboxRoot, containerExecEnv, dockerImage)
       : await execFileAsync(commandToExecute, commandArgs, { cwd: cwdAbs, timeout, env: hostExecEnv });
     return {
       ok: true,
@@ -2903,6 +2953,7 @@ async function runSingleSafeTerminalCommand(commandName, args, cwdPath, timeoutM
       args: commandArgs,
       cwd: cwdRel,
       runtime: effectiveRuntime,
+      dockerImage,
       stdout: String(result.stdout || "").slice(0, 12000),
       stderr: String(result.stderr || "").slice(0, 12000)
     };
@@ -2915,6 +2966,7 @@ async function runSingleSafeTerminalCommand(commandName, args, cwdPath, timeoutM
       args: commandArgs,
       cwd: cwdRel,
       runtime: effectiveRuntime,
+      dockerImage,
       code: Number(error?.code || 1),
       stdout: String(error?.stdout || "").slice(0, 12000),
       stderr: String(error?.stderr || error?.message || "").slice(0, 12000)
@@ -2943,6 +2995,7 @@ function summarizeTerminalSegment(result) {
     args: result.args,
     cwd: result.cwd,
     runtime: result.runtime,
+    dockerImage: result.dockerImage || null,
     ok: result.ok,
     code: result.code || 0,
     stdout: result.stdout,
@@ -2950,15 +3003,20 @@ function summarizeTerminalSegment(result) {
   };
 }
 
-async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
+async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs, options = {}) {
+  const requestedDockerImage = String(options?.dockerImage || "").trim();
+  if (requestedDockerImage && terminalRuntime !== "docker") {
+    throw new Error("dockerImage is only available when TERMINAL_RUNTIME=docker");
+  }
+
   if (terminalRuntime === "docker" && terminalDockerShellCommandLines && (!Array.isArray(args) || args.length === 0)) {
-    return runDockerShellCommand(commandName, cwdPath, timeoutMs);
+    return runDockerShellCommand(commandName, cwdPath, timeoutMs, options);
   }
 
   const segments = parseTerminalCommandSegments(commandName, args);
 
   if (segments.length === 1) {
-    return runSingleSafeTerminalCommand(segments[0].command, segments[0].args, cwdPath, timeoutMs);
+    return runSingleSafeTerminalCommand(segments[0].command, segments[0].args, cwdPath, timeoutMs, options);
   }
 
   const results = [];
@@ -2976,7 +3034,7 @@ async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
       continue;
     }
 
-    const result = await runSingleSafeTerminalCommand(segment.command, segment.args, currentCwd, timeoutMs);
+    const result = await runSingleSafeTerminalCommand(segment.command, segment.args, currentCwd, timeoutMs, options);
     previousResult = result;
     if (result.ok && typeof result.cwd === "string") {
       currentCwd = result.cwd;
@@ -3000,6 +3058,7 @@ async function runSafeTerminalCommand(commandName, args, cwdPath, timeoutMs) {
     args: [],
     cwd: finalResult.cwd || "",
     runtime: "mixed",
+    dockerImage: finalResult.dockerImage || (requestedDockerImage ? normalizeRequestedDockerImage(requestedDockerImage) : null),
     code: finalResult.code || 0,
     stdout: stdout.slice(0, 12000),
     stderr: stderr.slice(0, 12000),
@@ -3047,6 +3106,7 @@ async function runBuildTool(params = {}) {
   const profile = String(params?.profile || params?.action || "custom").trim().toLowerCase();
   const cwd = String(params?.cwd || "").trim();
   const timeoutMs = Number(params?.timeoutMs || 600000);
+  const dockerImage = String(params?.dockerImage || "").trim();
   const sourceDir = normalizeBuildPath(params?.sourceDir, ".");
   const buildDir = normalizeBuildPath(params?.buildDir, "build");
   const target = String(params?.target || "").trim();
@@ -3110,8 +3170,8 @@ async function runBuildTool(params = {}) {
       throw new Error("unsupported build profile");
   }
 
-  const result = await runSafeTerminalCommand(command, [], cwd, timeoutMs);
-  return { ...result, profile, buildCommand: command };
+  const result = await runSafeTerminalCommand(command, [], cwd, timeoutMs, { dockerImage });
+  return { ...result, profile, buildCommand: command, dockerImage: result.dockerImage || null };
 }
 
 function normalizeGitRefName(value, label = "ref") {
@@ -4175,6 +4235,7 @@ const agentToolDefinitions = [
           command: { type: "string" },
           args: { type: "array", items: { type: "string" } },
           cwd: { type: "string" },
+          dockerImage: { type: "string", description: "Optional allow-listed Docker image to use when TERMINAL_RUNTIME=docker, such as dockcross/windows-static-x64 or mstorsjo/llvm-mingw" },
           timeoutMs: { type: "number" }
         },
         required: ["command"]
@@ -4198,6 +4259,7 @@ const agentToolDefinitions = [
           jobs: { type: "number" },
           packages: { type: "array", items: { type: "string" } },
           args: { type: "array", items: { type: "string" } },
+          dockerImage: { type: "string", description: "Optional allow-listed Docker image to use when TERMINAL_RUNTIME=docker, such as dockcross/windows-static-x64 or mstorsjo/llvm-mingw" },
           timeoutMs: { type: "number" }
         },
         required: ["profile"]
@@ -4645,13 +4707,13 @@ async function executeAgentTool(req, callName, args) {
       return result;
     }
     case "run_terminal": {
-      const result = await runSafeTerminalCommand(args?.command, args?.args, args?.cwd, args?.timeoutMs);
-      await appendAuditLog(req, "agent-tool", { name: callName, command: result.command, ok: result.ok, cwd: result.cwd });
+      const result = await runSafeTerminalCommand(args?.command, args?.args, args?.cwd, args?.timeoutMs, { dockerImage: args?.dockerImage });
+      await appendAuditLog(req, "agent-tool", { name: callName, command: result.command, ok: result.ok, cwd: result.cwd, dockerImage: result.dockerImage || null });
       return result;
     }
     case "run_build": {
       const result = await runBuildTool(args || {});
-      await appendAuditLog(req, "agent-tool", { name: callName, profile: result.profile, command: result.buildCommand, ok: result.ok, cwd: result.cwd });
+      await appendAuditLog(req, "agent-tool", { name: callName, profile: result.profile, command: result.buildCommand, ok: result.ok, cwd: result.cwd, dockerImage: result.dockerImage || null });
       return result;
     }
     case "git_ops": {
@@ -6093,6 +6155,7 @@ app.get("/api/tools", (_req, res) => {
     terminal: {
       runtime: terminalRuntime,
       dockerImage: terminalRuntime === "docker" ? terminalDockerImage : null,
+      allowedDockerImages: terminalRuntime === "docker" ? Array.from(terminalDockerAllowedImages).sort() : [],
       dockerShellCommandLines: terminalRuntime === "docker" ? terminalDockerShellCommandLines : false,
       allowedCommands: Array.from(getAllowedTerminalCommands()).sort(),
       hostFallbackCommands: Array.from(terminalHostFallbackCommands).sort(),
@@ -6110,6 +6173,8 @@ app.get("/api/tools", (_req, res) => {
       "Terminal tool runs with an isolated per-workspace HOME/cache/env and host runtime cannot execute host-admin commands like sudo/apt.",
       "When TERMINAL_RUNTIME=docker, run_terminal command strings execute through sh -lc inside the container, so normal shell syntax like &&, ||, pipes, redirects, multiline backslashes, and flags works.",
       "Docker runtime commands may inspect normal container tool paths like /usr/bin and can use apt-get/dpkg inside the container.",
+      "Agents may pass dockerImage to run_terminal or run_build to use an allow-listed cross-build image such as dockcross/windows-static-x64 or mstorsjo/llvm-mingw.",
+      "Set TERMINAL_DOCKER_ALLOWED_IMAGES=image1,image2 to add more per-request Docker images without changing code.",
       "Terminal accepts command strings such as `git clone https://github.com/org/repo.git repo`, `cd repo && grep -R TODO .`, and simple conditional chains like `pwd && ls -la && git status 2>&1 || echo no repo`.",
       "Set TERMINAL_EXTRA_COMMANDS=cmd1,cmd2 to add more allow-listed commands from server config.",
       "Archive helpers include 7z and vfa in the terminal allow-list; vfa can resolve from TERMINAL_VFA_COMMAND or TERMINAL_VFA_SCRIPT.",
@@ -6704,12 +6769,14 @@ app.post("/api/files/terminal", async (req, res) => {
       req.body?.command,
       req.body?.args,
       req.body?.cwd,
-      req.body?.timeoutMs
+      req.body?.timeoutMs,
+      { dockerImage: req.body?.dockerImage }
     );
 
     await appendAuditLog(req, "terminal", {
       command: result.command,
       cwd: result.cwd,
+      dockerImage: result.dockerImage || null,
       ok: result.ok,
       code: result.code || 0
     });
