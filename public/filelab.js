@@ -113,6 +113,12 @@ const qmlMode = createSimpleWordMode({
   slashComments: true,
   blockComments: true
 });
+const genericTextMode = createSimpleWordMode({
+  keywords: new Set(),
+  hashComments: true,
+  slashComments: true,
+  blockComments: true
+});
 
 const fileListEl = document.getElementById("fileList");
 const dirPathInputEl = document.getElementById("dirPathInput");
@@ -147,6 +153,7 @@ const uploadBtnEl = document.getElementById("uploadBtn");
 const uploadFolderBtnEl = document.getElementById("uploadFolderBtn");
 const newFileBtnEl = document.getElementById("newFileBtn");
 const newDirBtnEl = document.getElementById("newDirBtn");
+const duplicateBtnEl = document.getElementById("duplicateBtn");
 const renameBtnEl = document.getElementById("renameBtn");
 const moveBtnEl = document.getElementById("moveBtn");
 const deleteBtnEl = document.getElementById("deleteBtn");
@@ -182,6 +189,7 @@ let currentSyntaxTheme = "verdant";
 let currentFontSize = 14;
 let minimapEnabled = true;
 let currentWorkspaceCode = "";
+let lastLintMessages = [];
 let uploadPolicy = {
   defaultMaxBytes: DEFAULT_MAX_UPLOAD_BYTES,
   bypassConfiguredForWorkspace: false,
@@ -445,32 +453,32 @@ function getMinimapColors() {
   const isDark = getCurrentTheme() === "dark";
   if (currentSyntaxTheme === "ember") {
     return isDark
-      ? { bg: "#131111", line: "rgba(255, 176, 127, 0.7)", viewport: "rgba(255, 176, 127, 0.35)" }
-      : { bg: "#fff7f1", line: "rgba(143, 58, 8, 0.58)", viewport: "rgba(143, 58, 8, 0.2)" };
+      ? { bg: "#131111", line: "rgba(255, 176, 127, 0.7)", viewport: "rgba(255, 176, 127, 0.35)", error: "#ff6b6b", cursor: "#ffe082", symbol: "#ffd3a6" }
+      : { bg: "#fff7f1", line: "rgba(143, 58, 8, 0.58)", viewport: "rgba(143, 58, 8, 0.2)", error: "#b53030", cursor: "#9a6900", symbol: "#7a4414" };
   }
   if (currentSyntaxTheme === "oceanic") {
     return isDark
-      ? { bg: "#10171c", line: "rgba(135, 220, 255, 0.7)", viewport: "rgba(135, 220, 255, 0.35)" }
-      : { bg: "#f1f8ff", line: "rgba(4, 91, 143, 0.52)", viewport: "rgba(4, 91, 143, 0.18)" };
+      ? { bg: "#10171c", line: "rgba(135, 220, 255, 0.7)", viewport: "rgba(135, 220, 255, 0.35)", error: "#ff5d78", cursor: "#ffe082", symbol: "#7ee7ff" }
+      : { bg: "#f1f8ff", line: "rgba(4, 91, 143, 0.52)", viewport: "rgba(4, 91, 143, 0.18)", error: "#c91f42", cursor: "#a46a00", symbol: "#006a8f" };
   }
   if (currentSyntaxTheme === "mono") {
     return isDark
-      ? { bg: "#11161b", line: "rgba(220, 232, 242, 0.58)", viewport: "rgba(220, 232, 242, 0.24)" }
-      : { bg: "#f7fbff", line: "rgba(31, 42, 53, 0.46)", viewport: "rgba(31, 42, 53, 0.2)" };
+      ? { bg: "#11161b", line: "rgba(220, 232, 242, 0.58)", viewport: "rgba(220, 232, 242, 0.24)", error: "#ff6b6b", cursor: "#f6df7a", symbol: "#cdd9e4" }
+      : { bg: "#f7fbff", line: "rgba(31, 42, 53, 0.46)", viewport: "rgba(31, 42, 53, 0.2)", error: "#9f1d1d", cursor: "#8a6400", symbol: "#1f2a35" };
   }
   if (currentSyntaxTheme === "preparing") {
     return isDark
-      ? { bg: "#16111d", line: "rgba(255, 184, 107, 0.72)", viewport: "rgba(255, 184, 107, 0.32)" }
-      : { bg: "#fff7ef", line: "rgba(196, 90, 22, 0.54)", viewport: "rgba(196, 90, 22, 0.18)" };
+      ? { bg: "#16111d", line: "rgba(255, 184, 107, 0.72)", viewport: "rgba(255, 184, 107, 0.32)", error: "#ff5a79", cursor: "#fff07a", symbol: "#cda7ff" }
+      : { bg: "#fff7ef", line: "rgba(196, 90, 22, 0.54)", viewport: "rgba(196, 90, 22, 0.18)", error: "#b70d2b", cursor: "#9a6900", symbol: "#7a3aa6" };
   }
   if (currentSyntaxTheme === "cyberpunk-hc") {
     return isDark
-      ? { bg: "#0b0614", line: "rgba(255, 122, 0, 0.78)", viewport: "rgba(209, 0, 255, 0.34)" }
-      : { bg: "#fff4ff", line: "rgba(217, 74, 0, 0.6)", viewport: "rgba(143, 0, 201, 0.24)" };
+      ? { bg: "#0b0614", line: "rgba(255, 122, 0, 0.78)", viewport: "rgba(209, 0, 255, 0.34)", error: "#ff2f57", cursor: "#fff200", symbol: "#28a7ff" }
+      : { bg: "#fff4ff", line: "rgba(217, 74, 0, 0.6)", viewport: "rgba(143, 0, 201, 0.24)", error: "#c21f42", cursor: "#946f00", symbol: "#4734de" };
   }
   return isDark
-    ? { bg: "#0f1714", line: "rgba(125, 228, 176, 0.72)", viewport: "rgba(125, 228, 176, 0.3)" }
-    : { bg: "#f1f8f5", line: "rgba(11, 107, 66, 0.54)", viewport: "rgba(11, 107, 66, 0.18)" };
+    ? { bg: "#0f1714", line: "rgba(125, 228, 176, 0.72)", viewport: "rgba(125, 228, 176, 0.3)", error: "#ff5d78", cursor: "#f7e27c", symbol: "#9fcdf7" }
+    : { bg: "#f1f8f5", line: "rgba(11, 107, 66, 0.54)", viewport: "rgba(11, 107, 66, 0.18)", error: "#b70d2b", cursor: "#936600", symbol: "#134f8b" };
 }
 
 function hashLine(line) {
@@ -480,6 +488,23 @@ function hashLine(line) {
     hash |= 0;
   }
   return Math.abs(hash);
+}
+
+function isSymbolLine(text) {
+  const trimmed = String(text || "").trim();
+  return /^(export\s+)?(async\s+)?(function|class|interface|type|enum|struct|namespace)\s+[A-Za-z_$][\w$-]*/.test(trimmed)
+    || /^(def|class)\s+[A-Za-z_]\w*/.test(trimmed)
+    || /^[A-Za-z_$][\w$]*\s*[:=]\s*(async\s*)?\([^)]*\)\s*=>/.test(trimmed)
+    || /^#{1,6}\s+\S+/.test(trimmed);
+}
+
+function drawMinimapMarker(ctx, lineNumber, lineStep, width, color, offset = 0, markerHeight = 2) {
+  if (!lineNumber || lineNumber < 1) {
+    return;
+  }
+  const y = Math.max(0, (lineNumber - 1) * lineStep);
+  ctx.fillStyle = color;
+  ctx.fillRect(offset, y, Math.max(4, width - offset), Math.max(markerHeight, lineStep * 1.1));
 }
 
 function ensureMinimapCanvasSize() {
@@ -591,6 +616,19 @@ function renderMinimap() {
     ctx.fillStyle = colors.line.replace(/0\.\d+\)/, `${Math.min(0.85, 0.45 + variation)})`);
     ctx.fillRect(4, y, barWidth, barHeight);
   }
+
+  for (let i = 0; i < lines.length; i += 1) {
+    if (isSymbolLine(lines[i])) {
+      drawMinimapMarker(ctx, i + 1, lineStep, width, colors.symbol, 0, 2);
+    }
+  }
+
+  for (const item of lastLintMessages) {
+    drawMinimapMarker(ctx, Number(item?.line || 0), lineStep, width, colors.error, 0, 3);
+  }
+
+  const cursorLine = view.state.doc.lineAt(view.state.selection.main.head).number;
+  drawMinimapMarker(ctx, cursorLine, lineStep, width, colors.cursor, 0, 2);
 
   if (minimapViewportEl) {
     minimapViewportEl.style.background = colors.viewport;
@@ -767,6 +805,9 @@ async function switchWorkspace() {
     setStatus("Workspace code must use letters, numbers, _ or -.");
     return;
   }
+  if (!confirmDiscardUnsavedChanges("switch workspaces")) {
+    return;
+  }
 
   workspaceSwitchBtnEl.disabled = true;
   try {
@@ -799,7 +840,7 @@ function extensionForPath(filePath) {
   if (lower.endsWith(".qml") || lower.endsWith(".qmltypes") || lower.endsWith(".qrc")) return StreamLanguage.define(qmlMode);
   if (lower.endsWith(".syn") || lower.endsWith(".synopter") || lower.endsWith(".ccs5") || lower.endsWith(".spt")) return StreamLanguage.define(synopterMode);
   if (lower.endsWith(".c") || lower.endsWith(".h") || lower.endsWith(".cc") || lower.endsWith(".cpp") || lower.endsWith(".cxx") || lower.endsWith(".hpp") || lower.endsWith(".hh") || lower.endsWith(".hxx")) return cpp();
-  return [];
+  return StreamLanguage.define(genericTextMode);
 }
 
 function initEditor() {
@@ -817,7 +858,10 @@ function initEditor() {
       highlightActiveLineGutter(),
       EditorView.lineWrapping,
       EditorView.updateListener.of((update) => {
-        if (update.docChanged || update.viewportChanged) {
+        if (update.docChanged) {
+          lastLintMessages = [];
+        }
+        if (update.docChanged || update.viewportChanged || update.selectionSet) {
           scheduleMinimapRender();
         }
       }),
@@ -855,6 +899,7 @@ function requireEditorView() {
 function setEditorContent(text, filePath) {
   const editorView = requireEditorView();
   const ext = extensionForPath(filePath);
+  lastLintMessages = [];
   editorView.dispatch({
     changes: { from: 0, to: editorView.state.doc.length, insert: text },
     effects: languageCompartment.reconfigure(ext)
@@ -866,8 +911,20 @@ function getEditorText() {
   return requireEditorView().state.doc.toString();
 }
 
+function hasUnsavedEditorChanges() {
+  return Boolean(activeFilePath) && getEditorText() !== originalFileContent;
+}
+
+function confirmDiscardUnsavedChanges(actionLabel = "continue") {
+  if (!hasUnsavedEditorChanges()) {
+    return true;
+  }
+  return window.confirm(`You have unsaved changes in ${activeFilePath}. Discard them and ${actionLabel}?`);
+}
+
 function clearLintDiagnostics() {
-  // No in-editor diagnostics currently; lint results are shown via alert/status.
+  lastLintMessages = [];
+  scheduleMinimapRender();
 }
 
 function setCursorPosition(line, col) {
@@ -1194,6 +1251,9 @@ async function uploadFilesChunked(files, bypassCode, totalBytes) {
 }
 
 async function loadDirectory(pathValue = currentDir) {
+  if (String(pathValue || "").trim() !== currentDir && !confirmDiscardUnsavedChanges("change folders")) {
+    return;
+  }
   const path = String(pathValue || "").trim();
   const query = new URLSearchParams({ path });
   const data = await apiJson(`/api/files/list?${query.toString()}`);
@@ -1251,7 +1311,12 @@ function renderFileList(entries) {
     const item = document.createElement("li");
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = `file-item ${entry.type}`;
+    btn.className = [
+      "file-item",
+      entry.type,
+      entry.hidden ? "hidden-entry" : "",
+      entry.executable ? "executable" : ""
+    ].filter(Boolean).join(" ");
     btn.textContent = `${entry.type === "directory" ? "[D]" : "[F]"} ${entry.name}`;
     btn.title = `${entry.name} (${entry.size} bytes)`;
 
@@ -1267,6 +1332,9 @@ function renderFileList(entries) {
       }
 
       try {
+        if (activeFilePath !== targetPath && !confirmDiscardUnsavedChanges("open another file")) {
+          return;
+        }
         const fileData = await apiJson(`/api/files/read?${new URLSearchParams({ path: targetPath }).toString()}`);
         activeFilePath = fileData.path;
         selectedPath = activeFilePath;
@@ -1318,6 +1386,9 @@ async function saveActiveFile() {
 async function openFileByPath(targetPath, line, col) {
   const cleanPath = normalizeRelativePath(targetPath);
   if (!cleanPath) {
+    return;
+  }
+  if (activeFilePath !== cleanPath && !confirmDiscardUnsavedChanges("open another file")) {
     return;
   }
 
@@ -1373,6 +1444,7 @@ async function formatActiveFile() {
   });
 
   setEditorContent(data.formatted || "", activeFilePath);
+  lastLintMessages = [];
   setStatus(`Formatted with parser: ${data.parser}`);
 }
 
@@ -1388,7 +1460,9 @@ async function lintActiveFile() {
     body: JSON.stringify({ path: activeFilePath, content: getEditorText() })
   });
 
-  const lines = (data.messages || []).map((item) => `${item.severity.toUpperCase()} L${item.line}:${item.column} ${item.message}${item.ruleId ? ` (${item.ruleId})` : ""}`);
+  lastLintMessages = Array.isArray(data.messages) ? data.messages : [];
+  scheduleMinimapRender();
+  const lines = lastLintMessages.map((item) => `${item.severity.toUpperCase()} L${item.line}:${item.column} ${item.message}${item.ruleId ? ` (${item.ruleId})` : ""}`);
   window.alert(lines.length ? lines.join("\n") : "No lint issues found.");
   setStatus(`Linted ${activeFilePath}: ${data.issueCount} issue(s)`);
 }
@@ -1650,6 +1724,36 @@ newDirBtnEl.addEventListener("click", async () => {
   }
 });
 
+duplicateBtnEl.addEventListener("click", async () => {
+  if (!selectedPath) {
+    setStatus("Select a file or folder first.");
+    return;
+  }
+  const baseName = selectedPath.split("/").pop() || "copy";
+  const parent = parentDir(selectedPath);
+  const dotIndex = baseName.lastIndexOf(".");
+  const copyName = dotIndex > 0
+    ? `${baseName.slice(0, dotIndex)} copy${baseName.slice(dotIndex)}`
+    : `${baseName} copy`;
+  const defaultPath = joinPath(parent, copyName);
+  const toPath = window.prompt("Duplicate to path:", defaultPath);
+  if (!toPath) return;
+
+  try {
+    const data = await apiJson("/api/files/copy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fromPath: selectedPath, toPath })
+    });
+    selectedPath = data.toPath;
+    selectedPathType = data.type || selectedPathType;
+    await loadDirectory(currentDir);
+    setStatus(`Duplicated to ${selectedPath}`);
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+});
+
 renameBtnEl.addEventListener("click", async () => {
   if (!selectedPath) {
     setStatus("Select a file or folder first.");
@@ -1824,6 +1928,14 @@ if (minimapPaneEl) {
 
 window.addEventListener("resize", () => {
   scheduleMinimapRender();
+});
+
+window.addEventListener("beforeunload", (event) => {
+  if (!hasUnsavedEditorChanges()) {
+    return;
+  }
+  event.preventDefault();
+  event.returnValue = "";
 });
 
 ["dragenter", "dragover"].forEach((eventName) => {

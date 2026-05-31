@@ -115,6 +115,7 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
 - `POST /api/files/write`
 - `POST /api/files/upload` (multipart, field `file`, optional `path`)
 - `GET /api/files/download?path=...` (files download directly; directories download as zip archives)
+- `POST /api/files/copy`
 - `POST /api/files/move`
 - `POST /api/files/rename`
 - `DELETE /api/files/delete?path=...`

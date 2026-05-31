@@ -914,6 +914,29 @@ textarea:focus {
   border-color: rgba(10, 143, 86, 0.35);
 }
 
+.file-item.file {
+  border-color: rgba(24, 80, 143, 0.26);
+}
+
+.file-item.hidden-entry {
+  color: var(--muted);
+  border-style: dashed;
+}
+
+.file-item.hidden-entry.directory {
+  background: rgba(143, 58, 8, 0.08);
+}
+
+.file-item.executable {
+  border-color: rgba(108, 42, 194, 0.45);
+  box-shadow: inset 3px 0 0 rgba(108, 42, 194, 0.42);
+}
+
+[data-theme="dark"] .file-item.executable {
+  border-color: rgba(210, 165, 255, 0.5);
+  box-shadow: inset 3px 0 0 rgba(210, 165, 255, 0.38);
+}
+
 .file-item.selected {
   border-color: rgba(10, 143, 86, 0.8);
   background: rgba(10, 143, 86, 0.16);

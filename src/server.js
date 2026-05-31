@@ -2477,6 +2477,22 @@ async function createSandboxDirectory(pathValue) {
   return { ok: true, path: rel };
 }
 
+async function copySandboxPath(fromPath, toPath) {
+  const { absolute: fromAbs, rel: fromRel } = resolveSandboxPath(fromPath || "");
+  const { absolute: toAbs, rel: toRel } = resolveSandboxPath(toPath || "");
+  if (!fromRel) {
+    throw new Error("refusing to duplicate sandbox root");
+  }
+  if (!toRel) {
+    throw new Error("destination path is required");
+  }
+  const sourceStat = await fsp.stat(fromAbs);
+  await fsp.mkdir(path.dirname(toAbs), { recursive: true });
+  await fsp.cp(fromAbs, toAbs, { recursive: true, errorOnExist: true, force: false });
+  await commitSandboxSnapshot(`copy ${fromRel} -> ${toRel}`);
+  return { ok: true, fromPath: fromRel, toPath: toRel, type: sourceStat.isDirectory() ? "directory" : "file" };
+}
+
 async function zipSandboxPath(sourcePath, archivePath) {
   const { absolute: sourceAbs, rel: sourceRel } = resolveSandboxPath(sourcePath || "");
   const sourceStat = await fsp.stat(sourceAbs);
@@ -4625,6 +4641,7 @@ async function executeAgentTool(req, callName, args) {
           { method: "POST", path: "/api/files/write", purpose: "Write file" },
           { method: "POST", path: "/api/files/upload", purpose: "Upload file(s)" },
           { method: "GET", path: "/api/files/download?path=...", purpose: "Download file or directory zip" },
+          { method: "POST", path: "/api/files/copy", purpose: "Duplicate path" },
           { method: "POST", path: "/api/files/move", purpose: "Move path" },
           { method: "POST", path: "/api/files/rename", purpose: "Rename path" },
           { method: "DELETE", path: "/api/files/delete?path=...", purpose: "Delete path" },
@@ -6285,6 +6302,7 @@ app.get("/api/tools", (_req, res) => {
       { method: "POST", path: "/api/files/write", purpose: "Write file text", body: { path: "src/app.js", content: "..." } },
       { method: "POST", path: "/api/files/upload", purpose: "Upload one or many files (fields: files or file, optional path and relativePaths[])" },
       { method: "GET", path: "/api/files/download?path=src/app.js", purpose: "Download a file or a directory as a zip" },
+      { method: "POST", path: "/api/files/copy", purpose: "Duplicate file or directory", body: { fromPath: "docs/a.txt", toPath: "docs/a copy.txt" } },
       { method: "POST", path: "/api/files/move", purpose: "Move file or directory", body: { fromPath: "old.txt", toPath: "docs/new.txt" } },
       { method: "POST", path: "/api/files/rename", purpose: "Rename in place", body: { path: "docs/a.txt", newName: "b.txt" } },
       { method: "DELETE", path: "/api/files/delete?path=docs/a.txt", purpose: "Delete file or directory recursively" },
@@ -6372,6 +6390,7 @@ app.get("/api/openapi.json", (_req, res) => {
       },
       "/api/files/upload/chunk/{uploadId}/complete": { post: { summary: "Complete chunked upload" } },
       "/api/files/download": { get: { summary: "Download file or directory zip" } },
+      "/api/files/copy": { post: { summary: "Duplicate path" } },
       "/api/files/move": { post: { summary: "Move path" } },
       "/api/files/rename": { post: { summary: "Rename path" } },
       "/api/files/delete": { delete: { summary: "Delete path" } },
@@ -6431,6 +6450,9 @@ app.get("/api/files/list", async (req, res) => {
         name: entry.name,
         type: entry.isDirectory() ? "directory" : "file",
         size: stat.size,
+        mode: (stat.mode & 0o777).toString(8).padStart(3, "0"),
+        hidden: entry.name.startsWith("."),
+        executable: !entry.isDirectory() && Boolean(stat.mode & 0o111),
         modifiedAt: stat.mtime.toISOString()
       };
     }));
@@ -6711,6 +6733,16 @@ app.get("/api/files/download", async (req, res) => {
     return res.download(absolute, path.basename(rel || absolute));
   } catch (error) {
     return res.status(400).json({ error: String(error?.message || "Failed to download path") });
+  }
+});
+
+app.post("/api/files/copy", async (req, res) => {
+  try {
+    const result = await copySandboxPath(req.body?.fromPath || "", req.body?.toPath || "");
+    await appendAuditLog(req, "copy", { fromPath: result.fromPath, toPath: result.toPath, type: result.type });
+    return res.json(result);
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to duplicate path") });
   }
 });
 
