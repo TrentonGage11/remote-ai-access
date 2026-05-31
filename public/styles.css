@@ -1092,6 +1092,76 @@ textarea:focus {
   background: rgba(203, 245, 225, 0.08);
 }
 
+.audit-shell {
+  width: min(1320px, calc(100vw - 32px));
+  max-width: none;
+}
+
+.audit-shell .card {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.audit-filters {
+  display: grid;
+  grid-template-columns: minmax(90px, 120px) minmax(180px, 220px) minmax(180px, 1fr) minmax(220px, 1.2fr) auto auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.audit-field {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.audit-field span {
+  color: var(--muted);
+  font: 700 0.72rem/1.2 "Space Grotesk", "Segoe UI", sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.audit-field input,
+.audit-field select {
+  width: 100%;
+  min-width: 0;
+}
+
+.audit-switch {
+  height: 38px;
+  align-self: end;
+}
+
+.audit-json-pane {
+  width: 100%;
+  max-width: 100%;
+  white-space: pre;
+  overflow: auto;
+  overflow-wrap: normal;
+  word-break: normal;
+  overscroll-behavior: contain;
+}
+
+.json-key {
+  color: var(--code-key);
+  font-weight: 700;
+}
+
+.json-string {
+  color: var(--code-string);
+}
+
+.json-number {
+  color: var(--code-number);
+}
+
+.json-bool,
+.json-null {
+  color: var(--code-keyword);
+  font-weight: 700;
+}
+
 .muted-inline {
   margin: 8px 0 0;
   color: var(--muted);
@@ -1329,6 +1399,14 @@ textarea:focus {
 }
 
 @media (max-width: 900px) {
+  .audit-filters {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .audit-field-wide {
+    grid-column: span 2;
+  }
+
   .diff-columns {
     grid-template-columns: 1fr;
   }
@@ -1343,6 +1421,24 @@ textarea:focus {
 }
 
 @media (max-width: 640px) {
+  .audit-shell {
+    width: min(100% - 20px, 1320px);
+    padding: 14px 0 20px;
+  }
+
+  .audit-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .audit-field-wide {
+    grid-column: auto;
+  }
+
+  .audit-switch,
+  .audit-filters .btn {
+    width: 100%;
+  }
+
   .app-shell {
     grid-template-columns: 1fr;
     padding: 14px 10px 20px;

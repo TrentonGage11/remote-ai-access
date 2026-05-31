@@ -14,6 +14,11 @@ const copyOutputBtnEl = document.getElementById("copyOutputBtn");
 const exportJsonBtnEl = document.getElementById("exportJsonBtn");
 const exportCsvBtnEl = document.getElementById("exportCsvBtn");
 const loadMoreAuditBtnEl = document.getElementById("loadMoreAuditBtn");
+const syntaxThemeSelectEl = document.getElementById("syntaxThemeSelect");
+
+const THEME_STORAGE_KEY = "remote-ai-access-theme";
+const FILELAB_SYNTAX_THEME_KEY = "filelab-syntax-theme";
+const SYNTAX_THEMES = new Set(["verdant", "ember", "oceanic", "mono", "preparing", "cyberpunk-hc"]);
 
 let currentEntries = [];
 let selectedEntry = null;
@@ -26,6 +31,61 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/\"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function initAppearance() {
+  const storedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+  if (storedTheme === "dark" || storedTheme === "light") {
+    document.documentElement.setAttribute("data-theme", storedTheme);
+  }
+
+  const storedSyntax = localStorage.getItem(FILELAB_SYNTAX_THEME_KEY);
+  applySyntaxTheme(SYNTAX_THEMES.has(storedSyntax) ? storedSyntax : "verdant", false);
+}
+
+function applySyntaxTheme(themeName, persist = true) {
+  const normalized = SYNTAX_THEMES.has(themeName) ? themeName : "verdant";
+  document.documentElement.setAttribute("data-code-theme", normalized);
+  if (syntaxThemeSelectEl) {
+    syntaxThemeSelectEl.value = normalized;
+  }
+  if (persist) {
+    localStorage.setItem(FILELAB_SYNTAX_THEME_KEY, normalized);
+  }
+}
+
+function renderJsonHtml(value) {
+  const source = String(value || "");
+  const tokenPattern = /("(?:\\u[\da-fA-F]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g;
+  let html = "";
+  let lastIndex = 0;
+  for (const matchResult of source.matchAll(tokenPattern)) {
+    const match = matchResult[0];
+    const index = matchResult.index || 0;
+    html += escapeHtml(source.slice(lastIndex, index));
+    const escaped = escapeHtml(match);
+    if (match.endsWith(":")) {
+      html += `<span class="json-key">${escaped}</span>`;
+    } else if (match.startsWith("\"")) {
+      html += `<span class="json-string">${escaped}</span>`;
+    } else if (/true|false/.test(match)) {
+      html += `<span class="json-bool">${escaped}</span>`;
+    } else if (match === "null") {
+      html += `<span class="json-null">${escaped}</span>`;
+    } else {
+      html += `<span class="json-number">${escaped}</span>`;
+    }
+    lastIndex = index + match.length;
+  }
+  html += escapeHtml(source.slice(lastIndex));
+  return html;
+}
+
+function setJsonPre(preEl, value) {
+  if (!preEl) {
+    return;
+  }
+  preEl.innerHTML = renderJsonHtml(String(value || ""));
 }
 
 function timeAgo(timestamp) {
@@ -66,14 +126,14 @@ function renderSelectedEntry(entry) {
   const search = String(detailSearchInputEl?.value || "").trim().toLowerCase();
   const formatted = JSON.stringify(entry, null, 2);
   if (!search) {
-    auditDetailEl.textContent = formatted;
+    setJsonPre(auditDetailEl, formatted);
     return;
   }
 
   const lower = formatted.toLowerCase();
   const at = lower.indexOf(search);
   if (at < 0) {
-    auditDetailEl.textContent = `${formatted}\n\n[search: '${search}' not found]`;
+    setJsonPre(auditDetailEl, `${formatted}\n\n[search: '${search}' not found]`);
     return;
   }
 
@@ -82,7 +142,7 @@ function renderSelectedEntry(entry) {
   const prefix = start > 0 ? "..." : "";
   const suffix = end < formatted.length ? "..." : "";
   const excerpt = formatted.slice(start, end);
-  auditDetailEl.textContent = `${formatted}\n\n[search excerpt]\n${prefix}${excerpt}${suffix}`;
+  setJsonPre(auditDetailEl, `${formatted}\n\n[search excerpt]\n${prefix}${excerpt}${suffix}`);
 }
 
 function renderEntryList(entries) {
@@ -163,7 +223,7 @@ async function loadAudit({ append = false } = {}) {
       loadMoreAuditBtnEl.textContent = paging.hasMore ? "Load More" : "No More Records";
     }
     renderEntryList(currentEntries);
-    auditJsonEl.textContent = JSON.stringify(currentEntries, null, 2);
+    setJsonPre(auditJsonEl, JSON.stringify(currentEntries, null, 2));
   } catch (error) {
     currentEntries = [];
     selectedEntry = null;
@@ -246,6 +306,11 @@ traceIdInputEl?.addEventListener("change", () => loadAudit({ append: false }));
 onlyErrorsToggleEl?.addEventListener("change", () => loadAudit({ append: false }));
 detailSearchInputEl?.addEventListener("input", () => renderSelectedEntry(selectedEntry));
 loadMoreAuditBtnEl?.addEventListener("click", () => loadAudit({ append: true }));
+syntaxThemeSelectEl?.addEventListener("change", () => {
+  applySyntaxTheme(syntaxThemeSelectEl.value);
+  renderSelectedEntry(selectedEntry);
+  setJsonPre(auditJsonEl, JSON.stringify(currentEntries, null, 2));
+});
 
 copyArgsBtnEl?.addEventListener("click", async () => {
   const text = JSON.stringify(selectedEntry?.details?.args || null, null, 2);
@@ -273,5 +338,6 @@ exportCsvBtnEl?.addEventListener("click", () => {
   downloadTextFile(`audit-${Date.now()}.csv`, exportEntriesAsCsv(currentEntries));
 });
 
+initAppearance();
 applyFiltersFromLocation();
 loadAudit({ append: false });

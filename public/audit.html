@@ -16,7 +16,7 @@
     <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
     <div class="bg-glow bg-glow-b" aria-hidden="true"></div>
 
-    <main class="docs-shell">
+    <main class="docs-shell audit-shell">
       <section class="card reveal" style="--d: 30ms">
         <div class="topbar">
           <div>
@@ -24,26 +24,49 @@
             <p>Per-operation records from file and git tool endpoints.</p>
           </div>
           <div class="top-actions">
+            <label class="control-chip" for="syntaxThemeSelect">
+              Syntax
+              <select id="syntaxThemeSelect" aria-label="Syntax color theme">
+                <option value="verdant">Verdant</option>
+                <option value="ember">Ember</option>
+                <option value="oceanic">Oceanic</option>
+                <option value="mono">Mono Ink</option>
+                <option value="preparing">Preparing</option>
+                <option value="cyberpunk-hc">Cyberpunk HC</option>
+              </select>
+            </label>
             <a class="btn btn-soft" href="filelab.html">File Lab</a>
             <button id="refreshAuditBtn" class="btn">Refresh</button>
           </div>
         </div>
       </section>
 
-      <section class="card reveal" style="--d: 70ms">
-        <div class="path-row" style="max-width: 980px; gap: 10px; flex-wrap: wrap;">
-          <input id="limitInput" type="number" min="1" max="1000" value="200" />
-          <select id="operationFilterSelect">
-            <option value="">All operations</option>
-            <option value="agent-tool-record">agent-tool-record</option>
-            <option value="agent-tool-error">agent-tool-error</option>
-            <option value="agent-tool">agent-tool</option>
-            <option value="git_ops">git_ops</option>
-            <option value="notifications-list">notifications-list</option>
-          </select>
-          <input id="toolNameInput" type="text" placeholder="tool name (optional)" />
-          <input id="traceIdInput" type="text" placeholder="trace id (optional)" />
-          <label class="switch" style="padding: 0 8px;">
+      <section class="card reveal audit-filter-card" style="--d: 70ms">
+        <div class="audit-filters">
+          <label class="audit-field" for="limitInput">
+            <span>Limit</span>
+            <input id="limitInput" type="number" min="1" max="1000" value="200" />
+          </label>
+          <label class="audit-field" for="operationFilterSelect">
+            <span>Operation</span>
+            <select id="operationFilterSelect">
+              <option value="">All operations</option>
+              <option value="agent-tool-record">agent-tool-record</option>
+              <option value="agent-tool-error">agent-tool-error</option>
+              <option value="agent-tool">agent-tool</option>
+              <option value="git_ops">git_ops</option>
+              <option value="notifications-list">notifications-list</option>
+            </select>
+          </label>
+          <label class="audit-field audit-field-wide" for="toolNameInput">
+            <span>Tool</span>
+            <input id="toolNameInput" type="text" placeholder="tool name (optional)" />
+          </label>
+          <label class="audit-field audit-field-wide" for="traceIdInput">
+            <span>Trace</span>
+            <input id="traceIdInput" type="text" placeholder="trace id (optional)" />
+          </label>
+          <label class="switch audit-switch">
             <input id="onlyErrorsToggle" type="checkbox" />
             <span>Only errors</span>
           </label>
@@ -67,7 +90,7 @@
             <button id="exportCsvBtn" class="btn btn-soft" type="button">Export CSV</button>
           </div>
         </div>
-        <pre id="auditDetail" class="doc-json">Select a record to inspect args/output.</pre>
+        <pre id="auditDetail" class="doc-json audit-json-pane">Select a record to inspect args/output.</pre>
       </section>
 
       <section class="card reveal" style="--d: 140ms">
@@ -77,7 +100,7 @@
             <button id="loadMoreAuditBtn" class="btn btn-soft" type="button">Load More</button>
           </div>
         </div>
-        <pre id="auditJson" class="doc-json">Loading...</pre>
+        <pre id="auditJson" class="doc-json audit-json-pane">Loading...</pre>
       </section>
     </main>
 
