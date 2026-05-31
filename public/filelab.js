@@ -1224,6 +1224,13 @@ function hideDiffModal() {
   diffModalEl.setAttribute("aria-hidden", "true");
 }
 
+function markSelectedFileItem(button) {
+  for (const selected of fileListEl.querySelectorAll(".file-item.selected")) {
+    selected.classList.remove("selected");
+  }
+  button?.classList.add("selected");
+}
+
 function renderFileList(entries) {
   fileListEl.innerHTML = "";
 
@@ -1255,7 +1262,7 @@ function renderFileList(entries) {
         selectedPathType = "directory";
         activePathLabelEl.textContent = `Folder selected: ${targetPath}`;
         setStatus(`Selected folder ${targetPath}. Double-click to open.`);
-        renderFileList(entries);
+        markSelectedFileItem(btn);
         return;
       }
 
@@ -1264,6 +1271,7 @@ function renderFileList(entries) {
         activeFilePath = fileData.path;
         selectedPath = activeFilePath;
         selectedPathType = "file";
+        markSelectedFileItem(btn);
         originalFileContent = fileData.content || "";
         activePathLabelEl.textContent = activeFilePath;
         setEditorContent(fileData.content || "", activeFilePath);
