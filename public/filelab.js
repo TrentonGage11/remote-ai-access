@@ -172,6 +172,8 @@ const FONT_SIZE_MAX = 22;
 
 let currentDir = "";
 let activeFilePath = "";
+let selectedPath = "";
+let selectedPathType = "";
 let originalFileContent = "";
 let view;
 let pendingSaveAction = null;
@@ -1249,18 +1251,19 @@ function renderFileList(entries) {
     btn.addEventListener("click", async () => {
       const targetPath = joinPath(currentDir, entry.name);
       if (entry.type === "directory") {
-        try {
-          await loadDirectory(targetPath);
-          setStatus(`Opened folder: ${targetPath}`);
-        } catch (error) {
-          setStatus(`Error: ${error.message}`);
-        }
+        selectedPath = targetPath;
+        selectedPathType = "directory";
+        activePathLabelEl.textContent = `Folder selected: ${targetPath}`;
+        setStatus(`Selected folder ${targetPath}. Double-click to open.`);
+        renderFileList(entries);
         return;
       }
 
       try {
         const fileData = await apiJson(`/api/files/read?${new URLSearchParams({ path: targetPath }).toString()}`);
         activeFilePath = fileData.path;
+        selectedPath = activeFilePath;
+        selectedPathType = "file";
         originalFileContent = fileData.content || "";
         activePathLabelEl.textContent = activeFilePath;
         setEditorContent(fileData.content || "", activeFilePath);
@@ -1270,6 +1273,18 @@ function renderFileList(entries) {
         setStatus(`Error: ${error.message}`);
       }
     });
+    btn.addEventListener("dblclick", () => {
+      if (entry.type !== "directory") {
+        return;
+      }
+      const targetPath = joinPath(currentDir, entry.name);
+      loadDirectory(targetPath)
+        .then(() => setStatus(`Opened folder: ${targetPath}`))
+        .catch((error) => setStatus(`Error: ${error.message}`));
+    });
+    if (selectedPath === joinPath(currentDir, entry.name)) {
+      btn.classList.add("selected");
+    }
 
     item.appendChild(btn);
     fileListEl.appendChild(item);
@@ -1300,6 +1315,8 @@ async function openFileByPath(targetPath, line, col) {
 
   const fileData = await apiJson(`/api/files/read?${new URLSearchParams({ path: cleanPath }).toString()}`);
   activeFilePath = fileData.path;
+  selectedPath = activeFilePath;
+  selectedPathType = "file";
   originalFileContent = fileData.content || "";
   activePathLabelEl.textContent = activeFilePath;
   setEditorContent(fileData.content || "", activeFilePath);
@@ -1479,21 +1496,26 @@ async function uploadFiles(files) {
 }
 
 async function deleteSelected() {
-  if (!activeFilePath) {
-    setStatus("Select a file first.");
+  if (!selectedPath) {
+    setStatus("Select a file or folder first.");
     return;
   }
-  const confirmed = window.confirm(`Delete ${activeFilePath}?`);
+  const label = selectedPathType === "directory" ? "folder" : "file";
+  const confirmed = window.confirm(`Delete ${label} ${selectedPath}?`);
   if (!confirmed) {
     return;
   }
 
-  await apiJson(`/api/files/delete?${new URLSearchParams({ path: activeFilePath }).toString()}`, { method: "DELETE" });
-  activeFilePath = "";
-  originalFileContent = "";
-  activePathLabelEl.textContent = "No file selected";
-  setEditorContent("", "");
-  clearLintDiagnostics();
+  await apiJson(`/api/files/delete?${new URLSearchParams({ path: selectedPath }).toString()}`, { method: "DELETE" });
+  if (activeFilePath === selectedPath || activeFilePath.startsWith(`${selectedPath}/`)) {
+    activeFilePath = "";
+    originalFileContent = "";
+    activePathLabelEl.textContent = "No file selected";
+    setEditorContent("", "");
+    clearLintDiagnostics();
+  }
+  selectedPath = "";
+  selectedPathType = "";
   setStatus("Deleted.");
   await loadDirectory(currentDir);
 }
@@ -1587,8 +1609,10 @@ newFileBtnEl.addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path, content: "" })
     });
-    await loadDirectory(currentDir);
     activeFilePath = path;
+    selectedPath = path;
+    selectedPathType = "file";
+    await loadDirectory(currentDir);
     originalFileContent = "";
     activePathLabelEl.textContent = path;
     setEditorContent("", path);
@@ -1609,6 +1633,8 @@ newDirBtnEl.addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path })
     });
+    selectedPath = path;
+    selectedPathType = "directory";
     await loadDirectory(currentDir);
     setStatus(`Created folder ${path}`);
   } catch (error) {
@@ -1617,46 +1643,58 @@ newDirBtnEl.addEventListener("click", async () => {
 });
 
 renameBtnEl.addEventListener("click", async () => {
-  if (!activeFilePath) {
-    setStatus("Select a file first.");
+  if (!selectedPath) {
+    setStatus("Select a file or folder first.");
     return;
   }
-  const nextName = window.prompt("New name:", activeFilePath.split("/").pop());
+  const nextName = window.prompt("New name:", selectedPath.split("/").pop());
   if (!nextName) return;
 
   try {
     const data = await apiJson("/api/files/rename", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: activeFilePath, newName: nextName })
+      body: JSON.stringify({ path: selectedPath, newName: nextName })
     });
-    activeFilePath = data.path;
-    activePathLabelEl.textContent = activeFilePath;
+    const oldPath = selectedPath;
+    selectedPath = data.path;
+    if (activeFilePath === oldPath || activeFilePath.startsWith(`${oldPath}/`)) {
+      activeFilePath = activeFilePath === oldPath
+        ? data.path
+        : `${data.path}/${activeFilePath.slice(oldPath.length + 1)}`;
+    }
+    activePathLabelEl.textContent = selectedPathType === "directory" ? `Folder selected: ${selectedPath}` : activeFilePath;
     await loadDirectory(currentDir);
-    setStatus(`Renamed to ${activeFilePath}`);
+    setStatus(`Renamed to ${selectedPath}`);
   } catch (error) {
     setStatus(`Error: ${error.message}`);
   }
 });
 
 moveBtnEl.addEventListener("click", async () => {
-  if (!activeFilePath) {
-    setStatus("Select a file first.");
+  if (!selectedPath) {
+    setStatus("Select a file or folder first.");
     return;
   }
-  const toPath = window.prompt("Move to path:", activeFilePath);
+  const toPath = window.prompt("Move to path:", selectedPath);
   if (!toPath) return;
 
   try {
     await apiJson("/api/files/move", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fromPath: activeFilePath, toPath })
+      body: JSON.stringify({ fromPath: selectedPath, toPath })
     });
-    activeFilePath = toPath;
-    activePathLabelEl.textContent = activeFilePath;
+    const oldPath = selectedPath;
+    selectedPath = normalizeRelativePath(toPath);
+    if (activeFilePath === oldPath || activeFilePath.startsWith(`${oldPath}/`)) {
+      activeFilePath = activeFilePath === oldPath
+        ? selectedPath
+        : `${selectedPath}/${activeFilePath.slice(oldPath.length + 1)}`;
+    }
+    activePathLabelEl.textContent = selectedPathType === "directory" ? `Folder selected: ${selectedPath}` : activeFilePath;
     await loadDirectory(currentDir);
-    setStatus(`Moved to ${toPath}`);
+    setStatus(`Moved to ${selectedPath}`);
   } catch (error) {
     setStatus(`Error: ${error.message}`);
   }
@@ -1667,13 +1705,13 @@ deleteBtnEl.addEventListener("click", () => {
 });
 
 downloadBtnEl.addEventListener("click", async () => {
-  if (!activeFilePath) {
-    setStatus("Select a file first.");
+  if (!selectedPath) {
+    setStatus("Select a file or folder first.");
     return;
   }
   try {
-    await downloadActiveFile(activeFilePath);
-    setStatus(`Downloaded ${activeFilePath}`);
+    await downloadActiveFile(selectedPath);
+    setStatus(`Downloaded ${selectedPath}`);
   } catch (error) {
     setStatus(`Error: ${error.message}`);
   }

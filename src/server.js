@@ -2496,6 +2496,26 @@ async function zipSandboxPath(sourcePath, archivePath) {
   return { ok: true, sourcePath: sourceRel, archivePath: archiveRel };
 }
 
+function makeDownloadArchiveName(sourceRel) {
+  const base = path.basename(sourceRel || "workspace").replace(/^\.+/, "") || "workspace";
+  return `${base}.zip`;
+}
+
+async function createDirectoryDownloadZip(sourceAbs, sourceRel) {
+  const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "remote-ai-download-"));
+  const zipName = makeDownloadArchiveName(sourceRel);
+  const zipPath = path.join(tempDir, zipName);
+  const cwd = sourceRel ? path.dirname(sourceAbs) : sourceAbs;
+  const includeTarget = sourceRel ? path.basename(sourceAbs) : ".";
+  try {
+    await execFileAsync("zip", ["-r", "-q", zipPath, includeTarget], { cwd, timeout: 300000 });
+    return { zipPath, zipName, tempDir };
+  } catch (error) {
+    await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    throw new Error(`zip command failed. Ensure 'zip' is installed. ${String(error?.stderr || error?.message || "")}`.trim());
+  }
+}
+
 async function unzipSandboxArchive(archivePath, targetPath) {
   const { absolute: archiveAbs, rel: archiveRel } = resolveSandboxPath(archivePath || "");
   const defaultTarget = path.basename(archiveRel, ".zip");
@@ -4604,7 +4624,7 @@ async function executeAgentTool(req, callName, args) {
           { method: "GET", path: "/api/files/read?path=...", purpose: "Read file" },
           { method: "POST", path: "/api/files/write", purpose: "Write file" },
           { method: "POST", path: "/api/files/upload", purpose: "Upload file(s)" },
-          { method: "GET", path: "/api/files/download?path=...", purpose: "Download file" },
+          { method: "GET", path: "/api/files/download?path=...", purpose: "Download file or directory zip" },
           { method: "POST", path: "/api/files/move", purpose: "Move path" },
           { method: "POST", path: "/api/files/rename", purpose: "Rename path" },
           { method: "DELETE", path: "/api/files/delete?path=...", purpose: "Delete path" },
@@ -6264,7 +6284,7 @@ app.get("/api/tools", (_req, res) => {
       { method: "GET", path: "/api/files/read?path=src/app.js", purpose: "Read UTF-8 text file" },
       { method: "POST", path: "/api/files/write", purpose: "Write file text", body: { path: "src/app.js", content: "..." } },
       { method: "POST", path: "/api/files/upload", purpose: "Upload one or many files (fields: files or file, optional path and relativePaths[])" },
-      { method: "GET", path: "/api/files/download?path=src/app.js", purpose: "Download a file" },
+      { method: "GET", path: "/api/files/download?path=src/app.js", purpose: "Download a file or a directory as a zip" },
       { method: "POST", path: "/api/files/move", purpose: "Move file or directory", body: { fromPath: "old.txt", toPath: "docs/new.txt" } },
       { method: "POST", path: "/api/files/rename", purpose: "Rename in place", body: { path: "docs/a.txt", newName: "b.txt" } },
       { method: "DELETE", path: "/api/files/delete?path=docs/a.txt", purpose: "Delete file or directory recursively" },
@@ -6351,7 +6371,7 @@ app.get("/api/openapi.json", (_req, res) => {
         get: { summary: "Get chunk upload status" }
       },
       "/api/files/upload/chunk/{uploadId}/complete": { post: { summary: "Complete chunked upload" } },
-      "/api/files/download": { get: { summary: "Download file" } },
+      "/api/files/download": { get: { summary: "Download file or directory zip" } },
       "/api/files/move": { post: { summary: "Move path" } },
       "/api/files/rename": { post: { summary: "Rename path" } },
       "/api/files/delete": { delete: { summary: "Delete path" } },
@@ -6678,12 +6698,19 @@ app.get("/api/files/download", async (req, res) => {
     const { absolute, rel } = resolveSandboxPath(req.query.path || "");
     const stat = await fsp.stat(absolute);
     if (stat.isDirectory()) {
-      return res.status(400).json({ error: "path is a directory" });
+      const { zipPath, zipName, tempDir } = await createDirectoryDownloadZip(absolute, rel);
+      await appendAuditLog(req, "download-directory", { path: rel || ".", archive: zipName });
+      return res.download(zipPath, zipName, async (error) => {
+        await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+        if (error && !res.headersSent) {
+          res.status(500).json({ error: "Failed to download directory" });
+        }
+      });
     }
     await appendAuditLog(req, "download", { path: rel, size: stat.size });
     return res.download(absolute, path.basename(rel || absolute));
   } catch (error) {
-    return res.status(400).json({ error: String(error?.message || "Failed to download file") });
+    return res.status(400).json({ error: String(error?.message || "Failed to download path") });
   }
 });
 
