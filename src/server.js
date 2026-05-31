@@ -95,16 +95,27 @@ const terminalDockerNetwork = String(process.env.TERMINAL_DOCKER_NETWORK || "bri
 const terminalDockerShellCommandLines = String(process.env.TERMINAL_DOCKER_SHELL_COMMAND_LINES || "true").trim().toLowerCase() !== "false";
 const defaultTerminalDockerAllowedImages = [
   terminalDockerImage,
+  "alpine:latest",
   "node:20-bookworm",
+  "node:20",
+  "ubuntu:24.04",
+  "emscripten/emsdk",
   "dockcross/linux-x64",
   "dockcross/linux-arm64",
   "dockcross/linux-armv7",
+  "dockcross/linux-armv7l",
   "dockcross/windows-static-x64",
   "dockcross/windows-shared-x64",
   "dockcross/windows-static-x86",
   "dockcross/windows-shared-x86",
   "dockcross/manylinux_2_28-x64",
-  "mstorsjo/llvm-mingw"
+  "messense/rust-musl-cross:x86_64-musl",
+  "mstorsjo/llvm-mingw",
+  "silkeh/clang:18",
+  "llvm/llvm:18",
+  "mcr.microsoft.com/dotnet/sdk:8.0",
+  "osxcross",
+  "valgrind"
 ];
 const terminalDockerAllowedImages = new Set(
   [
