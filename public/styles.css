@@ -798,14 +798,19 @@ textarea:focus {
   padding: 20px 16px 28px;
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
+  align-items: start;
   gap: 14px;
 }
 
 .file-sidebar {
-  min-height: calc(100vh - 40px);
+  position: sticky;
+  top: 20px;
+  height: calc(100vh - 40px);
+  min-height: 0;
   display: grid;
   grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
   gap: 10px;
+  overflow: hidden;
 }
 
 .file-head-row {
@@ -883,7 +888,9 @@ textarea:focus {
   margin: 0;
   padding: 0;
   display: grid;
+  align-content: start;
   gap: 6px;
+  min-height: 0;
   overflow-y: auto;
 }
 
@@ -986,7 +993,8 @@ textarea:focus {
 }
 
 .editor-root {
-  min-height: 56vh;
+  height: clamp(420px, 62vh, 760px);
+  min-height: 0;
   border: 1px solid var(--line);
   border-radius: 12px;
   overflow: hidden;
@@ -999,7 +1007,8 @@ textarea:focus {
 
 .minimap-pane {
   position: relative;
-  min-height: 56vh;
+  height: clamp(420px, 62vh, 760px);
+  min-height: 0;
   border: 1px solid var(--line);
   border-radius: 12px;
   overflow: hidden;
@@ -1477,6 +1486,8 @@ textarea:focus {
   }
 
   .file-sidebar {
+    position: static;
+    height: auto;
     min-height: auto;
   }
 
@@ -1485,7 +1496,8 @@ textarea:focus {
   }
 
   .editor-root {
-    min-height: 50vh;
+    height: 50vh;
+    min-height: 360px;
   }
 
   .editor-controls {
