@@ -76,6 +76,7 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
 - Main chat page includes per-reply copy buttons for Markdown, plain text, and rendered HTML
 - One-click button to copy all assistant replies in active chat
 - Markdown rendering now supports horizontal rules (`---`) and GitHub-style tables
+- Chat requests support automatic provider-context compaction when message size limits are hit. This only changes the payload sent to the model; full local chat history remains available through Archive and History JSON.
 
 ## Agent tool-calling mode
 

@@ -114,6 +114,9 @@ const agentMaxSteps = Math.max(1, Math.min(agentMaxStepsHardLimit, Number(proces
 const agentMaxStepsOverrideLimit = Math.max(agentMaxSteps, Math.min(agentMaxStepsHardLimit, Number(process.env.AGENT_MAX_STEPS_OVERRIDE_LIMIT || 40)));
 const agentMaxStepsOverrideCode = String(process.env.AGENT_MAX_STEPS_OVERRIDE_CODE || "").trim();
 const agentWebTimeoutMs = Math.max(1000, Math.min(40000, Number(process.env.AGENT_WEB_TIMEOUT_MS || 16000)));
+const chatMessageMaxChars = Math.max(1000, Math.min(20000, Number(process.env.CHAT_MESSAGE_MAX_CHARS || 8000)));
+const chatContextMaxChars = Math.max(chatMessageMaxChars, Math.min(200000, Number(process.env.CHAT_CONTEXT_MAX_CHARS || 32000)));
+const chatCompactionSummaryMaxChars = Math.max(1000, Math.min(chatContextMaxChars, Number(process.env.CHAT_COMPACTION_SUMMARY_MAX_CHARS || 6000)));
 const chatJobMaxAgeMs = Math.max(60_000, Math.min(24 * 60 * 60 * 1000, Number(process.env.CHAT_JOB_MAX_AGE_MS || 2 * 60 * 60 * 1000)));
 const chatJobMaxEntries = Math.max(20, Math.min(2000, Number(process.env.CHAT_JOB_MAX_ENTRIES || 300)));
 const chatJobEventHistoryMax = Math.max(20, Math.min(4000, Number(process.env.CHAT_JOB_EVENT_HISTORY_MAX || 240)));
@@ -1901,13 +1904,24 @@ function isHttpUrl(value) {
   }
 }
 
-function normalizeMessages(body) {
+function middleTruncate(value, maxChars) {
+  const text = String(value || "");
+  if (text.length <= maxChars) {
+    return text;
+  }
+  const marker = `\n\n[... ${text.length - maxChars} characters compacted ...]\n\n`;
+  const remaining = Math.max(0, maxChars - marker.length);
+  const head = Math.ceil(remaining * 0.55);
+  const tail = Math.max(0, remaining - head);
+  return `${text.slice(0, head)}${marker}${tail > 0 ? text.slice(-tail) : ""}`;
+}
+
+function sanitizeChatMessages(body) {
   const rawMessages = Array.isArray(body?.messages)
     ? body.messages
     : [{ role: "user", content: body?.message }];
 
   const messages = [];
-  let totalChars = 0;
 
   for (const item of rawMessages) {
     const role = item?.role;
@@ -1917,19 +1931,128 @@ function normalizeMessages(body) {
       continue;
     }
 
-    totalChars += content.length;
-    if (content.length > 8000 || totalChars > 32000) {
-      return null;
-    }
-
     messages.push({ role, content });
   }
 
-  if (messages.length === 0) {
+  return messages;
+}
+
+function validateProviderMessages(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return false;
+  }
+
+  let totalChars = 0;
+  for (const item of messages) {
+    const role = item?.role;
+    const content = typeof item?.content === "string" ? item.content.trim() : "";
+    if ((role !== "user" && role !== "assistant") || !content) {
+      return false;
+    }
+    totalChars += content.length;
+    if (content.length > chatMessageMaxChars || totalChars > chatContextMaxChars) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function normalizeMessages(body) {
+  const messages = sanitizeChatMessages(body);
+  return validateProviderMessages(messages) ? messages : null;
+}
+
+function summarizeCompactedMessages(messages, maxChars) {
+  const lines = [
+    "Conversation context was automatically compacted to fit provider message limits.",
+    "Full original chat history remains saved in the browser archive/history; this summary is only provider context.",
+    ""
+  ];
+
+  for (const [index, msg] of messages.entries()) {
+    const label = msg.role === "user" ? "User" : "Assistant";
+    const snippet = middleTruncate(msg.content.replace(/\s+/g, " ").trim(), 700);
+    lines.push(`${index + 1}. ${label}: ${snippet}`);
+    const joined = lines.join("\n");
+    if (joined.length >= maxChars) {
+      return middleTruncate(joined, maxChars);
+    }
+  }
+
+  return middleTruncate(lines.join("\n"), maxChars);
+}
+
+function compactMessagesForProvider(body) {
+  const original = sanitizeChatMessages(body);
+  if (original.length === 0) {
     return null;
   }
 
-  return messages;
+  const recent = [];
+  let recentChars = 0;
+  const recentBudget = Math.max(chatMessageMaxChars, chatContextMaxChars - chatCompactionSummaryMaxChars - 1000);
+
+  for (let index = original.length - 1; index >= 0; index -= 1) {
+    const item = original[index];
+    const compactContent = middleTruncate(item.content, Math.max(1000, chatMessageMaxChars - 500));
+    const projected = recentChars + compactContent.length;
+    if (recent.length > 0 && projected > recentBudget) {
+      break;
+    }
+    recent.unshift({ role: item.role, content: compactContent });
+    recentChars += compactContent.length;
+  }
+
+  if (recent.length === 0) {
+    const latest = original[original.length - 1];
+    recent.push({
+      role: latest.role,
+      content: middleTruncate(latest.content, Math.max(1000, chatMessageMaxChars - 500))
+    });
+  }
+
+  const compactedCount = Math.max(0, original.length - recent.length);
+  const compacted = [];
+  if (compactedCount > 0) {
+    const summary = summarizeCompactedMessages(original.slice(0, compactedCount), chatCompactionSummaryMaxChars);
+    compacted.push({
+      role: "assistant",
+      content: summary
+    });
+  }
+  compacted.push(...recent);
+
+  if (!validateProviderMessages(compacted)) {
+    return null;
+  }
+
+  return {
+    messages: compacted,
+    metadata: {
+      applied: true,
+      originalMessageCount: original.length,
+      sentMessageCount: compacted.length,
+      compactedMessageCount: compactedCount,
+      originalChars: original.reduce((total, msg) => total + msg.content.length, 0),
+      sentChars: compacted.reduce((total, msg) => total + msg.content.length, 0)
+    }
+  };
+}
+
+function resolveMessageContext(body) {
+  const normalized = normalizeMessages(body);
+  if (normalized) {
+    return { messages: normalized, compaction: { applied: false } };
+  }
+
+  if (body?.autoCompact === true) {
+    const compacted = compactMessagesForProvider(body);
+    if (compacted?.messages) {
+      return { messages: compacted.messages, compaction: compacted.metadata };
+    }
+  }
+
+  return null;
 }
 
 async function getFileList(pathValue) {
@@ -5533,12 +5656,14 @@ async function generateChatResponse(req) {
     throw error;
   }
 
-  const messages = normalizeMessages(req.body);
-  if (!messages) {
+  const messageContext = resolveMessageContext(req.body);
+  if (!messageContext?.messages) {
     const error = new Error("messages must contain non-empty user or assistant items within size limits");
     error.status = 400;
     throw error;
   }
+  const messages = messageContext.messages;
+  const compaction = messageContext.compaction || { applied: false };
 
   if (provider === "openai") {
     if (!client) {
@@ -5563,6 +5688,7 @@ async function generateChatResponse(req) {
         model,
         provider: "openai",
         traceId,
+        contextCompaction: compaction,
         agentMode: true,
         agentMaxStepsUsed: stepBudget.maxSteps,
         agentMaxStepsOverrideUsed: stepBudget.override,
@@ -5600,7 +5726,7 @@ async function generateChatResponse(req) {
 
     const response = await client.responses.create(responseRequest);
     const text = response.output_text || "";
-    return { reply: text, model, provider: "openai", traceId, reasoningEffort: reasoningEffort || null };
+    return { reply: text, model, provider: "openai", traceId, reasoningEffort: reasoningEffort || null, contextCompaction: compaction };
   }
 
   if (provider === "copilot") {
@@ -5659,7 +5785,8 @@ async function generateChatResponse(req) {
       reply: typeof text === "string" ? text : JSON.stringify(text),
       model: requestedModel,
       provider: "copilot",
-      traceId
+      traceId,
+      contextCompaction: compaction
     };
   }
 
@@ -5685,6 +5812,7 @@ async function generateChatResponse(req) {
       model,
       provider: "xai",
       traceId,
+      contextCompaction: compaction,
       agentMode: true,
       agentMaxStepsUsed: stepBudget.maxSteps,
       agentMaxStepsOverrideUsed: stepBudget.override,
@@ -5713,7 +5841,8 @@ async function generateChatResponse(req) {
     model,
     provider: "xai",
     traceId,
-    reasoningEffort: reasoningEffort || null
+    reasoningEffort: reasoningEffort || null,
+    contextCompaction: compaction
   };
 }
 
@@ -5896,6 +6025,12 @@ app.get("/api/config", (_req, res) => {
       baseMaxSteps: agentMaxSteps,
       maxOverrideSteps: agentMaxStepsOverrideLimit
     },
+    chatCompaction: {
+      enabled: true,
+      messageMaxChars: chatMessageMaxChars,
+      contextMaxChars: chatContextMaxChars,
+      summaryMaxChars: chatCompactionSummaryMaxChars
+    },
     apiKeyAuth: {
       enabled: security.apiKeyAuthEnabled && security.apiKeys.length > 0,
       headerName: security.apiKeyHeaderName,
@@ -5978,6 +6113,7 @@ app.get("/api/tools", (_req, res) => {
       "Terminal accepts command strings such as `git clone https://github.com/org/repo.git repo`, `cd repo && grep -R TODO .`, and simple conditional chains like `pwd && ls -la && git status 2>&1 || echo no repo`.",
       "Set TERMINAL_EXTRA_COMMANDS=cmd1,cmd2 to add more allow-listed commands from server config.",
       "Archive helpers include 7z and vfa in the terminal allow-list; vfa can resolve from TERMINAL_VFA_COMMAND or TERMINAL_VFA_SCRIPT.",
+      "Chat requests support autoCompact=true to send a bounded provider context while preserving the full browser chat archive/history.",
       "Use /api/files/format before /api/files/write when you want prettified output.",
       "Use /api/files/git/log to inspect snapshots and /api/files/git/revert to roll back.",
       "Set agentMode=true in /api/chat (openai or xai provider) to enable automatic tool-calling."

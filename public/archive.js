@@ -137,7 +137,10 @@ function normalizeArchive(parsed) {
           id: typeof msg.id === "string" && msg.id ? msg.id : uid(),
           role: msg.role,
           content: msg.content,
-          createdAt: typeof msg.createdAt === "string" && msg.createdAt ? msg.createdAt : new Date().toISOString()
+          createdAt: typeof msg.createdAt === "string" && msg.createdAt ? msg.createdAt : new Date().toISOString(),
+          traceId: typeof msg.traceId === "string" ? msg.traceId : "",
+          executedTools: Array.isArray(msg.executedTools) ? msg.executedTools.filter((item) => typeof item === "string") : [],
+          contextCompaction: msg.contextCompaction && typeof msg.contextCompaction === "object" ? msg.contextCompaction : null
         }))
       : []
   }));

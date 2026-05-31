@@ -78,6 +78,11 @@ let config = {
     enabled: false,
     baseMaxSteps: 16,
     maxOverrideSteps: 40
+  },
+  chatCompaction: {
+    enabled: true,
+    messageMaxChars: 8000,
+    contextMaxChars: 32000
   }
 };
 
@@ -393,6 +398,46 @@ function formatTime(isoTime) {
 function shortTitleFromMessage(text) {
   const oneLine = text.replace(/\s+/g, " ").trim();
   return oneLine.length > 40 ? `${oneLine.slice(0, 40)}...` : oneLine;
+}
+
+function middleTruncate(text, maxChars) {
+  const value = String(text || "");
+  if (value.length <= maxChars) {
+    return value;
+  }
+  const marker = `\n\n[... ${value.length - maxChars} characters retained in full local history ...]\n\n`;
+  const remaining = Math.max(0, maxChars - marker.length);
+  const head = Math.ceil(remaining * 0.55);
+  const tail = Math.max(0, remaining - head);
+  return `${value.slice(0, head)}${marker}${tail > 0 ? value.slice(-tail) : ""}`;
+}
+
+function buildPayloadMessages(messages) {
+  const source = Array.isArray(messages) ? messages : [];
+  const maxChars = Math.max(32000, Math.min(240000, Number(config.chatCompaction?.contextMaxChars || 32000) * 6));
+  const maxMessages = 120;
+  const perMessageMax = Math.max(8000, Math.min(24000, Number(config.chatCompaction?.messageMaxChars || 8000) * 3));
+  const selected = [];
+  let totalChars = 0;
+
+  for (let index = source.length - 1; index >= 0; index -= 1) {
+    const msg = source[index];
+    if (msg?.role !== "user" && msg?.role !== "assistant") {
+      continue;
+    }
+    const content = typeof msg?.content === "string" ? middleTruncate(msg.content, perMessageMax).trim() : "";
+    if (!content) {
+      continue;
+    }
+    const projected = totalChars + content.length;
+    if (selected.length > 0 && (selected.length >= maxMessages || projected > maxChars)) {
+      break;
+    }
+    selected.unshift({ role: msg.role, content });
+    totalChars += content.length;
+  }
+
+  return selected;
 }
 
 function applyTheme(theme) {
@@ -739,6 +784,9 @@ function renderMessages() {
       <div class="md">${renderMarkdown(msg.content)}</div>
       ${Array.isArray(msg.executedTools) && msg.executedTools.length > 0
         ? `<div class="msg-tools">Tools used: ${msg.executedTools.map((tool) => `<span class="tool-chip">${escapeHtml(tool)}</span>`).join(" ")}</div>`
+        : ""}
+      ${msg.contextCompaction?.applied
+        ? `<div class="msg-tools">Context compacted for provider: <span class="tool-chip">${escapeHtml(String(msg.contextCompaction.originalMessageCount || "?"))}</span> -> <span class="tool-chip">${escapeHtml(String(msg.contextCompaction.sentMessageCount || "?"))}</span> messages. Full chat remains in archive/history.</div>`
         : ""}
     `;
     messageListEl.appendChild(item);
@@ -1482,6 +1530,13 @@ async function loadConfig() {
         maxOverrideSteps: Number(data.agentStepOverride.maxOverrideSteps || config.agentStepOverride.maxOverrideSteps || 40)
       };
     }
+    if (data?.chatCompaction && typeof data.chatCompaction === "object") {
+      config.chatCompaction = {
+        enabled: data.chatCompaction.enabled !== false,
+        messageMaxChars: Number(data.chatCompaction.messageMaxChars || config.chatCompaction.messageMaxChars || 8000),
+        contextMaxChars: Number(data.chatCompaction.contextMaxChars || config.chatCompaction.contextMaxChars || 32000)
+      };
+    }
   } catch {
     // Keep defaults if config endpoint is unavailable.
   }
@@ -1822,10 +1877,7 @@ async function sendPrompt() {
   statusEl.textContent = `Thinking with ${chat.provider}:${chat.model}...`;
 
   try {
-    const payloadMessages = chat.messages.slice(-24).map((item) => ({
-      role: item.role,
-      content: item.content
-    }));
+    const payloadMessages = buildPayloadMessages(chat.messages);
 
     const requestBody = {
       provider: chat.provider,
@@ -1838,6 +1890,7 @@ async function sendPrompt() {
         ? Number(chat.agentMaxStepsOverride)
         : undefined,
       agentMaxStepsOverrideCode: chat.agentMaxStepsOverrideCode || undefined,
+      autoCompact: config.chatCompaction?.enabled !== false,
       messages: payloadMessages
     };
 
@@ -1854,7 +1907,8 @@ async function sendPrompt() {
       content: data.reply || "(No output returned)",
       createdAt: new Date().toISOString(),
       traceId: String(data.traceId || ""),
-      executedTools: Array.isArray(data.executedTools) ? data.executedTools : []
+      executedTools: Array.isArray(data.executedTools) ? data.executedTools : [],
+      contextCompaction: data.contextCompaction || null
     });
     updateTracePanel(data.traceId || "", "done");
 
@@ -1866,7 +1920,9 @@ async function sendPrompt() {
     renderAll();
     loadToolRuns();
     const usedTools = Array.isArray(data.executedTools) ? data.executedTools : [];
-    if (agentModeToggleEl.checked && usedTools.length === 0) {
+    if (data.contextCompaction?.applied) {
+      statusEl.textContent = `Done. Provider context was compacted (${data.contextCompaction.originalMessageCount || "?"} -> ${data.contextCompaction.sentMessageCount || "?"} messages); full chat remains archived.`;
+    } else if (agentModeToggleEl.checked && usedTools.length === 0) {
       statusEl.textContent = "Done, but no tools were executed for this reply.";
     } else {
       statusEl.textContent = "Done.";
