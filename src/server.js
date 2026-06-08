@@ -5784,7 +5784,8 @@ app.use(helmet({
       connectSrc: ["'self'", appBaseUrl, "https://esm.sh"],
       objectSrc: ["'none'"],
       baseUri: ["'self'"],
-      formAction: ["'self'"]
+      formAction: ["'self'"],
+      upgradeInsecureRequests: null
     }
   }
 }));

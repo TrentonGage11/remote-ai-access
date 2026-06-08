@@ -487,9 +487,13 @@ function normalizeCodeLanguage(value) {
   return String(value || "").trim().toLowerCase();
 }
 
+function codePlaceholderToken(index) {
+  return String.fromCharCode(0xE000 + index);
+}
+
 function replaceTokenMatches(text, regex, className, placeholders) {
   return text.replace(regex, (match) => {
-    const token = `@@CODETOKEN_${placeholders.length}@@`;
+    const token = codePlaceholderToken(placeholders.length);
     placeholders.push(`<span class="tok-${className}">${match}</span>`);
     return token;
   });
@@ -498,7 +502,7 @@ function replaceTokenMatches(text, regex, className, placeholders) {
 function restoreTokenMatches(text, placeholders) {
   let output = text;
   for (let i = 0; i < placeholders.length; i += 1) {
-    output = output.replaceAll(`@@CODETOKEN_${i}@@`, placeholders[i]);
+    output = output.replaceAll(codePlaceholderToken(i), placeholders[i]);
   }
   return output;
 }
@@ -522,7 +526,7 @@ function highlightGenericCode(rawCode) {
   text = replaceTokenMatches(text, /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)/g, "string", placeholders);
   text = replaceTokenMatches(text, /\/\/[^\n]*/g, "comment", placeholders);
   text = text.replace(/(^|\s)(#[^\n]*)/gm, (_full, prefix, comment) => {
-    const token = `@@CODETOKEN_${placeholders.length}@@`;
+    const token = codePlaceholderToken(placeholders.length);
     placeholders.push(`<span class="tok-comment">${comment}</span>`);
     return `${prefix}${token}`;
   });
