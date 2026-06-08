@@ -800,6 +800,11 @@ function renderMessages() {
 function updateModelSelect() {
   const chat = getActiveChat();
   const provider = normalizeProvider(chat.provider) || config.defaultProvider;
+  const modelByTag = new Map(
+    modelCatalog
+      .filter((entry) => entry.provider === provider)
+      .map((entry) => [entry.tag, entry])
+  );
 
   const providerModels = modelCatalog
     .filter((entry) => entry.provider === provider && CHAT_CAPABLE_TYPES.has(entry.type))
@@ -828,9 +833,15 @@ function updateModelSelect() {
   modelSelectEl.innerHTML = "";
 
   for (const model of opts) {
+    const catalogEntry = modelByTag.get(model);
     const opt = document.createElement("option");
     opt.value = model;
-    opt.textContent = model;
+    const suffix = provider === "ollama"
+      ? catalogEntry?.supportsTools
+        ? " - Agent tools"
+        : " - Chat only"
+      : "";
+    opt.textContent = `${model}${suffix}`;
     modelSelectEl.appendChild(opt);
   }
 
@@ -893,6 +904,15 @@ function getReasoningEffortOptions(provider, model) {
     return fromCatalog.reasoningEfforts;
   }
   return [];
+}
+
+function getModelCatalogEntry(provider, model) {
+  const normalizedProvider = normalizeProvider(provider);
+  const normalizedModel = String(model || "").trim();
+  if (!normalizedProvider || !normalizedModel) {
+    return null;
+  }
+  return modelCatalog.find((entry) => entry.provider === normalizedProvider && entry.tag === normalizedModel) || null;
 }
 
 function syncReasoningEffortControl() {
@@ -1464,12 +1484,19 @@ function isAgentModeEnabled() {
 function syncAgentModeToggle() {
   const chat = getActiveChat();
   const provider = normalizeProvider(chat.provider);
-  const supported = (config.agentModeSupportedProviders || []).includes(provider);
+  const providerSupported = (config.agentModeSupportedProviders || []).includes(provider);
+  const modelEntry = getModelCatalogEntry(provider, chat.model);
+  const modelSupportsTools = provider === "ollama" ? Boolean(modelEntry?.supportsTools) : true;
+  const supported = providerSupported && modelSupportsTools;
   agentModeToggleEl.disabled = !supported;
   if (!supported) {
     agentModeToggleEl.checked = false;
+    agentModeToggleEl.title = !providerSupported
+      ? "Agent tools are not enabled for this provider."
+      : "This model is chat-only and does not advertise Ollama tool support.";
     return;
   }
+  agentModeToggleEl.title = "Enable agent tool calling.";
   agentModeToggleEl.checked = isAgentModeEnabled();
 
   if (agentStepOverrideInputEl && agentStepOverrideCodeInputEl) {
@@ -1824,7 +1851,11 @@ async function loadModelCatalog() {
             type: normalizeProvider(entry.type || "chatgpt"),
             reasoningEfforts: Array.isArray(entry.reasoningEfforts)
               ? entry.reasoningEfforts.map((item) => normalizeReasoningEffort(item)).filter(Boolean)
-              : []
+              : [],
+            capabilities: Array.isArray(entry.capabilities)
+              ? entry.capabilities.map((item) => String(item || "").trim()).filter(Boolean)
+              : [],
+            supportsTools: Boolean(entry.supportsTools)
           }))
           .filter((entry) => /^[a-zA-Z0-9._:/-]{2,120}$/.test(entry.tag));
         return;
@@ -1875,7 +1906,9 @@ async function loadModelCatalog() {
             .split(/[|,]/)
             .map((item) => normalizeReasoningEffort(item))
             .filter(Boolean)
-          : []
+          : [],
+        capabilities: [],
+        supportsTools: false
       }))
       .filter((entry) => /^[a-zA-Z0-9._:/-]{2,120}$/.test(entry.tag));
   } catch {
@@ -2159,6 +2192,15 @@ providerSelectEl.addEventListener("change", () => {
 });
 
 agentModeToggleEl.addEventListener("change", () => {
+  const chat = getActiveChat();
+  const provider = normalizeProvider(chat.provider);
+  const modelEntry = getModelCatalogEntry(provider, chat.model);
+  if (provider === "ollama" && !modelEntry?.supportsTools) {
+    agentModeToggleEl.checked = false;
+    localStorage.setItem(AGENT_MODE_STORAGE_KEY, "false");
+    statusEl.textContent = "Agent tools unavailable for this chat-only Ollama model.";
+    return;
+  }
   localStorage.setItem(AGENT_MODE_STORAGE_KEY, agentModeToggleEl.checked ? "true" : "false");
   statusEl.textContent = agentModeToggleEl.checked ? "Agent tools enabled." : "Agent tools disabled.";
 });

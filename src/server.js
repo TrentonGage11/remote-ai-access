@@ -244,6 +244,26 @@ function parseOllamaListOutput(rawText) {
 
 async function getOllamaModels() {
   try {
+    const response = await fetch(`${getOllamaBaseUrl()}/api/tags`);
+    if (response.ok) {
+      const data = await response.json();
+      if (Array.isArray(data?.models)) {
+        return data.models.map((item) => {
+          const capabilities = Array.isArray(item?.capabilities)
+            ? item.capabilities.map((capability) => String(capability || "").trim()).filter(Boolean)
+            : [];
+          return {
+            provider: "ollama",
+            name: item.name || item.model || "",
+            tag: item.model || item.name || "",
+            type: "chatgpt",
+            reasoningEfforts: [],
+            capabilities,
+            supportsTools: capabilities.includes("tools")
+          };
+        }).filter((item) => item.tag);
+      }
+    }
     const result = await execFileAsync(ollamaCommand, ["list"], { timeout: 15000 });
     const models = parseOllamaListOutput(result.stdout || "");
     return models.map((item) => ({
@@ -251,7 +271,9 @@ async function getOllamaModels() {
       name: item.name,
       tag: item.name,
       type: "chatgpt",
-      reasoningEfforts: []
+      reasoningEfforts: [],
+      capabilities: [],
+      supportsTools: false
     }));
   } catch {
     return [];
@@ -5415,8 +5437,64 @@ function normalizeToolCallArguments(rawArgs) {
   return {};
 }
 
+function getAgentToolNameSet() {
+  return new Set(agentToolDefinitions.map((tool) => String(tool?.function?.name || "")).filter(Boolean));
+}
+
+function parseOllamaContentToolCalls(content) {
+  let text = String(content || "").trim();
+  if (!text) {
+    return [];
+  }
+
+  const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced) {
+    text = String(fenced[1] || "").trim();
+  }
+
+  if (!text.startsWith("{") && !text.startsWith("[")) {
+    return [];
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return [];
+  }
+
+  const rawCalls = Array.isArray(parsed) ? parsed : [parsed];
+  const toolNames = getAgentToolNameSet();
+  const calls = [];
+  for (const rawCall of rawCalls) {
+    if (!rawCall || typeof rawCall !== "object" || Array.isArray(rawCall)) {
+      continue;
+    }
+    const name = String(rawCall.name || rawCall.tool || rawCall.tool_name || rawCall?.function?.name || "").trim();
+    if (!toolNames.has(name)) {
+      continue;
+    }
+    const rawArgs = Object.prototype.hasOwnProperty.call(rawCall, "arguments")
+      ? rawCall.arguments
+      : rawCall.args || rawCall.parameters || rawCall?.function?.arguments || {};
+    const args = normalizeToolCallArguments(rawArgs);
+    calls.push({
+      type: "function",
+      function: {
+        name,
+        arguments: args
+      },
+      parsedFromContent: true
+    });
+  }
+
+  return calls;
+}
+
 async function runOllamaAgentWithTools(req, model, messages, maxSteps = agentMaxSteps) {
   const executedTools = [];
+  const seenToolCalls = new Set();
+  const toolOutputs = [];
   const traceId = resolveRequestTraceId(req) || createTraceId();
   const conversation = [
     {
@@ -5439,11 +5517,15 @@ async function runOllamaAgentWithTools(req, model, messages, maxSteps = agentMax
       break;
     }
 
-    const toolCalls = Array.isArray(assistant.tool_calls) ? assistant.tool_calls : [];
+    const nativeToolCalls = Array.isArray(assistant.tool_calls) ? assistant.tool_calls : [];
+    const contentToolCalls = nativeToolCalls.length === 0
+      ? parseOllamaContentToolCalls(assistant.content)
+      : [];
+    const toolCalls = nativeToolCalls.length > 0 ? nativeToolCalls : contentToolCalls;
     if (toolCalls.length > 0) {
       conversation.push({
         role: "assistant",
-        content: assistant.content || "",
+        content: contentToolCalls.length > 0 ? "" : (assistant.content || ""),
         tool_calls: toolCalls
       });
 
@@ -5451,6 +5533,17 @@ async function runOllamaAgentWithTools(req, model, messages, maxSteps = agentMax
         assertNotAborted(req);
         const name = toolCall?.function?.name || toolCall?.name;
         const args = normalizeToolCallArguments(toolCall?.function?.arguments || toolCall?.arguments);
+        const callKey = `${String(name || "")}:${JSON.stringify(args)}`;
+        if (seenToolCalls.has(callKey)) {
+          const latestOutput = toolOutputs.length > 0 ? toolOutputs[toolOutputs.length - 1] : null;
+          return {
+            text: latestOutput
+              ? `The local model repeatedly requested the same tool, so I stopped the loop. Last tool result:\n\n${JSON.stringify(latestOutput.output, null, 2)}`
+              : "The local model repeatedly requested the same tool, so I stopped the loop before running it again.",
+            executedTools
+          };
+        }
+        seenToolCalls.add(callKey);
         const startedAt = Date.now();
         let output;
         let ok = true;
@@ -5484,6 +5577,7 @@ async function runOllamaAgentWithTools(req, model, messages, maxSteps = agentMax
           args: sanitizeAuditPayload(args),
           output: sanitizeAuditPayload(output)
         });
+        toolOutputs.push({ name: String(name || ""), args, output: sanitizeAuditPayload(output), ok });
         emitJobProgress(req, "tool-end", {
           provider: "ollama",
           name: String(name || ""),
@@ -5499,6 +5593,11 @@ async function runOllamaAgentWithTools(req, model, messages, maxSteps = agentMax
           content: JSON.stringify(output)
         });
       }
+
+      conversation.push({
+        role: "system",
+        content: "You have received the tool result. Do not call the same tool again with the same arguments. Provide the final answer now unless a different tool is strictly required."
+      });
 
       continue;
     }
@@ -5740,9 +5839,22 @@ app.use(
   "/api",
   rateLimit({
     windowMs: 60 * 1000,
-    max: 20,
+    max: Math.max(20, Number(process.env.API_RATE_LIMIT_PER_MINUTE || 120)),
     standardHeaders: true,
-    legacyHeaders: false
+    legacyHeaders: false,
+    skip(req) {
+      const pathname = new URL(req.originalUrl || req.url || "/", appBaseUrl).pathname;
+      if (req.method === "GET" && /^\/api\/chat\/jobs\/[^/]+(?:\/events)?$/.test(pathname)) {
+        return true;
+      }
+      if (req.method === "GET" && ["/api/config", "/api/models", "/api/tools"].includes(pathname)) {
+        return true;
+      }
+      return false;
+    },
+    handler(_req, res) {
+      res.status(429).json({ error: "Too many requests, please try again later." });
+    }
   })
 );
 
@@ -6446,7 +6558,31 @@ app.get("/api/models", async (_req, res) => {
     const csv = await fsp.readFile(modelsCsvPath, "utf8");
     const staticModels = parseModelCatalogCsv(csv);
     const ollamaModels = ollamaAvailable ? await getOllamaModels() : [];
-    const models = [...staticModels, ...ollamaModels];
+    const ollamaByTag = new Map(ollamaModels.map((model) => [model.tag, model]));
+    const staticModelKeys = new Set(staticModels.map((model) => `${model.provider}:${model.tag}`));
+    const models = [
+      ...staticModels.map((model) => {
+        if (model.provider !== "ollama") {
+          return model;
+        }
+        const installed = ollamaByTag.get(model.tag);
+        if (!installed) {
+          return {
+            ...model,
+            installed: false,
+            capabilities: [],
+            supportsTools: false
+          };
+        }
+        return {
+          ...model,
+          installed: true,
+          capabilities: installed.capabilities || [],
+          supportsTools: Boolean(installed.supportsTools)
+        };
+      }),
+      ...ollamaModels.filter((model) => !staticModelKeys.has(`${model.provider}:${model.tag}`))
+    ];
     return res.json({ models });
   } catch (error) {
     return res.status(500).json({ error: String(error?.message || "Failed to load models") });
