@@ -96,58 +96,11 @@ const terminalDockerShellCommandLines = String(process.env.TERMINAL_DOCKER_SHELL
 const defaultTerminalDockerAllowedImages = [
   terminalDockerImage,
   "alpine:latest",
-  "archlinux:latest",
   "debian:bookworm-slim",
-  "fedora:latest",
-  "golang:alpine",
-  "golang:bookworm",
-  "kalilinux/kali-rolling",
-  "kalilinux/kali-last-release",
   "node:20-bookworm",
   "node:20",
-  "python:3-bookworm",
   "python:3-slim-bookworm",
-  "rust:bookworm",
-  "rust:slim-bookworm",
-  "ubuntu:24.04",
-  "emscripten/emsdk",
-  "parrotsec/core",
-  "parrotsec/security",
-  "blackarchlinux/blackarch",
-  "ghcr.io/webassembly/wasi-sdk",
-  "quay.io/pypa/manylinux_2_28_x86_64",
-  "quay.io/pypa/manylinux_2_28_aarch64",
-  "quay.io/pypa/musllinux_1_2_x86_64",
-  "quay.io/pypa/musllinux_1_2_aarch64",
-  "dockcross/android-arm64",
-  "dockcross/android-x86_64",
-  "dockcross/linux-x64",
-  "dockcross/linux-x64-clang",
-  "dockcross/linux-arm64",
-  "dockcross/linux-armv7",
-  "dockcross/linux-armv7l",
-  "dockcross/linux-i686",
-  "dockcross/linux-ppc64le",
-  "dockcross/linux-riscv64",
-  "dockcross/linux-s390x",
-  "dockcross/web-wasm",
-  "dockcross/web-wasi",
-  "dockcross/web-wasi-threads",
-  "dockcross/windows-arm64",
-  "dockcross/windows-static-x64",
-  "dockcross/windows-static-x64-posix",
-  "dockcross/windows-shared-x64",
-  "dockcross/windows-shared-x64-posix",
-  "dockcross/windows-static-x86",
-  "dockcross/windows-shared-x86",
-  "dockcross/manylinux_2_28-x64",
-  "messense/rust-musl-cross:x86_64-musl",
-  "mstorsjo/llvm-mingw",
-  "silkeh/clang:18",
-  "llvm/llvm:18",
-  "mcr.microsoft.com/dotnet/sdk:8.0",
-  "osxcross",
-  "valgrind"
+  "ubuntu:24.04"
 ];
 const terminalDockerAllowedImages = new Set(
   [
@@ -172,8 +125,15 @@ let lastAuditRetentionRunAt = 0;
 const port = Number(process.env.PORT || 8787);
 const appBaseUrl = process.env.APP_BASE_URL || `http://localhost:${port}`;
 const defaultModel = process.env.OPENAI_MODEL || "gpt-4.1";
-const defaultProvider = "openai";
+let defaultProvider = String(process.env.DEFAULT_PROVIDER || "openai").trim().toLowerCase() || "openai";
+const ollamaCommand = String(process.env.OLLAMA_COMMAND || "ollama").trim();
+const ollamaHost = String(process.env.OLLAMA_HOST || "127.0.0.1:11434").trim();
+const ollamaDefaultModel = String(process.env.OLLAMA_MODEL || "").trim();
 const xaiDefaultModel = process.env.XAI_MODEL || "grok-4.3";
+const ollamaAllowedModels = String(process.env.OLLAMA_ALLOWED_MODELS || "")
+  .split(",")
+  .map((item) => item.trim())
+  .filter(Boolean);
 const agentMaxStepsHardLimit = Math.max(16, Math.min(4096, Number(process.env.AGENT_MAX_STEPS_HARD_LIMIT || 1024)));
 const agentMaxSteps = Math.max(1, Math.min(agentMaxStepsHardLimit, Number(process.env.AGENT_MAX_STEPS || 16)));
 const agentMaxStepsOverrideLimit = Math.max(agentMaxSteps, Math.min(agentMaxStepsHardLimit, Number(process.env.AGENT_MAX_STEPS_OVERRIDE_LIMIT || 40)));
@@ -228,12 +188,97 @@ let adminSettingsCache = null;
 let adminSettingsLoaded = false;
 
 const openaiApiKey = process.env.OPENAI_API_KEY;
-if (!openaiApiKey && !xaiApiKey && !githubPat) {
-  console.error("Missing provider credentials. Set at least one of OPENAI_API_KEY, XAI_API_KEY, or GITHUB_PAT/GITHUB_TOKEN.");
-  process.exit(1);
+const client = openaiApiKey ? new OpenAI({ apiKey: openaiApiKey }) : null;
+let ollamaAvailable = false;
+
+function normalizeProvider(value) {
+  return String(value || "").trim().toLowerCase();
 }
 
-const client = openaiApiKey ? new OpenAI({ apiKey: openaiApiKey }) : null;
+function getOllamaBaseUrl() {
+  const trimmed = String(ollamaHost || "").trim().replace(/\/+$/, "");
+  if (!trimmed) {
+    return "http://127.0.0.1:11434";
+  }
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+}
+
+function isValidOllamaModelName(value) {
+  return typeof value === "string" && /^[a-zA-Z0-9._:/-]{2,120}$/.test(value);
+}
+
+function resolveOllamaModel(requestedModel) {
+  if (!isValidOllamaModelName(requestedModel)) {
+    return null;
+  }
+  const normalized = String(requestedModel).trim();
+  if (ollamaAllowedModels.length > 0) {
+    return ollamaAllowedModels.includes(normalized) ? normalized : null;
+  }
+  return normalized;
+}
+
+function resolveOllamaRequestedModel(requestedModel) {
+  return resolveOllamaModel(requestedModel)
+    || resolveOllamaModel(ollamaDefaultModel)
+    || resolveOllamaModel(ollamaAllowedModels[0])
+    || null;
+}
+
+function parseOllamaListOutput(rawText) {
+  const lines = String(rawText || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length < 2) {
+    return [];
+  }
+
+  const rows = [];
+  for (let i = 1; i < lines.length; i += 1) {
+    const parts = lines[i].split(/\s{2,}/).map((part) => part.trim()).filter(Boolean);
+    if (parts.length === 0) {
+      continue;
+    }
+    rows.push({ name: parts[0], id: parts[1] || "", size: parts[2] || "", modified: parts[3] || "" });
+  }
+  return rows;
+}
+
+async function getOllamaModels() {
+  try {
+    const result = await execFileAsync(ollamaCommand, ["list"], { timeout: 15000 });
+    const models = parseOllamaListOutput(result.stdout || "");
+    return models.map((item) => ({
+      provider: "ollama",
+      name: item.name,
+      tag: item.name,
+      type: "chatgpt",
+      reasoningEfforts: []
+    }));
+  } catch {
+    return [];
+  }
+}
+
+async function detectOllamaAvailability() {
+  try {
+    await execFileAsync(ollamaCommand, ["list"], { timeout: 15000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function determineDefaultProvider() {
+  const requested = String(defaultProvider || "").trim().toLowerCase();
+  const availableProviders = [];
+  if (openaiApiKey) availableProviders.push("openai");
+  if (xaiApiKey) availableProviders.push("xai");
+  if (githubPat) availableProviders.push("copilot");
+  if (ollamaAvailable) availableProviders.push("ollama");
+  if (requested && availableProviders.includes(requested)) {
+    return requested;
+  }
+  return availableProviders[0] || "openai";
+}
 
 // This app runs behind Apache reverse proxy in production.
 app.set("trust proxy", 1);
@@ -5314,6 +5359,180 @@ async function createXaiChatCompletion(model, conversation, options = {}) {
   return data;
 }
 
+async function createOllamaChatCompletion(model, conversation, options = {}) {
+  const payload = {
+    model,
+    messages: conversation,
+    stream: false,
+    ...options
+  };
+  const abortSignal = payload.abortSignal;
+  delete payload.abortSignal;
+
+  const response = await fetch(`${getOllamaBaseUrl()}/api/chat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    signal: abortSignal,
+    body: JSON.stringify(payload)
+  });
+
+  const rawBody = await response.text();
+  const data = (() => {
+    try {
+      return JSON.parse(rawBody);
+    } catch {
+      return {};
+    }
+  })();
+
+  if (!response.ok) {
+    const details = data?.error
+      || data?.message
+      || rawBody
+      || `HTTP ${response.status}`;
+    const error = new Error(`Ollama request failed: ${details}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  return data;
+}
+
+function normalizeToolCallArguments(rawArgs) {
+  if (rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)) {
+    return rawArgs;
+  }
+  if (typeof rawArgs === "string") {
+    try {
+      const parsed = JSON.parse(rawArgs || "{}");
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+async function runOllamaAgentWithTools(req, model, messages, maxSteps = agentMaxSteps) {
+  const executedTools = [];
+  const traceId = resolveRequestTraceId(req) || createTraceId();
+  const conversation = [
+    {
+      role: "system",
+      content: "You are a coding agent running locally through Ollama. If the user asks for file operations, terminal commands, git operations, API calls, tests, scheduling, or notifications, call the appropriate tool before answering. Never claim a tool result unless it appears in a tool message."
+    },
+    ...messages.map((item) => ({ role: item.role, content: item.content }))
+  ];
+
+  for (let step = 0; step < maxSteps; step += 1) {
+    assertNotAborted(req);
+    emitJobProgress(req, "agent-step", { step: step + 1, maxSteps, provider: "ollama", traceId });
+    const completion = await createOllamaChatCompletion(model, conversation, {
+      tools: agentToolDefinitions,
+      abortSignal: req?.abortSignal
+    });
+
+    const assistant = completion?.message || completion?.choices?.[0]?.message;
+    if (!assistant) {
+      break;
+    }
+
+    const toolCalls = Array.isArray(assistant.tool_calls) ? assistant.tool_calls : [];
+    if (toolCalls.length > 0) {
+      conversation.push({
+        role: "assistant",
+        content: assistant.content || "",
+        tool_calls: toolCalls
+      });
+
+      for (const toolCall of toolCalls) {
+        assertNotAborted(req);
+        const name = toolCall?.function?.name || toolCall?.name;
+        const args = normalizeToolCallArguments(toolCall?.function?.arguments || toolCall?.arguments);
+        const startedAt = Date.now();
+        let output;
+        let ok = true;
+        emitJobProgress(req, "tool-start", {
+          provider: "ollama",
+          name: String(name || ""),
+          args: sanitizeAuditPayload(args),
+          traceId
+        });
+        try {
+          output = await executeAgentTool(req, name, args);
+          executedTools.push(name);
+        } catch (error) {
+          output = { error: String(error?.message || error) };
+          ok = false;
+          executedTools.push(`${name}:error`);
+          await appendAuditLog(req, "agent-tool-error", {
+            name: String(name || ""),
+            traceId,
+            args,
+            error: String(error?.message || error)
+          });
+        }
+
+        const durationMs = Date.now() - startedAt;
+        await appendAuditLog(req, "agent-tool-record", {
+          name: String(name || ""),
+          traceId,
+          ok,
+          durationMs,
+          args: sanitizeAuditPayload(args),
+          output: sanitizeAuditPayload(output)
+        });
+        emitJobProgress(req, "tool-end", {
+          provider: "ollama",
+          name: String(name || ""),
+          ok,
+          durationMs,
+          output: sanitizeAuditPayload(output),
+          traceId
+        });
+
+        conversation.push({
+          role: "tool",
+          tool_name: String(name || ""),
+          content: JSON.stringify(output)
+        });
+      }
+
+      continue;
+    }
+
+    const text = String(assistant.content || "").trim();
+    if (text) {
+      return { text, executedTools };
+    }
+  }
+
+  try {
+    conversation.push({
+      role: "system",
+      content: "Tool execution budget has been reached. Do not call tools. Provide a concise final answer summarizing completed actions, outputs, and any remaining blockers."
+    });
+    const completion = await createOllamaChatCompletion(model, conversation, {
+      abortSignal: req?.abortSignal
+    });
+    const finalText = String(completion?.message?.content || completion?.choices?.[0]?.message?.content || "").trim();
+    if (finalText) {
+      return { text: finalText, executedTools };
+    }
+  } catch {
+    // Fall through to deterministic fallback message.
+  }
+
+  return {
+    text: executedTools.length > 0
+      ? `Agent step limit reached after executing ${executedTools.length} tool call(s). Please ask me to continue from current state.`
+      : "Reached agent step limit before producing a final answer.",
+    executedTools
+  };
+}
+
 async function runXaiAgentWithTools(req, model, messages, maxSteps = agentMaxSteps, reasoningEffort = null) {
   const executedTools = [];
   const traceId = resolveRequestTraceId(req) || createTraceId();
@@ -5792,7 +6011,7 @@ async function generateChatResponse(req) {
   assertNotAborted(req);
   const provider = String(req.body?.provider || defaultProvider).trim().toLowerCase();
   const agentMode = Boolean(req.body?.agentMode);
-  if (provider !== "openai" && provider !== "copilot" && provider !== "xai") {
+  if (provider !== "openai" && provider !== "copilot" && provider !== "xai" && provider !== "ollama") {
     const error = new Error(`provider '${provider}' is not configured on this server yet`);
     error.status = 400;
     throw error;
@@ -5869,6 +6088,49 @@ async function generateChatResponse(req) {
     const response = await client.responses.create(responseRequest);
     const text = response.output_text || "";
     return { reply: text, model, provider: "openai", traceId, reasoningEffort: reasoningEffort || null, contextCompaction: compaction };
+  }
+
+  if (provider === "ollama") {
+    if (!ollamaAvailable) {
+      const error = new Error(`ollama provider is not enabled: '${ollamaCommand} list' failed`);
+      error.status = 400;
+      throw error;
+    }
+
+    const model = resolveOllamaRequestedModel(req.body?.model);
+    if (!model) {
+      const error = new Error("ollama model must be selected. Pull a model with `ollama pull gemma3:4b` or set OLLAMA_MODEL.");
+      error.status = 400;
+      throw error;
+    }
+
+    const stepBudget = agentMode ? resolveAgentStepBudget(req) : { maxSteps: agentMaxSteps, override: false };
+    if (agentMode) {
+      const result = await runOllamaAgentWithTools(req, model, messages, stepBudget.maxSteps);
+      return {
+        reply: result.text,
+        model,
+        provider: "ollama",
+        traceId,
+        contextCompaction: compaction,
+        agentMode: true,
+        agentMaxStepsUsed: stepBudget.maxSteps,
+        agentMaxStepsOverrideUsed: stepBudget.override,
+        executedTools: result.executedTools
+      };
+    }
+
+    const ollamaData = await createOllamaChatCompletion(model, messages, {
+      abortSignal: req?.abortSignal
+    });
+    const text = ollamaData?.message?.content || ollamaData?.response || "";
+    return {
+      reply: typeof text === "string" ? text : JSON.stringify(text),
+      model,
+      provider: "ollama",
+      traceId,
+      contextCompaction: compaction
+    };
   }
 
   if (provider === "copilot") {
@@ -6144,15 +6406,73 @@ app.get("/api/chat/jobs/:jobId/events", async (req, res) => {
   });
 });
 
+function parseModelCatalogCsv(csvText) {
+  const lines = String(csvText || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length < 2) {
+    return [];
+  }
+
+  const header = parseCsvLine(lines[0]);
+  const providerIndex = header.indexOf("Provider");
+  const agencyIndex = header.indexOf("Agency");
+  const modelNameIndex = header.indexOf("Name");
+  const tagIndex = header.indexOf("Model Tag");
+  const typeIndex = header.indexOf("Type");
+  const reasoningEffortsIndex = header.indexOf("Reasoning Efforts");
+
+  return lines.slice(1).map((line) => {
+    const parts = parseCsvLine(line);
+    return {
+      provider: normalizeProvider(
+        providerIndex >= 0
+          ? parts[providerIndex]
+          : (agencyIndex >= 0 ? parts[agencyIndex] : "openai")
+      ) || "openai",
+      name: modelNameIndex >= 0 ? parts[modelNameIndex] : "",
+      tag: tagIndex >= 0 ? parts[tagIndex] : "",
+      type: typeIndex >= 0 ? String(parts[typeIndex] || "").trim() : "chatgpt",
+      reasoningEfforts: reasoningEffortsIndex >= 0
+        ? String(parts[reasoningEffortsIndex] || "")
+          .split(/[|,]/)
+          .map((item) => normalizeReasoningEffort(item))
+          .filter(Boolean)
+        : []
+    };
+  }).filter((entry) => /^[a-zA-Z0-9._:/-]{2,120}$/.test(entry.tag));
+}
+
+app.get("/api/models", async (_req, res) => {
+  try {
+    const csv = await fsp.readFile(modelsCsvPath, "utf8");
+    const staticModels = parseModelCatalogCsv(csv);
+    const ollamaModels = ollamaAvailable ? await getOllamaModels() : [];
+    const models = [...staticModels, ...ollamaModels];
+    return res.json({ models });
+  } catch (error) {
+    return res.status(500).json({ error: String(error?.message || "Failed to load models") });
+  }
+});
+
 app.get("/api/config", (_req, res) => {
   const security = getEffectiveSecuritySettingsSync();
-  const supportedProviders = ["openai"];
+  const supportedProviders = [];
+  if (openaiApiKey) {
+    supportedProviders.push("openai");
+  }
   if (githubPat) {
     supportedProviders.push("copilot");
   }
   if (xaiApiKey) {
     supportedProviders.push("xai");
   }
+  if (ollamaAvailable) {
+    supportedProviders.push("ollama");
+  }
+
+  const agentModeSupportedProviders = [];
+  if (openaiApiKey) agentModeSupportedProviders.push("openai");
+  if (xaiApiKey) agentModeSupportedProviders.push("xai");
+  if (ollamaAvailable) agentModeSupportedProviders.push("ollama");
 
   res.json({
     defaultProvider,
@@ -6160,8 +6480,10 @@ app.get("/api/config", (_req, res) => {
     allowedModels,
     xaiDefaultModel,
     xaiAllowedModels,
+    ollamaDefaultModel,
+    ollamaAllowedModels,
     supportedProviders,
-    agentModeSupportedProviders: xaiApiKey ? ["openai", "xai"] : ["openai"],
+    agentModeSupportedProviders,
     agentStepOverride: {
       enabled: Boolean(security.agentMaxStepsOverrideCode),
       baseMaxSteps: agentMaxSteps,
@@ -6261,11 +6583,11 @@ app.get("/api/tools", (_req, res) => {
       "Chat requests support autoCompact=true to send a bounded provider context while preserving the full browser chat archive/history.",
       "Use /api/files/format before /api/files/write when you want prettified output.",
       "Use /api/files/git/log to inspect snapshots and /api/files/git/revert to roll back.",
-      "Set agentMode=true in /api/chat (openai or xai provider) to enable automatic tool-calling."
+      "Set agentMode=true in /api/chat (openai, xai, or ollama provider) to enable automatic tool-calling."
     ],
     agentToolCalling: {
       enabled: true,
-      provider: "openai",
+      provider: defaultProvider,
       tools: agentToolNames
     },
     agentToolReference: [
@@ -7141,6 +7463,11 @@ app.get("/health", (_req, res) => {
 
 await ensureSandboxReady();
 await loadAdminSecuritySettings();
+ollamaAvailable = await detectOllamaAvailability();
+defaultProvider = determineDefaultProvider();
+if (defaultProvider === "ollama") {
+  console.log(`Ollama provider enabled at ${getOllamaBaseUrl()}`);
+}
 scheduleNightlyWorkspaceBackups();
 
 app.listen(port, () => {

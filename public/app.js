@@ -70,8 +70,10 @@ let config = {
   defaultProvider: "openai",
   defaultModel: "gpt-4.1",
   xaiDefaultModel: "grok-4.3",
+  ollamaDefaultModel: "",
   allowedModels: [],
   xaiAllowedModels: [],
+  ollamaAllowedModels: [],
   supportedProviders: ["openai"],
   agentModeSupportedProviders: ["openai"],
   agentStepOverride: {
@@ -806,12 +808,14 @@ function updateModelSelect() {
   let opts = providerModels.length > 0
     ? [...new Set(providerModels)]
     : [...new Set([
-      provider === "xai" ? config.xaiDefaultModel : config.defaultModel,
+      provider === "xai" ? config.xaiDefaultModel : provider === "ollama" ? config.ollamaDefaultModel : config.defaultModel,
       ...FALLBACK_MODELS
-    ])];
+    ].filter(Boolean))];
 
   const providerAllowedModels = provider === "xai"
     ? config.xaiAllowedModels
+    : provider === "ollama"
+      ? config.ollamaAllowedModels
     : config.allowedModels;
 
   if (providerAllowedModels.length > 0) {
@@ -1507,11 +1511,17 @@ async function loadConfig() {
     if (typeof data?.xaiDefaultModel === "string") {
       config.xaiDefaultModel = data.xaiDefaultModel;
     }
+    if (typeof data?.ollamaDefaultModel === "string") {
+      config.ollamaDefaultModel = data.ollamaDefaultModel;
+    }
     if (Array.isArray(data?.allowedModels)) {
       config.allowedModels = data.allowedModels.filter((item) => typeof item === "string" && item);
     }
     if (Array.isArray(data?.xaiAllowedModels)) {
       config.xaiAllowedModels = data.xaiAllowedModels.filter((item) => typeof item === "string" && item);
+    }
+    if (Array.isArray(data?.ollamaAllowedModels)) {
+      config.ollamaAllowedModels = data.ollamaAllowedModels.filter((item) => typeof item === "string" && item);
     }
     if (Array.isArray(data?.supportedProviders)) {
       config.supportedProviders = data.supportedProviders
@@ -1802,6 +1812,29 @@ async function cancelActiveChatJob() {
 
 async function loadModelCatalog() {
   try {
+    const response = await fetch("/api/models", { cache: "no-store" });
+    if (response.ok) {
+      const data = await parseJsonResponse(response);
+      if (Array.isArray(data?.models)) {
+        modelCatalog = data.models
+          .map((entry) => ({
+            provider: normalizeProvider(entry.provider) || "openai",
+            name: typeof entry.name === "string" ? entry.name : "",
+            tag: typeof entry.tag === "string" ? entry.tag : "",
+            type: normalizeProvider(entry.type || "chatgpt"),
+            reasoningEfforts: Array.isArray(entry.reasoningEfforts)
+              ? entry.reasoningEfforts.map((item) => normalizeReasoningEffort(item)).filter(Boolean)
+              : []
+          }))
+          .filter((entry) => /^[a-zA-Z0-9._:/-]{2,120}$/.test(entry.tag));
+        return;
+      }
+    }
+  } catch {
+    // Fall back to the static CSV below.
+  }
+
+  try {
     const response = await fetch("/models.csv", { cache: "no-store" });
     if (!response.ok) {
       return;
@@ -1844,7 +1877,7 @@ async function loadModelCatalog() {
             .filter(Boolean)
           : []
       }))
-      .filter((entry) => /^[a-zA-Z0-9._/-]{2,120}$/.test(entry.tag));
+      .filter((entry) => /^[a-zA-Z0-9._:/-]{2,120}$/.test(entry.tag));
   } catch {
     modelCatalog = [];
   }    

@@ -43,7 +43,12 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
 
 - `PORT`: server port, default `8787`
 - `APP_BASE_URL`: for CSP/connect settings, ex: `http://localhost:8787`
-- `OPENAI_API_KEY`: required
+- `DEFAULT_PROVIDER`: optional default provider, for example `ollama`
+- `OLLAMA_COMMAND`: local Ollama binary, default `ollama`
+- `OLLAMA_HOST`: local Ollama host, default `127.0.0.1:11434`
+- `OLLAMA_MODEL`: optional default local model
+- `OLLAMA_ALLOWED_MODELS`: optional comma-separated local model allow-list
+- `OPENAI_API_KEY`: optional; enables `openai` provider
 - `OPENAI_MODEL`: default `gpt-4.1` (change to your preferred available model)
 - `XAI_API_KEY`: optional; enables `xai` provider (Grok)
 - `XAI_MODEL`: default xAI model (default `grok-4.3`)
@@ -56,6 +61,10 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
 - `FILE_API_MAX_READ_BYTES`: max bytes for file read endpoint (default `1048576`)
 - `FILE_API_UPLOAD_MAX_BYTES`: max upload bytes (default `20971520`)
 - `SANDBOX_GIT_USER_NAME`, `SANDBOX_GIT_USER_EMAIL`: git commit identity for sandbox snapshots
+
+## Local Ollama models
+
+The web UI loads installed Ollama models from `/api/models`, so new models appear after `ollama pull ...` and a page refresh. On a 16 GB RAM CPU-only host, start with smaller Gemma models such as `gemma3:4b` or `gemma3:12b`; 20B-class models may run slowly or fail depending on quantization and available memory.
 
 ## File Lab features
 
