@@ -294,7 +294,7 @@ body {
 
 .workspace {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   gap: 12px;
   min-height: calc(100vh - 40px);
 }
@@ -377,6 +377,56 @@ body {
 
 [data-theme="dark"] .model-check {
   background: rgba(22, 38, 31, 0.75);
+}
+
+.git-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.git-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.git-panel h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.git-panel p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.git-command-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.4fr) repeat(3, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.git-command-field {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.git-command-field input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.55);
+  color: var(--ink);
+  padding: 8px;
+  font: 500 0.82rem/1.2 "IBM Plex Mono", monospace;
+}
+
+[data-theme="dark"] .git-command-field input {
+  background: rgba(23, 36, 30, 0.72);
 }
 
 .model-check input[type="checkbox"] {
@@ -808,7 +858,7 @@ textarea:focus {
   height: calc(100vh - 40px);
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto auto auto minmax(0, 1fr);
   gap: 10px;
   overflow: hidden;
 }
@@ -892,6 +942,33 @@ textarea:focus {
   gap: 6px;
   min-height: 0;
   overflow-y: auto;
+}
+
+.download-progress {
+  display: grid;
+  gap: 5px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(65, 180, 112, 0.08);
+}
+
+.download-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font: 500 0.76rem/1.2 "IBM Plex Mono", monospace;
+}
+
+.download-progress-meta span:last-child {
+  text-align: right;
+}
+
+.download-progress progress {
+  width: 100%;
+  height: 7px;
+  accent-color: var(--accent);
 }
 
 .file-item {
@@ -1506,6 +1583,14 @@ textarea:focus {
 
   .top-actions {
     width: 100%;
+  }
+
+  .git-panel-head {
+    flex-direction: column;
+  }
+
+  .git-command-grid {
+    grid-template-columns: 1fr;
   }
 
   .model-field,

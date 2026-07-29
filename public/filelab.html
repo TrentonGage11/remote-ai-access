@@ -44,6 +44,14 @@
           <button id="downloadBtn" class="btn btn-soft" type="button">Download</button>
         </div>
 
+        <div id="downloadProgress" class="download-progress" hidden aria-live="polite">
+          <div class="download-progress-meta">
+            <span>Download</span>
+            <span id="downloadProgressLabel">Preparing…</span>
+          </div>
+          <progress id="downloadProgressBar" max="100" value="0">0%</progress>
+        </div>
+
         <div class="path-row">
           <input id="uploadBypassCodeInput" type="password" placeholder="Upload unlock code (optional)" autocomplete="off" />
         </div>
@@ -78,6 +86,38 @@
             <button id="revertBtn" class="btn btn-soft danger" type="button">Revert</button>
           </div>
         </header>
+
+        <section class="card git-panel reveal" style="--d: 95ms" aria-labelledby="workspaceGitTitle">
+          <div class="git-panel-head">
+            <div>
+              <h2 id="workspaceGitTitle">Workspace Git</h2>
+              <p id="gitMetaLabel">Remote: loading</p>
+            </div>
+            <div class="top-actions">
+              <button id="copyGitRemoteBtn" class="btn btn-soft" type="button">Copy URL</button>
+              <button id="gitPullBtn" class="btn btn-soft" type="button">Pull</button>
+              <button id="gitPushBtn" class="btn btn-soft" type="button">Push</button>
+            </div>
+          </div>
+          <div class="git-command-grid">
+            <label class="git-command-field" for="gitRemoteUrlInput">
+              Clone URL
+              <input id="gitRemoteUrlInput" type="text" readonly value="Loading..." />
+            </label>
+            <label class="git-command-field" for="gitCloneCommandInput">
+              Clone
+              <input id="gitCloneCommandInput" type="text" readonly value="Loading..." />
+            </label>
+            <label class="git-command-field" for="gitPullCommandInput">
+              Pull
+              <input id="gitPullCommandInput" type="text" readonly value="Loading..." />
+            </label>
+            <label class="git-command-field" for="gitPushCommandInput">
+              Push
+              <input id="gitPushCommandInput" type="text" readonly value="Loading..." />
+            </label>
+          </div>
+        </section>
 
         <section class="card editor-panel reveal" style="--d: 120ms">
           <div class="editor-meta">
@@ -135,6 +175,6 @@
     </main>
 
     <script src="api-auth.js"></script>
-    <script type="module" src="filelab.js?v=20260531e"></script>
+    <script type="module" src="filelab.js?v=20260612b"></script>
   </body>
 </html>

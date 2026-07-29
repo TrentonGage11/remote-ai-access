@@ -1109,6 +1109,327 @@
         "html_url": "https://github.com/marketplace/models/azureml-xai/grok-3-mini"
     },
     {
+        "id": "xai/grok-build-0.1",
+        "name": "Grok Build 0.1",
+        "publisher": "xAI",
+        "summary": "Grok Build 0.1 is a development-focused xAI model optimized for code and text reasoning with an extended 256k context window.",
+        "rate_limit_tier": "custom",
+        "supported_input_modalities": [
+            "text",
+            "code"
+        ],
+        "supported_output_modalities": [
+            "text"
+        ],
+        "tags": [
+            "code",
+            "reasoning",
+            "agents"
+        ],
+        "registry": "azureml-xai",
+        "version": "1",
+        "capabilities": [
+            "agentsV2",
+            "reasoning",
+            "streaming"
+        ],
+        "limits": {
+            "max_input_tokens": 256000,
+            "max_output_tokens": 4096
+        },
+        "rate_limits": {
+            "tokens_per_minute": 10000000
+        },
+        "pricing": {
+            "unit": "per_million_tokens",
+            "amount": 1800
+        },
+        "html_url": "https://console.x.ai/team/cdfdfa29-0e8b-4166-b33a-ed674e69869b/models/grok-build-0.1?cluster=us-east-1"
+    },
+    {
+        "id": "xai/grok-4.3",
+        "name": "Grok 4.3",
+        "publisher": "xAI",
+        "summary": "Grok 4.3 is a general-purpose xAI language model with a 1M token context window for advanced reasoning and agentic workflows.",
+        "rate_limit_tier": "custom",
+        "supported_input_modalities": [
+            "text"
+        ],
+        "supported_output_modalities": [
+            "text"
+        ],
+        "tags": [
+            "reasoning",
+            "instruction",
+            "agents"
+        ],
+        "registry": "azureml-xai",
+        "version": "1",
+        "capabilities": [
+            "agentsV2",
+            "reasoning",
+            "streaming"
+        ],
+        "limits": {
+            "max_input_tokens": 1000000,
+            "max_output_tokens": 4096
+        },
+        "rate_limits": {
+            "tokens_per_minute": 10000000
+        },
+        "pricing": {
+            "unit": "per_million_tokens",
+            "amount": 1800
+        },
+        "html_url": "https://console.x.ai/team/cdfdfa29-0e8b-4166-b33a-ed674e69869b/models/grok-4.3?cluster=us-east-1"
+    },
+    {
+        "id": "xai/grok-4.20-multi-agent-0309",
+        "name": "Grok 4.20 Multi-Agent 0309",
+        "publisher": "xAI",
+        "summary": "Grok 4.20 Multi-Agent 0309 is designed for high-throughput multi-agent workflows with a 1M token context and a smaller 2.5M token rate limit.",
+        "rate_limit_tier": "custom",
+        "supported_input_modalities": [
+            "text"
+        ],
+        "supported_output_modalities": [
+            "text"
+        ],
+        "tags": [
+            "agents",
+            "reasoning",
+            "workflow"
+        ],
+        "registry": "azureml-xai",
+        "version": "1",
+        "capabilities": [
+            "agentsV2",
+            "reasoning",
+            "streaming"
+        ],
+        "limits": {
+            "max_input_tokens": 1000000,
+            "max_output_tokens": 4096
+        },
+        "rate_limits": {
+            "tokens_per_minute": 2500000
+        },
+        "pricing": {
+            "unit": "per_million_tokens",
+            "amount": 450
+        },
+        "html_url": "https://console.x.ai/team/cdfdfa29-0e8b-4166-b33a-ed674e69869b/models/grok-4.20-multi-agent-0309?cluster=us-east-1"
+    },
+    {
+        "id": "xai/grok-4.20-0309-reasoning",
+        "name": "Grok 4.20 0309 Reasoning",
+        "publisher": "xAI",
+        "summary": "Grok 4.20 0309 Reasoning is a reasoning-optimized xAI model with 1M token context and a 10M token rate limit.",
+        "rate_limit_tier": "custom",
+        "supported_input_modalities": [
+            "text"
+        ],
+        "supported_output_modalities": [
+            "text"
+        ],
+        "tags": [
+            "reasoning",
+            "instruction",
+            "agents"
+        ],
+        "registry": "azureml-xai",
+        "version": "1",
+        "capabilities": [
+            "agentsV2",
+            "reasoning",
+            "streaming"
+        ],
+        "limits": {
+            "max_input_tokens": 1000000,
+            "max_output_tokens": 4096
+        },
+        "rate_limits": {
+            "tokens_per_minute": 10000000
+        },
+        "pricing": {
+            "unit": "per_million_tokens",
+            "amount": 1800
+        },
+        "html_url": "https://console.x.ai/team/cdfdfa29-0e8b-4166-b33a-ed674e69869b/models/grok-4.20-0309-reasoning?cluster=us-east-1"
+    },
+    {
+        "id": "xai/grok-4.20-0309-non-reasoning",
+        "name": "Grok 4.20 0309 Non-Reasoning",
+        "publisher": "xAI",
+        "summary": "Grok 4.20 0309 Non-Reasoning is a fast xAI model for general use with a 1M token context and a 10M token rate limit.",
+        "rate_limit_tier": "custom",
+        "supported_input_modalities": [
+            "text"
+        ],
+        "supported_output_modalities": [
+            "text"
+        ],
+        "tags": [
+            "instruction",
+            "generation",
+            "agents"
+        ],
+        "registry": "azureml-xai",
+        "version": "1",
+        "capabilities": [
+            "agentsV2",
+            "streaming"
+        ],
+        "limits": {
+            "max_input_tokens": 1000000,
+            "max_output_tokens": 4096
+        },
+        "rate_limits": {
+            "tokens_per_minute": 10000000
+        },
+        "pricing": {
+            "unit": "per_million_tokens",
+            "amount": 1800
+        },
+        "html_url": "https://console.x.ai/team/cdfdfa29-0e8b-4166-b33a-ed674e69869b/models/grok-4.20-0309-non-reasoning?cluster=us-east-1"
+    },
+    {
+        "id": "xai/grok-imagine-image-quality",
+        "name": "Grok Imagine Image Quality",
+        "publisher": "xAI",
+        "summary": "Grok Imagine Image Quality is an xAI image generation model optimized for higher fidelity outputs.",
+        "rate_limit_tier": "custom",
+        "supported_input_modalities": [
+            "text"
+        ],
+        "supported_output_modalities": [
+            "image"
+        ],
+        "tags": [
+            "image-generation",
+            "creative"
+        ],
+        "registry": "azureml-xai",
+        "version": "1",
+        "capabilities": [
+            "image-generation"
+        ],
+        "limits": {
+            "max_input_tokens": 8192,
+            "max_output_tokens": 8192
+        },
+        "rate_limits": {
+            "images_per_minute": 300
+        },
+        "pricing": {
+            "unit": "per_image",
+            "amount": 5
+        },
+        "html_url": "https://console.x.ai/team/cdfdfa29-0e8b-4166-b33a-ed674e69869b/models/grok-imagine-image-quality?cluster=us-east-1"
+    },
+    {
+        "id": "xai/grok-imagine-image",
+        "name": "Grok Imagine Image",
+        "publisher": "xAI",
+        "summary": "Grok Imagine Image is xAI's core image generation model for text-to-image creation.",
+        "rate_limit_tier": "custom",
+        "supported_input_modalities": [
+            "text"
+        ],
+        "supported_output_modalities": [
+            "image"
+        ],
+        "tags": [
+            "image-generation",
+            "creative"
+        ],
+        "registry": "azureml-xai",
+        "version": "1",
+        "capabilities": [
+            "image-generation"
+        ],
+        "limits": {
+            "max_input_tokens": 8192,
+            "max_output_tokens": 8192
+        },
+        "rate_limits": {
+            "images_per_minute": 300
+        },
+        "pricing": {
+            "unit": "per_image",
+            "amount": 5
+        },
+        "html_url": "https://console.x.ai/team/cdfdfa29-0e8b-4166-b33a-ed674e69869b/models/grok-imagine-image?cluster=us-east-1"
+    },
+    {
+        "id": "xai/grok-imagine-video-1.5-preview",
+        "name": "Grok Imagine Video 1.5 Preview",
+        "publisher": "xAI",
+        "summary": "Grok Imagine Video 1.5 Preview is an early-access xAI video generation model.",
+        "rate_limit_tier": "custom",
+        "supported_input_modalities": [
+            "text"
+        ],
+        "supported_output_modalities": [
+            "video"
+        ],
+        "tags": [
+            "video-generation",
+            "creative"
+        ],
+        "registry": "azureml-xai",
+        "version": "1",
+        "capabilities": [
+            "video-generation"
+        ],
+        "limits": {
+            "max_input_tokens": 8192,
+            "max_output_tokens": 8192
+        },
+        "rate_limits": {
+            "seconds_per_minute": 60
+        },
+        "pricing": {
+            "unit": "per_second",
+            "amount": 1
+        },
+        "html_url": "https://console.x.ai/team/cdfdfa29-0e8b-4166-b33a-ed674e69869b/models/grok-imagine-video-1.5-preview?cluster=us-east-1"
+    },
+    {
+        "id": "xai/grok-imagine-video",
+        "name": "Grok Imagine Video",
+        "publisher": "xAI",
+        "summary": "Grok Imagine Video is xAI's main video generation model for longer-form output.",
+        "rate_limit_tier": "custom",
+        "supported_input_modalities": [
+            "text"
+        ],
+        "supported_output_modalities": [
+            "video"
+        ],
+        "tags": [
+            "video-generation",
+            "creative"
+        ],
+        "registry": "azureml-xai",
+        "version": "1",
+        "capabilities": [
+            "video-generation"
+        ],
+        "limits": {
+            "max_input_tokens": 8192,
+            "max_output_tokens": 8192
+        },
+        "rate_limits": {
+            "seconds_per_minute": 70
+        },
+        "pricing": {
+            "unit": "per_second",
+            "amount": 1
+        },
+        "html_url": "https://console.x.ai/team/cdfdfa29-0e8b-4166-b33a-ed674e69869b/models/grok-imagine-video?cluster=us-east-1"
+    },
+    {
         "id": "microsoft/mai-ds-r1",
         "name": "MAI-DS-R1",
         "publisher": "Microsoft",

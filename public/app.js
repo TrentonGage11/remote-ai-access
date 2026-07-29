@@ -15,6 +15,7 @@ const agentStepOverrideInputEl = document.getElementById("agentStepOverrideInput
 const agentStepOverrideCodeInputEl = document.getElementById("agentStepOverrideCodeInput");
 const chatPanelEl = document.getElementById("chatPanel");
 const copyAllAssistantBtnEl = document.getElementById("copyAllAssistantBtn");
+const refreshRenderBtnEl = document.getElementById("refreshRenderBtn");
 const refreshToolRunsBtnEl = document.getElementById("refreshToolRunsBtn");
 const toolRunsListEl = document.getElementById("toolRunsList");
 const toolRunsFilterSelectEl = document.getElementById("toolRunsFilterSelect");
@@ -485,9 +486,24 @@ function normalizeCodeLanguage(value) {
   return String(value || "").trim().toLowerCase();
 }
 
+function codeTokenSuffix(index) {
+  let value = Number(index) + 1;
+  let suffix = "";
+  while (value > 0) {
+    value -= 1;
+    suffix = String.fromCharCode(97 + (value % 26)) + suffix;
+    value = Math.floor(value / 26);
+  }
+  return suffix || "a";
+}
+
+function codeTokenForIndex(index) {
+  return `@@raa_ct_${codeTokenSuffix(index)}@@`;
+}
+
 function replaceTokenMatches(text, regex, className, placeholders) {
   return text.replace(regex, (match) => {
-    const token = `@@CODETOKEN_${placeholders.length}@@`;
+    const token = codeTokenForIndex(placeholders.length);
     placeholders.push(`<span class="tok-${className}">${match}</span>`);
     return token;
   });
@@ -495,8 +511,8 @@ function replaceTokenMatches(text, regex, className, placeholders) {
 
 function restoreTokenMatches(text, placeholders) {
   let output = text;
-  for (let i = 0; i < placeholders.length; i += 1) {
-    output = output.replaceAll(`@@CODETOKEN_${i}@@`, placeholders[i]);
+  for (let i = placeholders.length - 1; i >= 0; i -= 1) {
+    output = output.replaceAll(codeTokenForIndex(i), placeholders[i]);
   }
   return output;
 }
@@ -520,7 +536,7 @@ function highlightGenericCode(rawCode) {
   text = replaceTokenMatches(text, /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)/g, "string", placeholders);
   text = replaceTokenMatches(text, /\/\/[^\n]*/g, "comment", placeholders);
   text = text.replace(/(^|\s)(#[^\n]*)/gm, (_full, prefix, comment) => {
-    const token = `@@CODETOKEN_${placeholders.length}@@`;
+    const token = codeTokenForIndex(placeholders.length);
     placeholders.push(`<span class="tok-comment">${comment}</span>`);
     return `${prefix}${token}`;
   });
@@ -875,6 +891,17 @@ function renderAll() {
   syncReasoningEffortControl();
   syncAgentModeToggle();
   renderMessages();
+}
+
+function countStoredLegacyCodeTokens() {
+  let total = 0;
+  for (const chat of state.chats || []) {
+    for (const msg of chat.messages || []) {
+      const matches = String(msg?.content || "").match(/@@CODETOKEN_\d+@@/g);
+      total += matches ? matches.length : 0;
+    }
+  }
+  return total;
 }
 
 function getReasoningEffortOptions(provider, model) {
@@ -2049,6 +2076,16 @@ copyAllAssistantBtnEl.addEventListener("click", async () => {
     statusEl.textContent = "Clipboard copy failed.";
   }
 });
+
+if (refreshRenderBtnEl) {
+  refreshRenderBtnEl.addEventListener("click", () => {
+    const legacyCount = countStoredLegacyCodeTokens();
+    renderMessages();
+    statusEl.textContent = legacyCount > 0
+      ? `Render refreshed. Found ${legacyCount} literal legacy CODETOKEN marker(s) saved in chat markdown; those cannot be reconstructed automatically.`
+      : "Render refreshed with the current markdown/code renderer.";
+  });
+}
 
 if (refreshToolRunsBtnEl) {
   refreshToolRunsBtnEl.addEventListener("click", () => {

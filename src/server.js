@@ -11,7 +11,7 @@ import fs from "fs";
 import fsp from "fs/promises";
 import os from "os";
 import { promisify } from "util";
-import { execFile } from "child_process";
+import { execFile, spawn } from "child_process";
 import { fileURLToPath } from "url";
 import { AsyncLocalStorage } from "async_hooks";
 
@@ -43,6 +43,7 @@ const workspaceGitRemoteRoot = path.resolve(process.env.WORKSPACE_GIT_REMOTE_ROO
 const workspaceGitRemoteName = String(process.env.WORKSPACE_GIT_REMOTE_NAME || "origin").trim() || "origin";
 const workspaceGitSshHost = String(process.env.WORKSPACE_GIT_SSH_HOST || "").trim();
 const workspaceGitSshUser = String(process.env.WORKSPACE_GIT_SSH_USER || "").trim() || "root";
+const workspaceGitHttpsBaseUrl = String(process.env.WORKSPACE_GIT_HTTPS_BASE_URL || "").trim().replace(/\/+$/, "");
 const defaultUploadMaxBytes = Math.max(1024, Number(process.env.FILE_API_UPLOAD_MAX_BYTES || 20 * 1024 * 1024));
 const workspaceUploadBypassCodesRaw = String(process.env.WORKSPACE_UPLOAD_BYPASS_CODES || "");
 const workspaceUploadBypassCodes = parseWorkspaceUploadBypassCodes(workspaceUploadBypassCodesRaw);
@@ -703,12 +704,25 @@ function getWorkspaceBareRepoSshUrl(req) {
   return `${workspaceGitSshUser}@${host}:${repoPath}`;
 }
 
+function getRequestOrigin(req) {
+  const proto = String(req?.headers?.["x-forwarded-proto"] || req?.protocol || "http").split(",")[0].trim() || "http";
+  const host = String(req?.headers?.["x-forwarded-host"] || req?.headers?.host || "").split(",")[0].trim();
+  return host ? `${proto}://${host}` : appBaseUrl.replace(/\/+$/, "");
+}
+
+function getWorkspaceBareRepoHttpsUrl(req, code = getWorkspaceContext().code) {
+  const workspaceCode = normalizeWorkspaceCode(code) || defaultWorkspaceCode;
+  const base = workspaceGitHttpsBaseUrl || getRequestOrigin(req);
+  return `${base.replace(/\/+$/, "")}/git/${encodeURIComponent(workspaceCode)}.git`;
+}
+
 async function ensureWorkspaceGitRemoteSetup(req = null) {
   const bareRepoPath = getWorkspaceBareRepoPath();
   await fsp.mkdir(path.dirname(bareRepoPath), { recursive: true });
   if (!fs.existsSync(path.join(bareRepoPath, "HEAD"))) {
     await execFileAsync("git", ["init", "--bare", bareRepoPath]);
   }
+  await execFileAsync("git", ["--git-dir", bareRepoPath, "config", "http.receivepack", "true"]);
 
   const remoteName = getWorkspaceGitRemoteName();
   const setResult = await runGit(["remote", "set-url", remoteName, bareRepoPath], true);
@@ -729,7 +743,8 @@ async function ensureWorkspaceGitRemoteSetup(req = null) {
   return {
     remoteName,
     remotePath: bareRepoPath,
-    remoteSshUrl: getWorkspaceBareRepoSshUrl(req)
+    remoteSshUrl: getWorkspaceBareRepoSshUrl(req),
+    remoteHttpsUrl: getWorkspaceBareRepoHttpsUrl(req)
   };
 }
 
@@ -5680,6 +5695,7 @@ app.get("/api/session/workspace", async (req, res) => {
   const remoteSshUrl = host
     ? `${workspaceGitSshUser}@${host}:${String(context.bareRepoPath || "").replaceAll("\\", "/")}`
     : "";
+  const remoteHttpsUrl = getWorkspaceBareRepoHttpsUrl(req, context.code);
   res.json({
     workspaceCode: context.code,
     cookieName: workspaceCookieName,
@@ -5689,7 +5705,8 @@ app.get("/api/session/workspace", async (req, res) => {
     gitRemote: {
       remoteName: workspaceGitRemoteName,
       remotePath: context.bareRepoPath,
-      remoteSshUrl
+      remoteSshUrl,
+      remoteHttpsUrl
     }
   });
 });
@@ -5784,6 +5801,146 @@ app.post("/api/session/branch", async (req, res, next) => {
   } catch (error) {
     return next(error);
   }
+});
+
+function getApiKeyFromBasicAuth(req) {
+  const header = String(req.headers.authorization || "");
+  if (!header.toLowerCase().startsWith("basic ")) {
+    return "";
+  }
+  try {
+    const decoded = Buffer.from(header.slice(6).trim(), "base64").toString("utf8");
+    const sep = decoded.indexOf(":");
+    return sep >= 0 ? decoded.slice(sep + 1).trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+function requireGitHttpAuth(req, res) {
+  const security = getEffectiveSecuritySettingsSync();
+  if (!security.apiKeyAuthEnabled || security.apiKeys.length === 0) {
+    return true;
+  }
+
+  const headerValue = String(req.headers[security.apiKeyHeaderName] || "").trim();
+  const basicPassword = getApiKeyFromBasicAuth(req);
+  const providedKey = headerValue || basicPassword;
+  if (providedKey && security.apiKeys.includes(providedKey)) {
+    return true;
+  }
+
+  res.set("WWW-Authenticate", "Basic realm=Remote AI Access Git");
+  res.status(401).send("API key required for Git HTTPS. Use the API key as the Basic auth password or provide the API key header.");
+  return false;
+}
+
+function parseGitHttpCgiHeaders(headerText) {
+  const headers = {};
+  let statusCode = 200;
+  const lines = String(headerText || "").split(/\r?\n/);
+  for (const line of lines) {
+    if (!line.trim()) {
+      continue;
+    }
+    const sep = line.indexOf(":");
+    if (sep < 0) {
+      continue;
+    }
+    const name = line.slice(0, sep).trim();
+    const value = line.slice(sep + 1).trim();
+    if (!name) {
+      continue;
+    }
+    if (name.toLowerCase() === "status") {
+      const match = value.match(/^(\d{3})/);
+      if (match) {
+        statusCode = Number(match[1]);
+      }
+    } else {
+      headers[name] = value;
+    }
+  }
+  return { statusCode, headers };
+}
+
+function writeGitHttpBackendOutput(res, output) {
+  const separator = output.indexOf("\r\n\r\n");
+  const fallbackSeparator = output.indexOf("\n\n");
+  const headerEnd = separator >= 0 ? separator : fallbackSeparator;
+  const delimiterLength = separator >= 0 ? 4 : 2;
+  if (headerEnd < 0) {
+    res.status(502).send("Invalid git backend response.");
+    return;
+  }
+
+  const headerText = output.subarray(0, headerEnd).toString("utf8");
+  const body = output.subarray(headerEnd + delimiterLength);
+  const { statusCode, headers } = parseGitHttpCgiHeaders(headerText);
+  Object.entries(headers).forEach(([name, value]) => {
+    res.setHeader(name, value);
+  });
+  res.status(statusCode).send(body);
+}
+
+async function handleGitHttp(req, res, next) {
+  try {
+    const workspaceCode = normalizeWorkspaceCode(req.params.workspace);
+    if (!workspaceCode || (allowedWorkspaceCodes.length > 0 && !allowedWorkspaceCodes.includes(workspaceCode))) {
+      return res.status(404).send("Repository not found.");
+    }
+    if (!requireGitHttpAuth(req, res)) {
+      return;
+    }
+
+    const context = workspaceContextForCode(workspaceCode);
+    await workspaceContextStore.run(context, async () => {
+      await ensureSandboxReady();
+      await ensureWorkspaceGitRemoteSetup(req);
+    });
+
+    const pathInfo = `/${workspaceCode}.git${req.params[0] ? `/${req.params[0]}` : ""}`;
+    const child = spawn("git", ["http-backend"], {
+      cwd: projectRoot,
+      env: {
+        ...process.env,
+        GIT_PROJECT_ROOT: workspaceGitRemoteRoot,
+        GIT_HTTP_EXPORT_ALL: "1",
+        PATH_INFO: pathInfo,
+        REQUEST_METHOD: req.method,
+        QUERY_STRING: new URL(req.originalUrl || req.url || "/", appBaseUrl).searchParams.toString(),
+        CONTENT_TYPE: String(req.headers["content-type"] || ""),
+        CONTENT_LENGTH: String(req.headers["content-length"] || ""),
+        REMOTE_USER: workspaceCode
+      },
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+
+    const stdout = [];
+    const stderr = [];
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.on("error", next);
+    child.stdin.on("error", () => {
+      // The git backend can close stdin early after rejecting a request.
+    });
+    child.on("close", (code) => {
+      if (code && code !== 0) {
+        const message = Buffer.concat(stderr).toString("utf8").trim() || "git http-backend failed";
+        res.status(500).send(message);
+        return;
+      }
+      writeGitHttpBackendOutput(res, Buffer.concat(stdout));
+    });
+    req.pipe(child.stdin);
+  } catch (error) {
+    next(error);
+  }
+}
+
+app.all(/^\/git\/([a-z0-9][a-z0-9_-]{1,47})\.git(?:\/(.*))?$/, (req, res, next) => {
+  req.params = { workspace: req.params[0], 0: req.params[1] || "" };
+  handleGitHttp(req, res, next);
 });
 
 async function generateChatResponse(req) {

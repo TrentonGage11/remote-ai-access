@@ -128,12 +128,23 @@ const uploadBypassCodeInputEl = document.getElementById("uploadBypassCodeInput")
 const dropZoneEl = document.getElementById("dropZone");
 const activePathLabelEl = document.getElementById("activePathLabel");
 const fileStatusEl = document.getElementById("fileStatus");
+const downloadProgressEl = document.getElementById("downloadProgress");
+const downloadProgressLabelEl = document.getElementById("downloadProgressLabel");
+const downloadProgressBarEl = document.getElementById("downloadProgressBar");
 const editorRootEl = document.getElementById("editorRoot");
 const editorLayoutEl = document.getElementById("editorLayout");
 const themeToggleEl = document.getElementById("themeToggle");
 const workspaceCodeInputEl = document.getElementById("workspaceCodeInput");
 const workspaceSwitchBtnEl = document.getElementById("workspaceSwitchBtn");
 const workspaceBadgeEl = document.getElementById("workspaceBadge");
+const gitMetaLabelEl = document.getElementById("gitMetaLabel");
+const gitRemoteUrlInputEl = document.getElementById("gitRemoteUrlInput");
+const gitCloneCommandInputEl = document.getElementById("gitCloneCommandInput");
+const gitPullCommandInputEl = document.getElementById("gitPullCommandInput");
+const gitPushCommandInputEl = document.getElementById("gitPushCommandInput");
+const copyGitRemoteBtnEl = document.getElementById("copyGitRemoteBtn");
+const gitPullBtnEl = document.getElementById("gitPullBtn");
+const gitPushBtnEl = document.getElementById("gitPushBtn");
 const syntaxThemeSelectEl = document.getElementById("syntaxThemeSelect");
 const fontSizeRangeEl = document.getElementById("fontSizeRange");
 const fontSizeValueEl = document.getElementById("fontSizeValue");
@@ -189,6 +200,13 @@ let currentSyntaxTheme = "verdant";
 let currentFontSize = 14;
 let minimapEnabled = true;
 let currentWorkspaceCode = "";
+let currentWorkspaceBranch = "main";
+let currentWorkspaceGit = {
+  remoteName: "origin",
+  remoteHttpsUrl: "",
+  remoteSshUrl: "",
+  remotePath: ""
+};
 let lastLintMessages = [];
 let uploadPolicy = {
   defaultMaxBytes: DEFAULT_MAX_UPLOAD_BYTES,
@@ -707,6 +725,15 @@ function setStatus(text) {
   fileStatusEl.textContent = text;
 }
 
+function mergeApiAuthHeader(headers = {}) {
+  const merged = new Headers(headers);
+  const apiAuth = getStoredApiAuthHeader();
+  if (apiAuth && !merged.has(apiAuth.headerName)) {
+    merged.set(apiAuth.headerName, apiAuth.key);
+  }
+  return merged;
+}
+
 function getStoredApiAuthHeader() {
   try {
     const authApi = window.RemoteAiAuth;
@@ -749,6 +776,47 @@ function normalizeWorkspaceCode(value) {
   return /^[a-z0-9][a-z0-9_-]{1,47}$/.test(code) ? code : "";
 }
 
+function getGitBranchName() {
+  return String(currentWorkspaceBranch || "main").trim() || "main";
+}
+
+function getGitRemoteName() {
+  return String(currentWorkspaceGit.remoteName || "origin").trim() || "origin";
+}
+
+function setGitFieldValues({ remoteUrl = "", remoteName = "origin", branch = "main", workspaceCode = "" } = {}) {
+  const url = String(remoteUrl || "").trim();
+  const repoDir = workspaceCode ? `remote-ai-access-${workspaceCode}` : "remote-ai-access-workspace";
+  const cloneCommand = url ? `git clone ${url} ${repoDir}` : "Git remote unavailable";
+  const pullCommand = `git pull ${remoteName} ${branch}`;
+  const pushCommand = `git push -u ${remoteName} ${branch}`;
+
+  if (gitMetaLabelEl) {
+    gitMetaLabelEl.textContent = url ? `Remote: ${remoteName} / ${branch}` : "Remote: unavailable";
+  }
+  if (gitRemoteUrlInputEl) {
+    gitRemoteUrlInputEl.value = url || "Git remote unavailable";
+  }
+  if (gitCloneCommandInputEl) {
+    gitCloneCommandInputEl.value = cloneCommand;
+  }
+  if (gitPullCommandInputEl) {
+    gitPullCommandInputEl.value = pullCommand;
+  }
+  if (gitPushCommandInputEl) {
+    gitPushCommandInputEl.value = pushCommand;
+  }
+}
+
+function updateGitPanel() {
+  setGitFieldValues({
+    remoteUrl: currentWorkspaceGit.remoteHttpsUrl || currentWorkspaceGit.remoteSshUrl,
+    remoteName: getGitRemoteName(),
+    branch: getGitBranchName(),
+    workspaceCode: currentWorkspaceCode || "default"
+  });
+}
+
 async function loadWorkspaceInfo() {
   if (!workspaceBadgeEl) {
     return;
@@ -757,13 +825,42 @@ async function loadWorkspaceInfo() {
     const data = await apiJson("/api/session/workspace");
     const code = normalizeWorkspaceCode(data?.workspaceCode) || "default";
     currentWorkspaceCode = code;
+    currentWorkspaceBranch = String(data?.currentBranch || currentWorkspaceBranch || "main").trim() || "main";
+    if (data?.gitRemote) {
+      currentWorkspaceGit = {
+        remoteName: String(data.gitRemote.remoteName || currentWorkspaceGit.remoteName || "origin"),
+        remoteHttpsUrl: String(data.gitRemote.remoteHttpsUrl || currentWorkspaceGit.remoteHttpsUrl || ""),
+        remoteSshUrl: String(data.gitRemote.remoteSshUrl || currentWorkspaceGit.remoteSshUrl || ""),
+        remotePath: String(data.gitRemote.remotePath || currentWorkspaceGit.remotePath || "")
+      };
+    }
     workspaceBadgeEl.textContent = `Workspace: ${code}`;
     if (workspaceCodeInputEl && !workspaceCodeInputEl.value) {
       workspaceCodeInputEl.value = code;
     }
+    updateGitPanel();
   } catch {
     currentWorkspaceCode = "";
     workspaceBadgeEl.textContent = "Workspace: unknown";
+    updateGitPanel();
+  }
+}
+
+async function loadWorkspaceGitInfo() {
+  try {
+    const data = await apiJson("/api/session/workspace/git");
+    currentWorkspaceCode = normalizeWorkspaceCode(data?.workspaceCode) || currentWorkspaceCode || "default";
+    currentWorkspaceGit = {
+      remoteName: String(data?.remoteName || currentWorkspaceGit.remoteName || "origin"),
+      remoteHttpsUrl: String(data?.remoteHttpsUrl || currentWorkspaceGit.remoteHttpsUrl || ""),
+      remoteSshUrl: String(data?.remoteSshUrl || currentWorkspaceGit.remoteSshUrl || ""),
+      remotePath: String(data?.remotePath || currentWorkspaceGit.remotePath || "")
+    };
+    updateGitPanel();
+  } catch (error) {
+    if (gitMetaLabelEl) {
+      gitMetaLabelEl.textContent = `Remote: ${error.message}`;
+    }
   }
 }
 
@@ -823,6 +920,93 @@ async function switchWorkspace() {
     setStatus(`Error: ${error.message}`);
   } finally {
     workspaceSwitchBtnEl.disabled = false;
+  }
+}
+
+async function copyTextToClipboard(text) {
+  const value = String(text || "");
+  if (!value) {
+    throw new Error("Nothing to copy.");
+  }
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
+}
+
+async function pullWorkspaceGit() {
+  if (!confirmDiscardUnsavedChanges("pull from git")) {
+    return;
+  }
+  const branch = getGitBranchName();
+  const remoteName = getGitRemoteName();
+  const confirmed = window.confirm(`Pull ${remoteName}/${branch} into this workspace?`);
+  if (!confirmed) {
+    return;
+  }
+
+  if (gitPullBtnEl) {
+    gitPullBtnEl.disabled = true;
+  }
+  try {
+    const data = await apiJson("/api/session/workspace/git/pull", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ remoteName, branch, strategy: "ff-only" })
+    });
+    currentWorkspaceBranch = String(data?.branch || branch);
+    currentWorkspaceGit.remoteName = String(data?.remote || data?.remoteName || remoteName);
+    updateGitPanel();
+    activeFilePath = "";
+    originalFileContent = "";
+    selectedPath = "";
+    selectedPathType = "";
+    activePathLabelEl.textContent = "No file selected";
+    setEditorContent("", "");
+    clearLintDiagnostics();
+    await loadDirectory(currentDir);
+    setStatus(`Pulled ${currentWorkspaceGit.remoteName}/${currentWorkspaceBranch}${data?.head ? ` at ${data.head}` : ""}.`);
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  } finally {
+    if (gitPullBtnEl) {
+      gitPullBtnEl.disabled = false;
+    }
+  }
+}
+
+async function pushWorkspaceGit() {
+  const branch = getGitBranchName();
+  const remoteName = getGitRemoteName();
+  if (gitPushBtnEl) {
+    gitPushBtnEl.disabled = true;
+  }
+  try {
+    const data = await apiJson("/api/session/workspace/git/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ remoteName, branch, setUpstream: true })
+    });
+    currentWorkspaceBranch = String(data?.branch || branch);
+    currentWorkspaceGit.remoteName = String(data?.remote || data?.remoteName || remoteName);
+    updateGitPanel();
+    setStatus(data?.ok === false ? `Push finished with output: ${data.output || "check git status"}` : `Pushed ${currentWorkspaceGit.remoteName}/${currentWorkspaceBranch}.`);
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  } finally {
+    if (gitPushBtnEl) {
+      gitPushBtnEl.disabled = false;
+    }
   }
 }
 
@@ -938,7 +1122,9 @@ function setCursorPosition(line, col) {
 }
 
 async function apiJson(url, options = {}) {
-  const response = await fetch(url, options);
+  const requestOptions = { ...options };
+  requestOptions.headers = mergeApiAuthHeader(options.headers || {});
+  const response = await fetch(url, requestOptions);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) {
@@ -971,7 +1157,19 @@ function parseDownloadFilename(contentDisposition, fallbackPath) {
   return fallbackName;
 }
 
-async function downloadActiveFile(path) {
+function setDownloadProgress({ visible = true, loaded = 0, total = 0, message = "Preparing…" } = {}) {
+  if (!downloadProgressEl || !downloadProgressLabelEl || !downloadProgressBarEl) {
+    return;
+  }
+
+  downloadProgressEl.hidden = !visible;
+  downloadProgressLabelEl.textContent = message;
+  const hasTotal = Number.isFinite(total) && total > 0;
+  downloadProgressBarEl.max = hasTotal ? total : 1;
+  downloadProgressBarEl.value = hasTotal ? Math.min(Math.max(0, loaded), total) : 0;
+}
+
+async function downloadActiveFile(path, onProgress) {
   const query = new URLSearchParams({ path }).toString();
   const headers = {};
   const apiAuth = getStoredApiAuthHeader();
@@ -990,7 +1188,28 @@ async function downloadActiveFile(path) {
     throw new Error(message);
   }
 
-  const blob = await response.blob();
+  const total = Number(response.headers.get("content-length")) || 0;
+  let loaded = 0;
+  const chunks = [];
+  if (response.body) {
+    const reader = response.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        loaded += value.byteLength;
+        onProgress?.(loaded, total);
+      }
+    }
+  } else {
+    const blob = await response.blob();
+    loaded = blob.size;
+    chunks.push(blob);
+    onProgress?.(loaded, total || loaded);
+  }
+
+  const blob = new Blob(chunks, { type: response.headers.get("content-type") || "application/octet-stream" });
   const name = parseDownloadFilename(response.headers.get("content-disposition"), path);
   const objectUrl = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -1828,12 +2047,53 @@ downloadBtnEl.addEventListener("click", async () => {
     return;
   }
   try {
-    await downloadActiveFile(selectedPath);
+    downloadBtnEl.disabled = true;
+    downloadBtnEl.textContent = "Downloading…";
+    setDownloadProgress({ message: "Preparing download…" });
+    await downloadActiveFile(selectedPath, (loaded, total) => {
+      const hasTotal = total > 0;
+      const percent = hasTotal ? Math.min(100, Math.round((loaded / total) * 100)) : null;
+      setDownloadProgress({
+        loaded,
+        total,
+        message: hasTotal
+          ? `${percent}% · ${formatByteSize(loaded)} / ${formatByteSize(total)}`
+          : `${formatByteSize(loaded)} received`
+      });
+    });
+    setDownloadProgress({ message: "Download complete", loaded: 1, total: 1 });
     setStatus(`Downloaded ${selectedPath}`);
   } catch (error) {
+    setDownloadProgress({ message: "Download failed" });
     setStatus(`Error: ${error.message}`);
+  } finally {
+    downloadBtnEl.disabled = false;
+    downloadBtnEl.textContent = "Download";
   }
 });
+
+if (copyGitRemoteBtnEl) {
+  copyGitRemoteBtnEl.addEventListener("click", async () => {
+    try {
+      await copyTextToClipboard(currentWorkspaceGit.remoteHttpsUrl || currentWorkspaceGit.remoteSshUrl || "");
+      setStatus("Git remote URL copied.");
+    } catch (error) {
+      setStatus(`Error: ${error.message}`);
+    }
+  });
+}
+
+if (gitPullBtnEl) {
+  gitPullBtnEl.addEventListener("click", () => {
+    pullWorkspaceGit().catch((error) => setStatus(`Error: ${error.message}`));
+  });
+}
+
+if (gitPushBtnEl) {
+  gitPushBtnEl.addEventListener("click", () => {
+    pushWorkspaceGit().catch((error) => setStatus(`Error: ${error.message}`));
+  });
+}
 
 gitLogBtnEl.addEventListener("click", async () => {
   try {
@@ -1997,4 +2257,5 @@ if (launchPath) {
 }
 
 loadWorkspaceInfo().catch(() => {});
+loadWorkspaceGitInfo().catch(() => {});
 loadUploadPolicy().catch(() => {});
