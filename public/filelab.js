@@ -1331,6 +1331,13 @@ function renderFileList(entries) {
         return;
       }
 
+      // Selection must not depend on the text editor being able to read the
+      // file.  In particular, files over the editor read limit still need to
+      // be downloadable from File Lab.
+      selectedPath = targetPath;
+      selectedPathType = "file";
+      markSelectedFileItem(btn);
+
       try {
         if (activeFilePath !== targetPath && !confirmDiscardUnsavedChanges("open another file")) {
           return;
@@ -1339,14 +1346,13 @@ function renderFileList(entries) {
         activeFilePath = fileData.path;
         selectedPath = activeFilePath;
         selectedPathType = "file";
-        markSelectedFileItem(btn);
         originalFileContent = fileData.content || "";
         activePathLabelEl.textContent = activeFilePath;
         setEditorContent(fileData.content || "", activeFilePath);
         clearLintDiagnostics();
         setStatus(`Loaded ${activeFilePath}`);
       } catch (error) {
-        setStatus(`Error: ${error.message}`);
+        setStatus(`Could not open ${targetPath}: ${error.message}. It remains selected and can be downloaded.`);
       }
     });
     btn.addEventListener("dblclick", () => {
