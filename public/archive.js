@@ -1,9 +1,18 @@
 const THEME_STORAGE_KEY = "remote-ai-access-theme";
 const CHAT_STATE_KEY = "remote-ai-access-chat-state-v1";
+const HISTORY_EXPORT_KEY = "remote-ai-access-history-v1";
+const CHAT_BACKUPS_KEY = "remote-ai-access-chat-backups-v1";
+const LEGACY_CHAT_STATE_KEYS = [
+  "remote-ai-access-chat-state",
+  "remote-ai-access-chat-state-v0",
+  "remote-ai-access-history",
+  "remote-ai-access-history-v0"
+];
 
 const themeToggleEl = document.getElementById("themeToggle");
 const downloadArchiveBtnEl = document.getElementById("downloadArchiveBtn");
 const copyArchiveBtnEl = document.getElementById("copyArchiveBtn");
+const repairArchiveStateBtnEl = document.getElementById("repairArchiveStateBtn");
 const importMergeBtnEl = document.getElementById("importMergeBtn");
 const importReplaceBtnEl = document.getElementById("importReplaceBtn");
 const archiveFileInputEl = document.getElementById("archiveFileInput");
@@ -115,6 +124,69 @@ function readArchive() {
   }
 }
 
+function parseStateCandidate(raw) {
+  if (!raw || typeof raw !== "string") {
+    return null;
+  }
+  try {
+    return normalizeArchive(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+function countMessages(state) {
+  if (!state || !Array.isArray(state.chats)) {
+    return 0;
+  }
+  return state.chats.reduce((total, chat) => total + (Array.isArray(chat.messages) ? chat.messages.length : 0), 0);
+}
+
+function chooseBestState(candidates) {
+  const valid = (Array.isArray(candidates) ? candidates : []).filter(Boolean);
+  if (valid.length === 0) {
+    return null;
+  }
+  valid.sort((a, b) => {
+    const messageDelta = countMessages(b) - countMessages(a);
+    if (messageDelta !== 0) {
+      return messageDelta;
+    }
+    return (b.chats?.length || 0) - (a.chats?.length || 0);
+  });
+  return valid[0] || null;
+}
+
+function repairArchiveState() {
+  const candidates = [];
+  candidates.push(parseStateCandidate(localStorage.getItem(CHAT_STATE_KEY)));
+  candidates.push(parseStateCandidate(localStorage.getItem(HISTORY_EXPORT_KEY)));
+  for (const key of LEGACY_CHAT_STATE_KEYS) {
+    candidates.push(parseStateCandidate(localStorage.getItem(key)));
+  }
+
+  try {
+    const backups = JSON.parse(localStorage.getItem(CHAT_BACKUPS_KEY) || "[]");
+    if (Array.isArray(backups)) {
+      for (const item of backups) {
+        candidates.push(normalizeArchive(item?.state || {}));
+      }
+    }
+  } catch {
+    // Ignore unreadable backup blobs.
+  }
+
+  let repaired = chooseBestState(candidates);
+  if (!repaired) {
+    repaired = { activeChatId: null, chats: [] };
+  }
+
+  writeArchive(repaired);
+  localStorage.setItem(HISTORY_EXPORT_KEY, JSON.stringify(repaired, null, 2));
+  archiveStatusEl.textContent = `Chat state repaired. ${repaired.chats.length} chat(s), ${countMessages(repaired)} message(s).`;
+  render();
+}
+
 function writeArchive(state) {
   localStorage.setItem(CHAT_STATE_KEY, JSON.stringify(state));
 }
@@ -129,6 +201,9 @@ function normalizeArchive(parsed) {
     title: typeof chat.title === "string" && chat.title ? chat.title : "Imported chat",
     provider: typeof chat.provider === "string" && chat.provider ? chat.provider : "openai",
     model: typeof chat.model === "string" && chat.model ? chat.model : "gpt-4.1",
+    contextEntries: Array.isArray(chat.contextEntries)
+      ? chat.contextEntries.filter((entry) => entry && typeof entry === "object")
+      : [],
     createdAt: typeof chat.createdAt === "string" && chat.createdAt ? chat.createdAt : new Date().toISOString(),
     messages: Array.isArray(chat.messages)
       ? chat.messages
@@ -260,6 +335,16 @@ copyArchiveBtnEl.addEventListener("click", async () => {
     archiveStatusEl.textContent = "Clipboard copy failed.";
   }
 });
+
+if (repairArchiveStateBtnEl) {
+  repairArchiveStateBtnEl.addEventListener("click", () => {
+    try {
+      repairArchiveState();
+    } catch (error) {
+      archiveStatusEl.textContent = `Repair failed: ${error.message}`;
+    }
+  });
+}
 
 importMergeBtnEl.addEventListener("click", () => {
   pendingImportMode = "merge";

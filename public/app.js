@@ -14,8 +14,14 @@ const agentModeToggleEl = document.getElementById("agentModeToggle");
 const agentStepOverrideInputEl = document.getElementById("agentStepOverrideInput");
 const agentStepOverrideCodeInputEl = document.getElementById("agentStepOverrideCodeInput");
 const chatPanelEl = document.getElementById("chatPanel");
+const contextScopeSelectEl = document.getElementById("contextScopeSelect");
+const contextListEl = document.getElementById("contextList");
+const contextStatusEl = document.getElementById("contextStatus");
+const addContextEntryBtnEl = document.getElementById("addContextEntryBtn");
+const copyContextPreambleBtnEl = document.getElementById("copyContextPreambleBtn");
 const copyAllAssistantBtnEl = document.getElementById("copyAllAssistantBtn");
 const refreshRenderBtnEl = document.getElementById("refreshRenderBtn");
+const repairChatStateBtnEl = document.getElementById("repairChatStateBtn");
 const refreshToolRunsBtnEl = document.getElementById("refreshToolRunsBtn");
 const toolRunsListEl = document.getElementById("toolRunsList");
 const toolRunsFilterSelectEl = document.getElementById("toolRunsFilterSelect");
@@ -40,6 +46,9 @@ const FILELAB_SYNTAX_THEME_KEY = "filelab-syntax-theme";
 const CHAT_STATE_KEY = "remote-ai-access-chat-state-v1";
 const HISTORY_EXPORT_KEY = "remote-ai-access-history-v1";
 const CHAT_BACKUPS_KEY = "remote-ai-access-chat-backups-v1";
+const CONTEXT_GLOBAL_KEY = "remote-ai-access-context-global-v1";
+const CONTEXT_PREAMBLE_MAX_CHARS = 8000;
+const CONTEXT_MAX_ENTRIES = 60;
 const LEGACY_CHAT_STATE_KEYS = [
   "remote-ai-access-chat-state",
   "remote-ai-access-chat-state-v0",
@@ -56,7 +65,7 @@ const NOTIFICATIONS_DEBOUNCE_MS_KEY = "remote-ai-access-notifications-debounce-m
 const NOTIFICATION_RULES_KEY = "remote-ai-access-notification-rules-v1";
 const AUTO_OPEN_TRACE_AUDIT_KEY = "remote-ai-access-auto-open-trace-audit-v1";
 
-const FALLBACK_MODELS = ["gpt-5.5", "gpt-5.3-codex", "gpt-5", "gpt-4.1"];
+const FALLBACK_MODELS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.3-codex", "gpt-5", "gpt-4.1"];
 const CHAT_CAPABLE_TYPES = new Set(["text", "code", "chatgpt", "research", "open-weight", "search", "tool"]);
 const SUPPORTED_CODE_THEMES = new Set(["verdant", "cyberpunk-hc", "ember", "oceanic", "mono", "preparing"]);
 const GENERIC_CODE_KEYWORDS = [
@@ -70,7 +79,7 @@ const GENERIC_CODE_KEYWORDS = [
 let config = {
   defaultProvider: "openai",
   defaultModel: "gpt-4.1",
-  xaiDefaultModel: "grok-4.3",
+  xaiDefaultModel: "grok-4.6",
   allowedModels: [],
   xaiAllowedModels: [],
   supportedProviders: ["openai"],
@@ -98,6 +107,9 @@ const recentlyShownNotificationKeys = new Map();
 const notificationRuleLastRunAt = new Map();
 let activeChatJob = null;
 let currentTraceId = "";
+let failedRetryTarget = { chatId: "", messageId: "" };
+let contextScope = "chat";
+let lastContextDirectiveCount = 0;
 
 function autoOpenTraceAuditEnabled() {
   return localStorage.getItem(AUTO_OPEN_TRACE_AUDIT_KEY) === "true";
@@ -176,6 +188,102 @@ function normalizeWorkspaceCode(value) {
   return /^[a-z0-9][a-z0-9_-]{1,47}$/.test(code) ? code : "";
 }
 
+function storageGet(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function storageSet(key, value) {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function storageRemove(key) {
+  try {
+    localStorage.removeItem(key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeMessageRecord(msg) {
+  if (!msg || (msg.role !== "user" && msg.role !== "assistant") || typeof msg.content !== "string") {
+    return null;
+  }
+  return {
+    ...msg,
+    id: typeof msg.id === "string" && msg.id ? msg.id : uid(),
+    role: msg.role,
+    content: msg.content,
+    createdAt: typeof msg.createdAt === "string" && msg.createdAt ? msg.createdAt : new Date().toISOString(),
+    traceId: typeof msg.traceId === "string" ? msg.traceId : "",
+    executedTools: Array.isArray(msg.executedTools)
+      ? msg.executedTools.filter((item) => typeof item === "string")
+      : [],
+    contextCompaction: msg.contextCompaction && typeof msg.contextCompaction === "object"
+      ? msg.contextCompaction
+      : null
+  };
+}
+
+function normalizeChatRecord(chat) {
+  if (!chat || typeof chat !== "object") {
+    return null;
+  }
+
+  const provider = normalizeProvider(chat.provider) || config.defaultProvider || "openai";
+  const model = typeof chat.model === "string" && chat.model
+    ? chat.model
+    : (provider === "xai" ? (config.xaiDefaultModel || "grok-4.6") : (config.defaultModel || "gpt-4.1"));
+
+  const messages = Array.isArray(chat.messages)
+    ? chat.messages
+      .map((msg) => normalizeMessageRecord(msg))
+      .filter(Boolean)
+    : [];
+
+  return {
+    ...chat,
+    id: typeof chat.id === "string" && chat.id ? chat.id : uid(),
+    title: typeof chat.title === "string" && chat.title ? chat.title : "New chat",
+    provider,
+    model,
+    reasoningEffort: normalizeReasoningEffort(chat.reasoningEffort),
+    agentMaxStepsOverride: Number.isInteger(Number(chat.agentMaxStepsOverride)) ? Number(chat.agentMaxStepsOverride) : null,
+    agentMaxStepsOverrideCode: typeof chat.agentMaxStepsOverrideCode === "string" ? chat.agentMaxStepsOverrideCode : "",
+    contextEntries: normalizeContextEntries(chat.contextEntries),
+    createdAt: typeof chat.createdAt === "string" && chat.createdAt ? chat.createdAt : new Date().toISOString(),
+    messages
+  };
+}
+
+function ensureStateIntegrity() {
+  const source = state && Array.isArray(state.chats) ? state : { activeChatId: "", chats: [] };
+  let chats = source.chats
+    .map((chat) => normalizeChatRecord(chat))
+    .filter(Boolean);
+
+  if (chats.length === 0) {
+    chats = [createChat()];
+  }
+
+  const activeId = typeof source.activeChatId === "string" ? source.activeChatId : "";
+  const activeExists = chats.some((chat) => chat.id === activeId);
+  state = {
+    activeChatId: activeExists ? activeId : chats[0].id,
+    chats
+  };
+  return state;
+}
+
 async function loadWorkspaceInfo() {
   if (!workspaceBadgeEl) {
     return;
@@ -235,15 +343,12 @@ function normalizeStateShape(parsed) {
     return null;
   }
 
-  const chats = parsed.chats.map((chat) => ({
-    ...chat,
-    provider: normalizeProvider(chat?.provider) || "openai",
-    model: typeof chat?.model === "string" && chat.model ? chat.model : config.defaultModel,
-    reasoningEffort: normalizeReasoningEffort(chat?.reasoningEffort),
-    agentMaxStepsOverride: Number.isInteger(Number(chat?.agentMaxStepsOverride)) ? Number(chat.agentMaxStepsOverride) : null,
-    agentMaxStepsOverrideCode: typeof chat?.agentMaxStepsOverrideCode === "string" ? chat.agentMaxStepsOverrideCode : "",
-    messages: Array.isArray(chat?.messages) ? chat.messages : []
-  }));
+  const chats = parsed.chats
+    .map((chat) => normalizeChatRecord(chat))
+    .filter(Boolean);
+  if (chats.length === 0) {
+    return null;
+  }
 
   const activeExists = chats.some((chat) => chat.id === parsed.activeChatId);
   return {
@@ -290,25 +395,25 @@ function chooseBestState(candidates) {
 function getPersistedStateCandidates() {
   const candidates = [];
 
-  const primary = parseStateJson(localStorage.getItem(CHAT_STATE_KEY));
+  const primary = parseStateJson(storageGet(CHAT_STATE_KEY));
   if (primary) {
     candidates.push(primary);
   }
 
-  const exportState = parseStateJson(localStorage.getItem(HISTORY_EXPORT_KEY));
+  const exportState = parseStateJson(storageGet(HISTORY_EXPORT_KEY));
   if (exportState) {
     candidates.push(exportState);
   }
 
   for (const key of LEGACY_CHAT_STATE_KEYS) {
-    const legacy = parseStateJson(localStorage.getItem(key));
+    const legacy = parseStateJson(storageGet(key));
     if (legacy) {
       candidates.push(legacy);
     }
   }
 
   try {
-    const backupsRaw = localStorage.getItem(CHAT_BACKUPS_KEY);
+    const backupsRaw = storageGet(CHAT_BACKUPS_KEY);
     const backups = JSON.parse(backupsRaw || "[]");
     if (Array.isArray(backups)) {
       for (const item of backups) {
@@ -344,7 +449,7 @@ function persistBackupSnapshot(rawStateJson) {
 
   let backups = [];
   try {
-    const existing = JSON.parse(localStorage.getItem(CHAT_BACKUPS_KEY) || "[]");
+    const existing = JSON.parse(storageGet(CHAT_BACKUPS_KEY) || "[]");
     backups = Array.isArray(existing) ? existing : [];
   } catch {
     backups = [];
@@ -354,7 +459,7 @@ function persistBackupSnapshot(rawStateJson) {
   if (!alreadyExists) {
     backups.unshift(nextEntry);
     backups = backups.slice(0, 15);
-    localStorage.setItem(CHAT_BACKUPS_KEY, JSON.stringify(backups));
+    storageSet(CHAT_BACKUPS_KEY, JSON.stringify(backups));
   }
 }
 
@@ -369,8 +474,9 @@ function loadState() {
 }
 
 function saveState() {
-  persistBackupSnapshot(localStorage.getItem(CHAT_STATE_KEY));
-  persistBackupSnapshot(localStorage.getItem(HISTORY_EXPORT_KEY));
+  ensureStateIntegrity();
+  persistBackupSnapshot(storageGet(CHAT_STATE_KEY));
+  persistBackupSnapshot(storageGet(HISTORY_EXPORT_KEY));
 
   const persistedBest = chooseBestState(getPersistedStateCandidates());
   const currentCount = countMessages(state);
@@ -380,12 +486,74 @@ function saveState() {
     state = persistedBest;
   }
 
-  localStorage.setItem(CHAT_STATE_KEY, JSON.stringify(state));
-  localStorage.setItem(HISTORY_EXPORT_KEY, JSON.stringify(state, null, 2));
+  const compactJson = JSON.stringify(state);
+  if (storageSet(CHAT_STATE_KEY, compactJson)) {
+    // Keep pretty export as best-effort only; it's the largest quota consumer.
+    if (!storageSet(HISTORY_EXPORT_KEY, JSON.stringify(state, null, 2))) {
+      storageRemove(HISTORY_EXPORT_KEY);
+    }
+    return;
+  }
+
+  // Last-resort recovery when quota is exhausted.
+  storageRemove(CHAT_BACKUPS_KEY);
+  storageRemove(HISTORY_EXPORT_KEY);
+  if (!storageSet(CHAT_STATE_KEY, compactJson)) {
+    console.warn("Failed to persist chat state: browser storage is full or unavailable.");
+    if (statusEl) {
+      statusEl.textContent = "Warning: chat history could not be saved (browser storage full/unavailable).";
+    }
+  }
+}
+
+function repairChatStateFromStorage() {
+  const best = chooseBestState(getPersistedStateCandidates());
+  if (best) {
+    state = best;
+  } else {
+    const starter = createChat();
+    state = { activeChatId: starter.id, chats: [starter] };
+  }
+
+  ensureStateIntegrity();
+  saveState();
+  renderAll();
+  const chatCount = state.chats.length;
+  const messageCount = countMessages(state);
+  statusEl.textContent = `Chat state repaired. ${chatCount} chat(s), ${messageCount} message(s).`;
 }
 
 function getActiveChat() {
+  ensureStateIntegrity();
   return state.chats.find((chat) => chat.id === state.activeChatId) || state.chats[0];
+}
+
+function getChatById(chatId) {
+  ensureStateIntegrity();
+  return state.chats.find((chat) => chat.id === chatId) || null;
+}
+
+function getLatestUserMessageId(chat) {
+  if (!chat || !Array.isArray(chat.messages)) {
+    return "";
+  }
+  for (let index = chat.messages.length - 1; index >= 0; index -= 1) {
+    if (chat.messages[index]?.role === "user") {
+      return String(chat.messages[index].id || "");
+    }
+  }
+  return "";
+}
+
+function clearFailedRetryTarget() {
+  failedRetryTarget = { chatId: "", messageId: "" };
+}
+
+function setFailedRetryTarget(chatId, messageId) {
+  failedRetryTarget = {
+    chatId: String(chatId || ""),
+    messageId: String(messageId || "")
+  };
 }
 
 function formatTime(isoTime) {
@@ -734,6 +902,367 @@ async function copyHtmlToClipboard(html, fallbackText) {
   await navigator.clipboard.writeText(fallbackText);
 }
 
+function sanitizeFilenamePart(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64) || "message";
+}
+
+function triggerDownload(content, mimeType, fileName) {
+  const blob = new Blob([String(content || "")], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function getAssistantMessageDownloadPayload(message, downloadType) {
+  const markdown = String(message?.content || "");
+  const titlePart = sanitizeFilenamePart(shortTitleFromMessage(markdown) || "assistant-reply");
+  const stamp = new Date().toISOString().slice(0, 19).replaceAll(":", "-");
+  const baseName = `assistant-${titlePart}-${stamp}`;
+
+  if (downloadType === "markdown") {
+    return {
+      content: markdown,
+      mimeType: "text/markdown;charset=utf-8",
+      fileName: `${baseName}.md`,
+      label: "markdown"
+    };
+  }
+
+  if (downloadType === "text") {
+    return {
+      content: markdownToPlainText(markdown),
+      mimeType: "text/plain;charset=utf-8",
+      fileName: `${baseName}.txt`,
+      label: "plain text"
+    };
+  }
+
+  if (downloadType === "html") {
+    const rendered = renderMarkdown(markdown);
+    const htmlDoc = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Assistant Reply</title>
+  </head>
+  <body>
+    <main>
+${rendered}
+    </main>
+  </body>
+</html>`;
+    return {
+      content: htmlDoc,
+      mimeType: "text/html;charset=utf-8",
+      fileName: `${baseName}.html`,
+      label: "HTML"
+    };
+  }
+
+  return null;
+}
+
+function normalizeContextEntry(entry) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  const label = typeof entry.label === "string" ? entry.label.trim() : "";
+  return {
+    id: typeof entry.id === "string" && entry.id ? entry.id : uid(),
+    label: label || "Untitled context",
+    content: typeof entry.content === "string" ? entry.content : "",
+    enabled: entry.enabled !== false,
+    disabledLines: Array.from(new Set((Array.isArray(entry.disabledLines) ? entry.disabledLines : [])
+      .map((index) => Number(index))
+      .filter((index) => Number.isInteger(index) && index >= 0)))
+  };
+}
+
+function normalizeContextEntries(list) {
+  return (Array.isArray(list) ? list : [])
+    .map((entry) => normalizeContextEntry(entry))
+    .filter(Boolean)
+    .slice(0, CONTEXT_MAX_ENTRIES);
+}
+
+function loadGlobalContextEntries() {
+  try {
+    return normalizeContextEntries(JSON.parse(storageGet(CONTEXT_GLOBAL_KEY) || "[]"));
+  } catch {
+    return [];
+  }
+}
+
+function saveGlobalContextEntries(entries) {
+  storageSet(CONTEXT_GLOBAL_KEY, JSON.stringify(normalizeContextEntries(entries)));
+}
+
+function getChatContextEntries(chat) {
+  return normalizeContextEntries(chat?.contextEntries);
+}
+
+function getContextScope() {
+  return contextScope === "global" ? "global" : "chat";
+}
+
+function getContextEntriesForScope(scope) {
+  return scope === "global" ? loadGlobalContextEntries() : getChatContextEntries(getActiveChat());
+}
+
+function writeScopedContextEntries(scope, chat, entries) {
+  if (scope === "global") {
+    saveGlobalContextEntries(entries);
+    return;
+  }
+  const target = chat || getActiveChat();
+  target.contextEntries = normalizeContextEntries(entries);
+  saveState();
+}
+
+function setContextEntriesForScope(scope, entries) {
+  writeScopedContextEntries(scope, scope === "chat" ? getActiveChat() : null, entries);
+}
+
+function getActiveContextEntries(chat) {
+  return [
+    ...loadGlobalContextEntries().map((entry) => ({ ...entry, scope: "all chats" })),
+    ...getChatContextEntries(chat).map((entry) => ({ ...entry, scope: "this chat" }))
+  ]
+    .map((entry) => {
+      const disabledLines = new Set(entry.disabledLines);
+      const content = entry.content.split("\n").filter((line, index) => !disabledLines.has(index)).join("\n");
+      return { ...entry, content };
+    })
+    .filter((entry) => entry.enabled && entry.content.trim());
+}
+
+function buildContextPreamble(chat) {
+  const entries = getActiveContextEntries(chat);
+  if (entries.length === 0) {
+    return "";
+  }
+
+  const body = entries
+    .map((entry) => `- (${entry.scope}) ${entry.label}:\n${entry.content.trim()}`)
+    .join("\n\n");
+
+  return [
+    "Persistent context maintained by the user for this conversation. Treat it as standing instructions and reference material.",
+    middleTruncate(body, CONTEXT_PREAMBLE_MAX_CHARS),
+    "You may update this stored context by including a fenced block in your reply:",
+    "```raa-context add\nscope: chat\nlabel: Short label\n<content to remember>\n```",
+    "Use scope: global to store it for every chat, and ```raa-context remove``` with a matching label to delete an entry."
+  ].join("\n\n");
+}
+
+function renderContextLineControls(item, entry) {
+  let lineList = item.querySelector(".context-lines");
+  if (!lineList) {
+    lineList = document.createElement("div");
+    lineList.className = "context-lines";
+    item.appendChild(lineList);
+  }
+  lineList.replaceChildren();
+  const lines = entry.content.split("\n");
+  const disabledLines = new Set(entry.disabledLines);
+
+  lines.forEach((line, index) => {
+    const label = document.createElement("label");
+    label.className = `context-line${disabledLines.has(index) ? " disabled" : ""}`;
+    const toggle = document.createElement("input");
+    toggle.type = "checkbox";
+    toggle.checked = !disabledLines.has(index);
+    toggle.dataset.contextAction = "line-toggle";
+    toggle.dataset.lineIndex = String(index);
+    toggle.setAttribute("aria-label", `Include context line ${index + 1}`);
+    const number = document.createElement("span");
+    number.className = "context-line-number";
+    number.textContent = String(index + 1);
+    const text = document.createElement("span");
+    text.className = "context-line-text";
+    text.textContent = line || "(blank line)";
+    label.append(toggle, number, text);
+    lineList.appendChild(label);
+  });
+}
+
+function renderContextPanel() {
+  if (!contextListEl) {
+    return;
+  }
+
+  const scope = getContextScope();
+  if (contextScopeSelectEl) {
+    contextScopeSelectEl.value = scope;
+  }
+
+  const entries = getContextEntriesForScope(scope);
+  contextListEl.innerHTML = "";
+
+  if (entries.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "context-item";
+    empty.textContent = scope === "global"
+      ? "No shared context yet. Entries added here are sent with every chat in this browser."
+      : "No context for this chat yet. Entries added here are sent with this chat only.";
+    contextListEl.appendChild(empty);
+    return;
+  }
+
+  for (const entry of entries) {
+    const item = document.createElement("li");
+    item.className = `context-item${entry.enabled ? "" : " disabled"}`;
+    item.dataset.contextId = entry.id;
+
+    const head = document.createElement("div");
+    head.className = "context-item-head";
+
+    const toggle = document.createElement("input");
+    toggle.type = "checkbox";
+    toggle.checked = entry.enabled;
+    toggle.dataset.contextAction = "toggle";
+    toggle.setAttribute("aria-label", `Include ${entry.label} in context`);
+
+    const label = document.createElement("input");
+    label.type = "text";
+    label.value = entry.label;
+    label.dataset.contextAction = "label";
+    label.setAttribute("aria-label", "Context label");
+
+    const scopeChip = document.createElement("span");
+    scopeChip.className = "context-scope-chip";
+    scopeChip.textContent = scope === "global" ? "all chats" : "this chat";
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "btn btn-soft danger";
+    remove.dataset.contextAction = "remove";
+    remove.textContent = "Remove";
+
+    head.append(toggle, label, scopeChip, remove);
+
+    const content = document.createElement("textarea");
+    content.value = entry.content;
+    content.dataset.contextAction = "content";
+    content.placeholder = "Build steps, server details, project conventions...";
+    content.setAttribute("aria-label", `Context content for ${entry.label}`);
+
+    item.append(head, content);
+    renderContextLineControls(item, entry);
+    contextListEl.appendChild(item);
+  }
+}
+
+function setContextStatus(text) {
+  if (contextStatusEl) {
+    contextStatusEl.textContent = text;
+  }
+}
+
+function updateContextEntryFromControl(control, field) {
+  const item = control.closest("li[data-context-id]");
+  if (!item) {
+    return;
+  }
+
+  const scope = getContextScope();
+  const entryId = item.dataset.contextId;
+  const entries = getContextEntriesForScope(scope).map((entry) => {
+    if (entry.id !== entryId) {
+      return entry;
+    }
+    if (field === "label") {
+      return { ...entry, label: String(control.value || "").trim() || "Untitled context" };
+    }
+    if (field === "content") {
+      const content = String(control.value || "");
+      const lineCount = content.split("\n").length;
+      return { ...entry, content, disabledLines: entry.disabledLines.filter((index) => index < lineCount) };
+    }
+    if (field === "line-toggle") {
+      const lineIndex = Number(control.dataset.lineIndex);
+      const disabledLines = new Set(entry.disabledLines);
+      if (control.checked) disabledLines.delete(lineIndex);
+      else disabledLines.add(lineIndex);
+      return { ...entry, disabledLines: Array.from(disabledLines).sort((left, right) => left - right) };
+    }
+    return { ...entry, enabled: Boolean(control.checked) };
+  });
+
+  setContextEntriesForScope(scope, entries);
+  setContextStatus(`Saved to ${scope === "global" ? "all chats" : "this chat"} context.`);
+  return entries.find((entry) => entry.id === entryId) || null;
+}
+
+function parseContextDirectiveBody(body) {
+  const lines = String(body || "").replace(/\r/g, "").split("\n");
+  const meta = {};
+  let index = 0;
+
+  while (index < lines.length) {
+    const match = lines[index].match(/^\s*(scope|label|id)\s*:\s*(.*)$/i);
+    if (!match) {
+      break;
+    }
+    meta[match[1].toLowerCase()] = match[2].trim();
+    index += 1;
+  }
+
+  return { meta, content: lines.slice(index).join("\n").trim() };
+}
+
+function applyAssistantContextDirectives(chatId, replyText) {
+  const pattern = /```raa-context[ \t]+(add|update|remove)[ \t]*\r?\n([\s\S]*?)```/gi;
+  let applied = 0;
+  let match = pattern.exec(String(replyText || ""));
+
+  while (match !== null) {
+    const action = match[1].toLowerCase();
+    const { meta, content } = parseContextDirectiveBody(match[2]);
+    const scope = String(meta.scope || "chat").toLowerCase() === "global" ? "global" : "chat";
+    const chat = scope === "chat" ? getChatById(chatId) : null;
+
+    if (scope !== "chat" || chat) {
+      const entries = scope === "global" ? loadGlobalContextEntries() : getChatContextEntries(chat);
+      const label = String(meta.label || "").trim();
+      const entryId = String(meta.id || "").trim();
+      const isMatch = (entry) => (entryId && entry.id === entryId)
+        || (label && entry.label.toLowerCase() === label.toLowerCase());
+
+      if (action === "remove") {
+        if (label || entryId) {
+          const next = entries.filter((entry) => !isMatch(entry));
+          if (next.length !== entries.length) {
+            writeScopedContextEntries(scope, chat, next);
+            applied += 1;
+          }
+        }
+      } else if (content) {
+        const existing = entries.find((entry) => isMatch(entry));
+        const next = existing
+          ? entries.map((entry) => (entry.id === existing.id
+            ? { ...entry, label: label || entry.label, content }
+            : entry))
+          : [...entries, { id: uid(), label: label || "Agent context", content, enabled: true }];
+        writeScopedContextEntries(scope, chat, next);
+        applied += 1;
+      }
+    }
+
+    match = pattern.exec(String(replyText || ""));
+  }
+
+  return applied;
+}
+
 function renderTabs() {
   const activeId = getActiveChat().id;
   tabListEl.innerHTML = "";
@@ -779,21 +1308,34 @@ function renderMessages() {
     return;
   }
 
+  const latestUserMessageId = getLatestUserMessageId(chat);
+  const retryVisibleForChat = failedRetryTarget.chatId === chat.id;
+
   for (const msg of chat.messages) {
     const item = document.createElement("li");
     item.className = `msg ${msg.role}`;
-    const copyButton = msg.role === "assistant"
+    const messageActions = msg.role === "assistant"
       ? `
         <button type="button" class="copy-md-btn" data-copy-type="markdown" data-msg-id="${escapeHtml(String(msg.id || ""))}">MD</button>
         <button type="button" class="copy-md-btn" data-copy-type="text" data-msg-id="${escapeHtml(String(msg.id || ""))}">Text</button>
         <button type="button" class="copy-md-btn" data-copy-type="html" data-msg-id="${escapeHtml(String(msg.id || ""))}">HTML</button>
+        <button type="button" class="copy-md-btn" data-download-type="markdown" data-msg-id="${escapeHtml(String(msg.id || ""))}">DL MD</button>
+        <button type="button" class="copy-md-btn" data-download-type="text" data-msg-id="${escapeHtml(String(msg.id || ""))}">DL TXT</button>
+        <button type="button" class="copy-md-btn" data-download-type="html" data-msg-id="${escapeHtml(String(msg.id || ""))}">DL HTML</button>
       `
+      : "";
+    const retryButton = msg.role === "user"
+      && retryVisibleForChat
+      && String(msg.id || "") === String(latestUserMessageId || "")
+      && String(msg.id || "") === String(failedRetryTarget.messageId || "")
+      ? `<button type="button" class="copy-md-btn" data-retry-msg-id="${escapeHtml(String(msg.id || ""))}" data-retry-chat-id="${escapeHtml(String(chat.id || ""))}">Retry</button>`
       : "";
     item.innerHTML = `
       <div class="msg-head">
         <div class="msg-head-left">
           <strong>${msg.role === "user" ? "You" : "Assistant"}</strong>
-          ${copyButton}
+          ${messageActions}
+          ${retryButton}
         </div>
         <span>${formatTime(msg.createdAt)}</span>
       </div>
@@ -809,6 +1351,126 @@ function renderMessages() {
   }
 
   chatPanelEl.scrollTop = chatPanelEl.scrollHeight;
+}
+
+function buildRequestBodyForUserMessage(chat, userMessageId) {
+  const userIndex = chat.messages.findIndex((msg) => String(msg.id || "") === String(userMessageId || "") && msg.role === "user");
+  if (userIndex < 0) {
+    throw new Error("Original user message was not found.");
+  }
+
+  const contextMessages = chat.messages.slice(0, userIndex + 1);
+  const payloadMessages = buildPayloadMessages(contextMessages);
+  const contextPreamble = buildContextPreamble(chat);
+  const messagesWithContext = contextPreamble
+    ? [{ role: "user", content: contextPreamble }, ...payloadMessages]
+    : payloadMessages;
+
+  return {
+    provider: chat.provider,
+    model: chat.model,
+    reasoningEffort: getReasoningEffortOptions(chat.provider, chat.model).includes(chat.reasoningEffort)
+      ? chat.reasoningEffort
+      : undefined,
+    agentMode: agentModeToggleEl.checked,
+    agentMaxStepsOverride: Number.isInteger(Number(chat.agentMaxStepsOverride)) && Number(chat.agentMaxStepsOverride) > 0
+      ? Number(chat.agentMaxStepsOverride)
+      : undefined,
+    agentMaxStepsOverrideCode: chat.agentMaxStepsOverrideCode || undefined,
+    autoCompact: config.chatCompaction?.enabled !== false,
+    messages: messagesWithContext
+  };
+}
+
+function applyChatResponseStatus(data) {
+  const usedTools = Array.isArray(data.executedTools) ? data.executedTools : [];
+  const contextNote = lastContextDirectiveCount > 0
+    ? ` Context updated (${lastContextDirectiveCount} change(s)).`
+    : "";
+  if (data.contextCompaction?.applied) {
+    statusEl.textContent = `Done. Provider context was compacted (${data.contextCompaction.originalMessageCount || "?"} -> ${data.contextCompaction.sentMessageCount || "?"} messages); full chat remains archived.${contextNote}`;
+  } else if (agentModeToggleEl.checked && usedTools.length === 0) {
+    statusEl.textContent = `Done, but no tools were executed for this reply.${contextNote}`;
+  } else {
+    statusEl.textContent = `Done.${contextNote}`;
+  }
+}
+
+async function submitUserMessageRequest(chatId, userMessageId) {
+  const requestChat = getChatById(chatId);
+  if (!requestChat) {
+    throw new Error("Chat no longer exists.");
+  }
+
+  const requestBody = buildRequestBodyForUserMessage(requestChat, userMessageId);
+  const { response, data } = agentModeToggleEl.checked
+    ? await sendPromptViaJob(requestBody)
+    : await postChatWithRetry(requestBody);
+
+  if (!response.ok) {
+    throw new Error(data.error || "Request failed");
+  }
+
+  const writeChat = getChatById(chatId);
+  if (!writeChat) {
+    throw new Error("Chat no longer exists.");
+  }
+  const stillExists = writeChat.messages.some((msg) => String(msg.id || "") === String(userMessageId || "") && msg.role === "user");
+  if (!stillExists) {
+    throw new Error("Original user message is missing.");
+  }
+
+  writeChat.messages.push({
+    id: uid(),
+    role: "assistant",
+    content: data.reply || "(No output returned)",
+    createdAt: new Date().toISOString(),
+    traceId: String(data.traceId || ""),
+    executedTools: Array.isArray(data.executedTools) ? data.executedTools : [],
+    contextCompaction: data.contextCompaction || null
+  });
+  updateTracePanel(data.traceId || "", "done");
+
+  if (data.model) {
+    writeChat.model = data.model;
+  }
+
+  lastContextDirectiveCount = applyAssistantContextDirectives(chatId, data.reply || "");
+  saveState();
+  renderAll();
+  loadToolRuns();
+  clearFailedRetryTarget();
+  return data;
+}
+
+async function retryFailedUserMessage(chatId, userMessageId) {
+  const chat = getChatById(chatId);
+  if (!chat) {
+    statusEl.textContent = "Chat no longer exists.";
+    return;
+  }
+  const latestUserId = getLatestUserMessageId(chat);
+  if (String(userMessageId || "") !== String(latestUserId || "")) {
+    statusEl.textContent = "Retry is only available for the latest user message.";
+    return;
+  }
+
+  sendBtnEl.disabled = true;
+  clearFailedRetryTarget();
+  renderAll();
+  statusEl.textContent = `Retrying with ${chat.provider}:${chat.model}...`;
+
+  try {
+    const data = await submitUserMessageRequest(chat.id, userMessageId);
+    applyChatResponseStatus(data);
+  } catch (error) {
+    setFailedRetryTarget(chat.id, userMessageId);
+    renderAll();
+    updateTracePanel(currentTraceId, "error");
+    statusEl.textContent = `Error: ${error.message}`;
+  } finally {
+    sendBtnEl.disabled = false;
+  }
 }
 
 function updateModelSelect() {
@@ -885,11 +1547,13 @@ function updateProviderSelect() {
 }
 
 function renderAll() {
+  ensureStateIntegrity();
   renderTabs();
   updateProviderSelect();
   updateModelSelect();
   syncReasoningEffortControl();
   syncAgentModeToggle();
+  renderContextPanel();
   renderMessages();
 }
 
@@ -1879,6 +2543,7 @@ async function loadModelCatalog() {
 
 async function sendPrompt() {
   const chat = getActiveChat();
+  const chatId = chat.id;
   const text = promptEl.value.trim();
   if (!text) {
     statusEl.textContent = "Please enter a message.";
@@ -1899,62 +2564,18 @@ async function sendPrompt() {
   saveState();
   renderAll();
   promptEl.value = "";
+  clearFailedRetryTarget();
 
   sendBtnEl.disabled = true;
-  statusEl.textContent = `Thinking with ${chat.provider}:${chat.model}...`;
+  const activeChat = getChatById(chatId) || getActiveChat();
+  statusEl.textContent = `Thinking with ${activeChat.provider}:${activeChat.model}...`;
 
   try {
-    const payloadMessages = buildPayloadMessages(chat.messages);
-
-    const requestBody = {
-      provider: chat.provider,
-      model: chat.model,
-      reasoningEffort: getReasoningEffortOptions(chat.provider, chat.model).includes(chat.reasoningEffort)
-        ? chat.reasoningEffort
-        : undefined,
-      agentMode: agentModeToggleEl.checked,
-      agentMaxStepsOverride: Number.isInteger(Number(chat.agentMaxStepsOverride)) && Number(chat.agentMaxStepsOverride) > 0
-        ? Number(chat.agentMaxStepsOverride)
-        : undefined,
-      agentMaxStepsOverrideCode: chat.agentMaxStepsOverrideCode || undefined,
-      autoCompact: config.chatCompaction?.enabled !== false,
-      messages: payloadMessages
-    };
-
-    const { response, data } = agentModeToggleEl.checked
-      ? await sendPromptViaJob(requestBody)
-      : await postChatWithRetry(requestBody);
-    if (!response.ok) {
-      throw new Error(data.error || "Request failed");
-    }
-
-    chat.messages.push({
-      id: uid(),
-      role: "assistant",
-      content: data.reply || "(No output returned)",
-      createdAt: new Date().toISOString(),
-      traceId: String(data.traceId || ""),
-      executedTools: Array.isArray(data.executedTools) ? data.executedTools : [],
-      contextCompaction: data.contextCompaction || null
-    });
-    updateTracePanel(data.traceId || "", "done");
-
-    if (data.model) {
-      chat.model = data.model;
-    }
-
-    saveState();
-    renderAll();
-    loadToolRuns();
-    const usedTools = Array.isArray(data.executedTools) ? data.executedTools : [];
-    if (data.contextCompaction?.applied) {
-      statusEl.textContent = `Done. Provider context was compacted (${data.contextCompaction.originalMessageCount || "?"} -> ${data.contextCompaction.sentMessageCount || "?"} messages); full chat remains archived.`;
-    } else if (agentModeToggleEl.checked && usedTools.length === 0) {
-      statusEl.textContent = "Done, but no tools were executed for this reply.";
-    } else {
-      statusEl.textContent = "Done.";
-    }
+    const data = await submitUserMessageRequest(chatId, userMessage.id);
+    applyChatResponseStatus(data);
   } catch (error) {
+    setFailedRetryTarget(chatId, userMessage.id);
+    renderAll();
     updateTracePanel(currentTraceId, "error");
     statusEl.textContent = `Error: ${error.message}`;
   } finally {
@@ -2016,13 +2637,24 @@ messageListEl.addEventListener("click", async (event) => {
     return;
   }
 
-  const copyBtn = target.closest("button[data-copy-type][data-msg-id]");
-  if (!(copyBtn instanceof HTMLButtonElement)) {
+  const retryBtn = target.closest("button[data-retry-msg-id][data-retry-chat-id]");
+  if (retryBtn instanceof HTMLButtonElement) {
+    await retryFailedUserMessage(
+      String(retryBtn.dataset.retryChatId || ""),
+      String(retryBtn.dataset.retryMsgId || "")
+    );
     return;
   }
 
-  const messageId = copyBtn.dataset.msgId;
-  const copyType = copyBtn.dataset.copyType;
+  const copyBtn = target.closest("button[data-copy-type][data-msg-id]");
+  const downloadBtn = target.closest("button[data-download-type][data-msg-id]");
+  if (!(copyBtn instanceof HTMLButtonElement) && !(downloadBtn instanceof HTMLButtonElement)) {
+    return;
+  }
+
+  const isCopy = copyBtn instanceof HTMLButtonElement;
+  const sourceBtn = isCopy ? copyBtn : downloadBtn;
+  const messageId = sourceBtn?.dataset.msgId;
   const chat = getActiveChat();
   const match = chat.messages.find((msg) => String(msg.id || "") === String(messageId || ""));
   if (!match || match.role !== "assistant") {
@@ -2031,29 +2663,42 @@ messageListEl.addEventListener("click", async (event) => {
   }
 
   try {
-    const markdown = match.content || "";
-    if (copyType === "markdown") {
-      await navigator.clipboard.writeText(markdown);
-      statusEl.textContent = "Assistant markdown copied.";
+    const markdown = String(match.content || "");
+    if (isCopy) {
+      const copyType = copyBtn.dataset.copyType;
+      if (copyType === "markdown") {
+        await navigator.clipboard.writeText(markdown);
+        statusEl.textContent = "Assistant markdown copied.";
+        return;
+      }
+
+      if (copyType === "text") {
+        await navigator.clipboard.writeText(markdownToPlainText(markdown));
+        statusEl.textContent = "Assistant plain text copied.";
+        return;
+      }
+
+      if (copyType === "html") {
+        const renderedHtml = renderMarkdown(markdown);
+        await copyHtmlToClipboard(renderedHtml, markdownToPlainText(markdown));
+        statusEl.textContent = "Assistant rendered HTML copied.";
+        return;
+      }
+
+      statusEl.textContent = "Unsupported copy mode.";
       return;
     }
 
-    if (copyType === "text") {
-      await navigator.clipboard.writeText(markdownToPlainText(markdown));
-      statusEl.textContent = "Assistant plain text copied.";
+    const downloadType = downloadBtn.dataset.downloadType;
+    const payload = getAssistantMessageDownloadPayload(match, downloadType);
+    if (!payload) {
+      statusEl.textContent = "Unsupported download mode.";
       return;
     }
-
-    if (copyType === "html") {
-      const renderedHtml = renderMarkdown(markdown);
-      await copyHtmlToClipboard(renderedHtml, markdownToPlainText(markdown));
-      statusEl.textContent = "Assistant rendered HTML copied.";
-      return;
-    }
-
-    statusEl.textContent = "Unsupported copy mode.";
+    triggerDownload(payload.content, payload.mimeType, payload.fileName);
+    statusEl.textContent = `Assistant ${payload.label} downloaded.`;
   } catch {
-    statusEl.textContent = "Clipboard copy failed.";
+    statusEl.textContent = isCopy ? "Clipboard copy failed." : "Download failed.";
   }
 });
 
@@ -2077,6 +2722,105 @@ copyAllAssistantBtnEl.addEventListener("click", async () => {
   }
 });
 
+if (contextScopeSelectEl) {
+  contextScopeSelectEl.addEventListener("change", () => {
+    contextScope = contextScopeSelectEl.value === "global" ? "global" : "chat";
+    renderContextPanel();
+    setContextStatus(contextScope === "global"
+      ? "Showing context sent with every chat in this browser."
+      : "Showing context sent with the active chat only.");
+  });
+}
+
+if (addContextEntryBtnEl) {
+  addContextEntryBtnEl.addEventListener("click", () => {
+    const scope = getContextScope();
+    const entries = getContextEntriesForScope(scope);
+    if (entries.length >= CONTEXT_MAX_ENTRIES) {
+      setContextStatus(`Limit reached (${CONTEXT_MAX_ENTRIES} entries).`);
+      return;
+    }
+
+    setContextEntriesForScope(scope, [
+      ...entries,
+      { id: uid(), label: "New context", content: "", enabled: true }
+    ]);
+    renderContextPanel();
+    setContextStatus("Entry added. Give it a label and content.");
+    const lastTextarea = contextListEl?.querySelector("li:last-child textarea");
+    if (lastTextarea instanceof HTMLTextAreaElement) {
+      lastTextarea.focus();
+    }
+  });
+}
+
+if (copyContextPreambleBtnEl) {
+  copyContextPreambleBtnEl.addEventListener("click", async () => {
+    const preamble = buildContextPreamble(getActiveChat());
+    if (!preamble) {
+      setContextStatus("No enabled context entries to copy.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(preamble);
+      setContextStatus("Context preamble copied.");
+    } catch {
+      setContextStatus("Clipboard copy failed.");
+    }
+  });
+}
+
+if (contextListEl) {
+  contextListEl.addEventListener("input", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const action = target.dataset.contextAction;
+    if (action === "label" || action === "content") {
+      const updatedEntry = updateContextEntryFromControl(target, action);
+      if (action === "content" && updatedEntry) {
+        const item = target.closest("li[data-context-id]");
+        if (item) renderContextLineControls(item, updatedEntry);
+      }
+    }
+  });
+
+  contextListEl.addEventListener("change", (event) => {
+    const target = event.target;
+    if (target instanceof HTMLInputElement && target.dataset.contextAction === "toggle") {
+      updateContextEntryFromControl(target, "toggle");
+      target.closest("li[data-context-id]")?.classList.toggle("disabled", !target.checked);
+    }
+    if (target instanceof HTMLInputElement && target.dataset.contextAction === "line-toggle") {
+      updateContextEntryFromControl(target, "line-toggle");
+      target.closest(".context-line")?.classList.toggle("disabled", !target.checked);
+    }
+  });
+
+  contextListEl.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+
+    const removeBtn = target.closest("button[data-context-action='remove']");
+    if (!(removeBtn instanceof HTMLButtonElement)) {
+      return;
+    }
+
+    const entryId = removeBtn.closest("li[data-context-id]")?.dataset.contextId;
+    if (!entryId) {
+      return;
+    }
+
+    const scope = getContextScope();
+    setContextEntriesForScope(scope, getContextEntriesForScope(scope).filter((entry) => entry.id !== entryId));
+    renderContextPanel();
+    setContextStatus("Entry removed.");
+  });
+}
+
 if (refreshRenderBtnEl) {
   refreshRenderBtnEl.addEventListener("click", () => {
     const legacyCount = countStoredLegacyCodeTokens();
@@ -2084,6 +2828,12 @@ if (refreshRenderBtnEl) {
     statusEl.textContent = legacyCount > 0
       ? `Render refreshed. Found ${legacyCount} literal legacy CODETOKEN marker(s) saved in chat markdown; those cannot be reconstructed automatically.`
       : "Render refreshed with the current markdown/code renderer.";
+  });
+}
+
+if (repairChatStateBtnEl) {
+  repairChatStateBtnEl.addEventListener("click", () => {
+    repairChatStateFromStorage();
   });
 }
 
@@ -2233,32 +2983,32 @@ if (copyTraceBtnEl) {
       return;
     }
     try {
-  if (copyTraceAuditUrlBtnEl) {
-    copyTraceAuditUrlBtnEl.addEventListener("click", async () => {
-      const url = getFilteredAuditUrl(currentTraceId);
-      const absolute = new URL(url, window.location.href).toString();
-      try {
-        await navigator.clipboard.writeText(absolute);
-        statusEl.textContent = "Filtered audit URL copied.";
-      } catch {
-        statusEl.textContent = "Clipboard copy failed.";
-      }
-    });
-  }
-  if (autoOpenTraceAuditToggleEl) {
-    autoOpenTraceAuditToggleEl.checked = autoOpenTraceAuditEnabled();
-    autoOpenTraceAuditToggleEl.addEventListener("change", () => {
-      localStorage.setItem(AUTO_OPEN_TRACE_AUDIT_KEY, autoOpenTraceAuditToggleEl.checked ? "true" : "false");
-      statusEl.textContent = autoOpenTraceAuditToggleEl.checked
-        ? "Auto-open filtered audit enabled."
-        : "Auto-open filtered audit disabled.";
-    });
-  }
       await navigator.clipboard.writeText(currentTraceId);
       statusEl.textContent = "Trace ID copied.";
     } catch {
       statusEl.textContent = "Clipboard copy failed.";
     }
+  });
+}
+if (copyTraceAuditUrlBtnEl) {
+  copyTraceAuditUrlBtnEl.addEventListener("click", async () => {
+    const url = getFilteredAuditUrl(currentTraceId);
+    const absolute = new URL(url, window.location.href).toString();
+    try {
+      await navigator.clipboard.writeText(absolute);
+      statusEl.textContent = "Filtered audit URL copied.";
+    } catch {
+      statusEl.textContent = "Clipboard copy failed.";
+    }
+  });
+}
+if (autoOpenTraceAuditToggleEl) {
+  autoOpenTraceAuditToggleEl.checked = autoOpenTraceAuditEnabled();
+  autoOpenTraceAuditToggleEl.addEventListener("change", () => {
+    localStorage.setItem(AUTO_OPEN_TRACE_AUDIT_KEY, autoOpenTraceAuditToggleEl.checked ? "true" : "false");
+    statusEl.textContent = autoOpenTraceAuditToggleEl.checked
+      ? "Auto-open filtered audit enabled."
+      : "Auto-open filtered audit disabled.";
   });
 }
 promptEl.addEventListener("keydown", (event) => {

@@ -84,6 +84,7 @@
             </label>
             <button id="copyAllAssistantBtn" class="btn btn-soft" type="button">Copy All Replies</button>
             <button id="refreshRenderBtn" class="btn btn-soft" type="button">Refresh Render</button>
+            <button id="repairChatStateBtn" class="btn btn-soft" type="button">Repair Chat State</button>
             <button id="themeToggle" class="btn btn-soft" type="button" aria-label="Toggle dark mode">
               Dark mode
             </button>
@@ -92,6 +93,25 @@
 
         <section id="chatPanel" class="card chat-panel">
           <ol id="messageList" class="message-list"></ol>
+        </section>
+
+        <section class="card tool-status-panel">
+          <div class="tool-status-head">
+            <h2>Context Manager</h2>
+            <div class="top-actions">
+              <label class="model-field" for="contextScopeSelect">
+                <span>Scope</span>
+                <select id="contextScopeSelect" aria-label="Context scope">
+                  <option value="chat">This chat</option>
+                  <option value="global">All chats</option>
+                </select>
+              </label>
+              <button id="addContextEntryBtn" class="btn btn-soft" type="button">Add Entry</button>
+              <button id="copyContextPreambleBtn" class="btn btn-soft" type="button">Copy Preamble</button>
+            </div>
+          </div>
+          <p id="contextStatus" class="muted-inline">Stored in this browser only.</p>
+          <ul id="contextList" class="context-list"></ul>
         </section>
 
         <section class="card tool-status-panel">
@@ -176,7 +196,7 @@
       </section>
     </main>
 
-    <script src="api-auth.js"></script>
-    <script type="module" src="app.js?v=20260612c"></script>
+    <script src="api-auth.js?v=20260822a"></script>
+    <script type="module" src="app.js?v=20260822b"></script>
   </body>
 </html>

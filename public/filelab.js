@@ -157,6 +157,16 @@ const diffOriginalEl = document.getElementById("diffOriginal");
 const diffUpdatedEl = document.getElementById("diffUpdated");
 const diffCancelBtnEl = document.getElementById("diffCancelBtn");
 const diffConfirmBtnEl = document.getElementById("diffConfirmBtn");
+const previewRootEl = document.getElementById("previewRoot");
+const previewEmptyEl = document.getElementById("previewEmpty");
+const previewMarkdownEl = document.getElementById("previewMarkdown");
+const previewHtmlFrameEl = document.getElementById("previewHtmlFrame");
+const previewImageEl = document.getElementById("previewImage");
+const previewVideoEl = document.getElementById("previewVideo");
+const previewTypeChipEl = document.getElementById("previewTypeChip");
+const previewMetaLabelEl = document.getElementById("previewMetaLabel");
+const refreshPreviewBtnEl = document.getElementById("refreshPreviewBtn");
+const openPreviewNewTabBtnEl = document.getElementById("openPreviewNewTabBtn");
 
 const refreshBtnEl = document.getElementById("refreshBtn");
 const goDirBtnEl = document.getElementById("goDirBtn");
@@ -169,6 +179,21 @@ const renameBtnEl = document.getElementById("renameBtn");
 const moveBtnEl = document.getElementById("moveBtn");
 const deleteBtnEl = document.getElementById("deleteBtn");
 const downloadBtnEl = document.getElementById("downloadBtn");
+const copyDirectLinkBtnEl = document.getElementById("copyDirectLinkBtn");
+const shareFileBtnEl = document.getElementById("shareFileBtn");
+const sharePanelEl = document.getElementById("sharePanel");
+const shareSelectionLabelEl = document.getElementById("shareSelectionLabel");
+const shareExpirySelectEl = document.getElementById("shareExpirySelect");
+const sharePasswordInputEl = document.getElementById("sharePasswordInput");
+const shareEncryptInputEl = document.getElementById("shareEncryptInput");
+const createShareBtnEl = document.getElementById("createShareBtn");
+const refreshSharesBtnEl = document.getElementById("refreshSharesBtn");
+const shareResultEl = document.getElementById("shareResult");
+const shareViewUrlInputEl = document.getElementById("shareViewUrlInput");
+const shareDirectUrlInputEl = document.getElementById("shareDirectUrlInput");
+const copyShareViewBtnEl = document.getElementById("copyShareViewBtn");
+const copyShareDirectBtnEl = document.getElementById("copyShareDirectBtn");
+const shareListEl = document.getElementById("shareList");
 const saveBtnEl = document.getElementById("saveBtn");
 const formatBtnEl = document.getElementById("formatBtn");
 const lintBtnEl = document.getElementById("lintBtn");
@@ -187,6 +212,20 @@ const DEFAULT_MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 
 const FONT_SIZE_MIN = 12;
 const FONT_SIZE_MAX = 22;
+const MARKDOWN_EXTENSIONS = new Set([
+  "md", "markdown", "mdown", "mkd", "mkdn", "mdtxt", "rmd", "qmd", "txt"
+]);
+const HTML_EXTENSIONS = new Set([
+  "html", "htm", "xhtml", "shtml"
+]);
+const IMAGE_EXTENSIONS = new Set([
+  "png", "jpg", "jpeg", "jpe", "jfif", "pjpeg", "pjp", "gif", "webp", "bmp",
+  "dib", "svg", "svgz", "ico", "cur", "apng", "avif", "tif", "tiff", "heic", "heif"
+]);
+const VIDEO_EXTENSIONS = new Set([
+  "mp4", "m4v", "webm", "ogv", "ogg", "mov", "mkv", "avi", "wmv", "flv", "f4v",
+  "mpeg", "mpg", "mpe", "3gp", "3g2", "mts", "m2ts", "ts"
+]);
 
 let currentDir = "";
 let activeFilePath = "";
@@ -220,6 +259,9 @@ let uploadPolicy = {
 let uploadInFlight = false;
 let minimapFrame = 0;
 let minimapBoundScroller = null;
+let previewObjectUrl = "";
+let previewKind = "none";
+let previewPath = "";
 
 const syntaxThemePalette = {
   verdant: {
@@ -725,6 +767,417 @@ function setStatus(text) {
   fileStatusEl.textContent = text;
 }
 
+function escapeHtml(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function getPathExtension(pathValue) {
+  const name = String(pathValue || "").split("/").pop() || "";
+  const idx = name.lastIndexOf(".");
+  if (idx < 0 || idx === name.length - 1) {
+    return "";
+  }
+  return name.slice(idx + 1).toLowerCase();
+}
+
+function detectPreviewKind(pathValue) {
+  const ext = getPathExtension(pathValue);
+  if (!ext) {
+    return "none";
+  }
+  if (MARKDOWN_EXTENSIONS.has(ext)) {
+    return "markdown";
+  }
+  if (HTML_EXTENSIONS.has(ext)) {
+    return "html";
+  }
+  if (IMAGE_EXTENSIONS.has(ext)) {
+    return "image";
+  }
+  if (VIDEO_EXTENSIONS.has(ext)) {
+    return "video";
+  }
+  return "none";
+}
+
+function revokePreviewObjectUrl() {
+  if (previewObjectUrl) {
+    URL.revokeObjectURL(previewObjectUrl);
+    previewObjectUrl = "";
+  }
+}
+
+function setPreviewMeta(pathValue, kind, note = "") {
+  if (previewTypeChipEl) {
+    const label = kind === "none" ? "No preview" : kind.toUpperCase();
+    previewTypeChipEl.textContent = label;
+  }
+  if (previewMetaLabelEl) {
+    if (note) {
+      previewMetaLabelEl.textContent = note;
+    } else if (pathValue) {
+      previewMetaLabelEl.textContent = `Previewing ${pathValue}`;
+    } else {
+      previewMetaLabelEl.textContent = "Select a file to preview markdown, html, images, or videos.";
+    }
+  }
+}
+
+function setPreviewVisibility(kind) {
+  if (!previewRootEl) {
+    return;
+  }
+  previewKind = kind;
+  if (previewEmptyEl) previewEmptyEl.hidden = kind !== "none";
+  if (previewMarkdownEl) previewMarkdownEl.hidden = kind !== "markdown";
+  if (previewHtmlFrameEl) previewHtmlFrameEl.hidden = kind !== "html";
+  if (previewImageEl) previewImageEl.hidden = kind !== "image";
+  if (previewVideoEl) previewVideoEl.hidden = kind !== "video";
+}
+
+function renderSimpleMarkdown(markdownText) {
+  const lines = String(markdownText || "").replace(/\r/g, "").split("\n");
+  const out = [];
+  let inUl = false;
+  let inOl = false;
+  let inBlockquote = false;
+  let inCodeBlock = false;
+  let codeFenceMarker = "";
+
+  const renderInline = (text) => {
+    const codeTokens = [];
+    const withCodeTokens = String(text || "").replace(/`([^`]+)`/g, (_match, value) => {
+      const token = `@@INLINE_CODE_${codeTokens.length}@@`;
+      codeTokens.push(`<code>${escapeHtml(value)}</code>`);
+      return token;
+    });
+
+    let html = escapeHtml(withCodeTokens);
+    html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+    html = html.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+
+    for (let i = 0; i < codeTokens.length; i += 1) {
+      html = html.replace(`@@INLINE_CODE_${i}@@`, codeTokens[i]);
+    }
+    return html;
+  };
+
+  const closeLists = () => {
+    if (inUl) {
+      out.push("</ul>");
+      inUl = false;
+    }
+    if (inOl) {
+      out.push("</ol>");
+      inOl = false;
+    }
+  };
+
+  const closeBlockquote = () => {
+    if (inBlockquote) {
+      out.push("</blockquote>");
+      inBlockquote = false;
+    }
+  };
+
+  const closeAllOpenBlocks = () => {
+    closeLists();
+    closeBlockquote();
+  };
+
+  const splitTableCells = (value) => {
+    const text = String(value || "").trim().replace(/^\|/, "").replace(/\|$/, "");
+    return text.split("|").map((cell) => cell.trim());
+  };
+
+  const tableDividerPattern = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
+  const tableAlignFromDivider = (cell) => {
+    const divider = String(cell || "").trim();
+    if (divider.startsWith(":") && divider.endsWith(":")) {
+      return "center";
+    }
+    if (divider.endsWith(":")) {
+      return "right";
+    }
+    return "left";
+  };
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = String(lines[lineIndex] || "");
+    const trimmed = line.trim();
+    const fenceStart = trimmed.match(/^(```+|~~~+)(.*)$/);
+
+    if (fenceStart && !inCodeBlock) {
+      closeLists();
+      closeBlockquote();
+      inCodeBlock = true;
+      codeFenceMarker = fenceStart[1].charAt(0);
+      const languageLabel = escapeHtml(String(fenceStart[2] || "").trim().split(/\s+/)[0] || "");
+      out.push(languageLabel
+        ? `<pre data-lang="${languageLabel}"><code>`
+        : "<pre><code>");
+      continue;
+    }
+
+    if (inCodeBlock) {
+      const fenceEnd = trimmed.match(/^(```+|~~~+)\s*$/);
+      if (fenceEnd && fenceEnd[1].charAt(0) === codeFenceMarker) {
+        inCodeBlock = false;
+        codeFenceMarker = "";
+        out.push("</code></pre>");
+        continue;
+      }
+      out.push(`${escapeHtml(line)}\n`);
+      continue;
+    }
+
+    const headingMatch = line.match(/^\s*(#{1,6})\s+(.*)$/);
+    if (headingMatch) {
+      closeAllOpenBlocks();
+      const level = headingMatch[1].length;
+      out.push(`<h${level}>${renderInline(headingMatch[2])}</h${level}>`);
+      continue;
+    }
+
+    const nextLine = String(lines[lineIndex + 1] || "");
+    if (line.includes("|") && tableDividerPattern.test(nextLine)) {
+      closeAllOpenBlocks();
+
+      const headerCells = splitTableCells(line);
+      const dividerCells = splitTableCells(nextLine);
+      const alignments = dividerCells.map(tableAlignFromDivider);
+
+      out.push("<table>");
+      out.push("<thead><tr>");
+      for (let i = 0; i < headerCells.length; i += 1) {
+        const header = renderInline(headerCells[i]);
+        const align = alignments[i] || "left";
+        out.push(`<th style=\"text-align:${align}\">${header}</th>`);
+      }
+      out.push("</tr></thead>");
+      out.push("<tbody>");
+
+      lineIndex += 2;
+      while (lineIndex < lines.length) {
+        const rowLine = String(lines[lineIndex] || "");
+        if (!rowLine.trim() || !rowLine.includes("|")) {
+          break;
+        }
+        const rowCells = splitTableCells(rowLine);
+        out.push("<tr>");
+        for (let i = 0; i < headerCells.length; i += 1) {
+          const cell = renderInline(rowCells[i] || "");
+          const align = alignments[i] || "left";
+          out.push(`<td style=\"text-align:${align}\">${cell}</td>`);
+        }
+        out.push("</tr>");
+        lineIndex += 1;
+      }
+
+      out.push("</tbody>");
+      out.push("</table>");
+      lineIndex -= 1;
+      continue;
+    }
+
+    if (/^\s{0,3}([-*_])\s*\1\s*\1(?:\s*\1)*\s*$/.test(line)) {
+      closeAllOpenBlocks();
+      out.push("<hr />");
+      continue;
+    }
+
+    const ulMatch = line.match(/^\s*[-*+]\s+(.+)$/);
+    if (ulMatch) {
+      closeBlockquote();
+      if (!inUl) {
+        closeLists();
+        inUl = true;
+        out.push("<ul>");
+      }
+      const taskMatch = ulMatch[1].match(/^\[( |x|X)\]\s+(.*)$/);
+      if (taskMatch) {
+        const checked = taskMatch[1].toLowerCase() === "x";
+        out.push(`<li><input type=\"checkbox\" disabled ${checked ? "checked" : ""} /> ${renderInline(taskMatch[2])}</li>`);
+      } else {
+        out.push(`<li>${renderInline(ulMatch[1])}</li>`);
+      }
+      continue;
+    }
+
+    const olMatch = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (olMatch) {
+      closeBlockquote();
+      if (!inOl) {
+        closeLists();
+        inOl = true;
+        out.push("<ol>");
+      }
+      out.push(`<li>${renderInline(olMatch[1])}</li>`);
+      continue;
+    }
+
+    const quoteMatch = line.match(/^\s*>\s?(.*)$/);
+    if (quoteMatch) {
+      closeLists();
+      if (!inBlockquote) {
+        inBlockquote = true;
+        out.push("<blockquote>");
+      }
+      out.push(`<p>${renderInline(quoteMatch[1])}</p>`);
+      continue;
+    }
+
+    if (/^\s*$/.test(line)) {
+      closeAllOpenBlocks();
+      continue;
+    }
+
+    closeAllOpenBlocks();
+    out.push(`<p>${renderInline(line)}</p>`);
+  }
+
+  closeAllOpenBlocks();
+  if (inCodeBlock) {
+    out.push("</code></pre>");
+  }
+  return out.join("\n");
+}
+
+async function fetchPreviewBlob(pathValue) {
+  const path = normalizeRelativePath(pathValue);
+  const query = new URLSearchParams({ path }).toString();
+  const headers = {};
+  const apiAuth = getStoredApiAuthHeader();
+  if (apiAuth) {
+    headers[apiAuth.headerName] = apiAuth.key;
+  }
+
+  const response = await fetch(`/api/files/download?${query}`, {
+    method: "GET",
+    headers
+  });
+
+  if (!response.ok) {
+    const maybeJson = await response.json().catch(() => null);
+    const message = maybeJson?.error || `Preview download failed (${response.status})`;
+    throw new Error(message);
+  }
+
+  const blob = await response.blob();
+  return {
+    blob,
+    contentType: String(response.headers.get("content-type") || "").toLowerCase()
+  };
+}
+
+async function loadPreview(pathValue, { force = false } = {}) {
+  if (!previewRootEl) {
+    return;
+  }
+
+  const normalizedPath = normalizeRelativePath(pathValue);
+  const kind = detectPreviewKind(normalizedPath);
+  if (!normalizedPath || kind === "none") {
+    revokePreviewObjectUrl();
+    if (previewImageEl) previewImageEl.removeAttribute("src");
+    if (previewVideoEl) {
+      previewVideoEl.pause();
+      previewVideoEl.removeAttribute("src");
+      previewVideoEl.load();
+    }
+    if (previewHtmlFrameEl) previewHtmlFrameEl.srcdoc = "";
+    if (previewMarkdownEl) previewMarkdownEl.innerHTML = "";
+    setPreviewVisibility("none");
+    setPreviewMeta(normalizedPath, "none", normalizedPath
+      ? `No markdown/html/image/video preview for ${normalizedPath}.`
+      : "Select a file to preview markdown, html, images, or videos.");
+    previewPath = normalizedPath;
+    return;
+  }
+
+  if (!force && normalizedPath === previewPath && kind === previewKind) {
+    return;
+  }
+
+  setPreviewVisibility("none");
+  setPreviewMeta(normalizedPath, kind, `Loading ${kind} preview for ${normalizedPath}...`);
+  previewPath = normalizedPath;
+
+  revokePreviewObjectUrl();
+  try {
+    if (kind === "video") {
+      await ensureBrowserFileSession();
+      const videoUrl = `/api/files/video-preview?${new URLSearchParams({ path: normalizedPath }).toString()}`;
+      await waitForVideoPreview(videoUrl, normalizedPath);
+      if (previewVideoEl) {
+        previewVideoEl.src = videoUrl;
+        previewVideoEl.load();
+      }
+      setPreviewVisibility("video");
+      setPreviewMeta(normalizedPath, kind, getPathExtension(normalizedPath) === "mov"
+        ? `Playing browser-compatible MP4 preview of ${normalizedPath}`
+        : `Streaming ${normalizedPath}`);
+      return;
+    }
+
+    if (kind === "image") {
+      await ensureBrowserFileSession();
+      const imageUrl = `/api/files/media-preview?${new URLSearchParams({ path: normalizedPath }).toString()}`;
+      if (previewImageEl) previewImageEl.src = imageUrl;
+      setPreviewVisibility("image");
+      setPreviewMeta(normalizedPath, kind, `Streaming ${normalizedPath}`);
+      return;
+    }
+
+    const { blob, contentType } = await fetchPreviewBlob(normalizedPath);
+    if (kind === "markdown") {
+      const markdown = await blob.text();
+      if (previewMarkdownEl) {
+        previewMarkdownEl.innerHTML = renderSimpleMarkdown(markdown);
+      }
+      setPreviewVisibility("markdown");
+      setPreviewMeta(normalizedPath, kind);
+      return;
+    }
+
+    if (kind === "html") {
+      const html = await blob.text();
+      if (previewHtmlFrameEl) {
+        previewHtmlFrameEl.srcdoc = html;
+      }
+      setPreviewVisibility("html");
+      setPreviewMeta(normalizedPath, kind);
+      return;
+    }
+
+    previewObjectUrl = URL.createObjectURL(blob);
+
+  } catch (error) {
+    revokePreviewObjectUrl();
+    setPreviewVisibility("none");
+    setPreviewMeta(normalizedPath, "none", `Preview failed: ${error.message}`);
+  }
+}
+
+async function waitForVideoPreview(videoUrl, pathValue) {
+  for (;;) {
+    const prepared = await fetch(videoUrl, { method: "HEAD" });
+    if (prepared.ok) return;
+    if (prepared.status !== 202) {
+      throw new Error(`Video preview preparation failed (${prepared.status})`);
+    }
+    setPreviewMeta(pathValue, "video", `Preparing browser-compatible video for ${pathValue}…`);
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+}
+
 function mergeApiAuthHeader(headers = {}) {
   const merged = new Headers(headers);
   const apiAuth = getStoredApiAuthHeader();
@@ -750,6 +1203,22 @@ function getStoredApiAuthHeader() {
     return { headerName, key };
   } catch {
     return null;
+  }
+}
+
+async function ensureBrowserFileSession() {
+  const apiAuth = getStoredApiAuthHeader();
+  if (!apiAuth) {
+    return;
+  }
+
+  const response = await fetch("/api/files/browser-session", {
+    method: "POST",
+    headers: { [apiAuth.headerName]: apiAuth.key }
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `Could not authorize browser download (${response.status})`);
   }
 }
 
@@ -1136,6 +1605,144 @@ async function apiJson(url, options = {}) {
   return data;
 }
 
+function formatShareDate(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Unknown" : date.toLocaleString();
+}
+
+function renderFileShares(shares) {
+  if (!shareListEl) return;
+  shareListEl.replaceChildren();
+  if (!shares.length) {
+    const empty = document.createElement("p");
+    empty.className = "share-empty";
+    empty.textContent = "No active shares in this workspace.";
+    shareListEl.append(empty);
+    return;
+  }
+
+  for (const share of shares) {
+    const row = document.createElement("article");
+    row.className = "share-item";
+    const details = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = share.fileName || share.path;
+    const meta = document.createElement("span");
+    const flags = [share.passwordProtected ? "password" : "public", share.encrypted ? "encrypted" : "range-ready"];
+    meta.textContent = `${flags.join(" · ")} · expires ${formatShareDate(share.expiresAt)} · ${Number(share.accessCount || 0)} access(es)`;
+    details.append(title, meta);
+    const links = document.createElement("div");
+    links.className = "share-item-links";
+    if (share.viewUrl && share.directUrl) {
+      for (const [label, url] of [["Copy View URL", share.viewUrl], ["Copy Direct URL", share.directUrl]]) {
+        const copy = document.createElement("button");
+        copy.className = "btn btn-soft";
+        copy.type = "button";
+        copy.textContent = label;
+        copy.addEventListener("click", async () => {
+          try {
+            await copyTextToClipboard(url);
+            setStatus(`${label.replace("Copy ", "")} copied.`);
+          } catch (error) {
+            setStatus(`Error: ${error.message}`);
+          }
+        });
+        links.append(copy);
+      }
+    } else {
+      const unavailable = document.createElement("span");
+      unavailable.textContent = "URLs unavailable for shares created before retained links.";
+      links.append(unavailable);
+    }
+    if (share.passwordProtected) {
+      if (share.passwordCode) {
+        const passwordValue = document.createElement("code");
+        passwordValue.className = "share-password-code";
+        passwordValue.textContent = share.passwordCode;
+        passwordValue.hidden = true;
+        const reveal = document.createElement("button");
+        reveal.className = "btn btn-soft";
+        reveal.type = "button";
+        reveal.textContent = "Show Password";
+        reveal.addEventListener("click", () => {
+          passwordValue.hidden = !passwordValue.hidden;
+          reveal.textContent = passwordValue.hidden ? "Show Password" : "Hide Password";
+        });
+        const copyPassword = document.createElement("button");
+        copyPassword.className = "btn btn-soft";
+        copyPassword.type = "button";
+        copyPassword.textContent = "Copy Password";
+        copyPassword.addEventListener("click", async () => {
+          try {
+            await copyTextToClipboard(share.passwordCode);
+            setStatus("Share password copied.");
+          } catch (error) {
+            setStatus(`Error: ${error.message}`);
+          }
+        });
+        links.append(reveal, copyPassword, passwordValue);
+      } else {
+        const unavailable = document.createElement("span");
+        unavailable.textContent = "Password unavailable for shares created before retained codes.";
+        links.append(unavailable);
+      }
+    }
+    details.append(links);
+    const revoke = document.createElement("button");
+    revoke.className = "btn btn-soft danger";
+    revoke.type = "button";
+    revoke.textContent = "Revoke";
+    revoke.addEventListener("click", async () => {
+      if (!window.confirm(`Revoke the share for ${share.fileName}?`)) return;
+      try {
+        await apiJson(`/api/files/shares/${encodeURIComponent(share.id)}`, { method: "DELETE" });
+        await loadFileShares();
+        setStatus(`Revoked share for ${share.fileName}.`);
+      } catch (error) {
+        setStatus(`Error: ${error.message}`);
+      }
+    });
+    row.append(details, revoke);
+    shareListEl.append(row);
+  }
+}
+
+async function loadFileShares() {
+  const data = await apiJson("/api/files/shares");
+  renderFileShares(Array.isArray(data.shares) ? data.shares : []);
+}
+
+async function createFileShare() {
+  const pathTarget = normalizeRelativePath(selectedPath || activeFilePath);
+  if (!pathTarget || selectedPathType === "directory") {
+    setStatus("Select a file to share.");
+    return;
+  }
+  createShareBtnEl.disabled = true;
+  createShareBtnEl.textContent = "Creating…";
+  try {
+    const data = await apiJson("/api/files/shares", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        path: pathTarget,
+        expiresInHours: Number(shareExpirySelectEl.value),
+        password: sharePasswordInputEl.value,
+        encrypted: shareEncryptInputEl.checked
+      })
+    });
+    shareViewUrlInputEl.value = data.viewUrl || "";
+    shareDirectUrlInputEl.value = data.directUrl || "";
+    shareResultEl.hidden = false;
+    sharePasswordInputEl.value = "";
+    await loadFileShares();
+    setStatus(`Created public share for ${pathTarget}. Save the URLs now; the bearer token is not stored in readable form.`);
+  } finally {
+    createShareBtnEl.disabled = false;
+    createShareBtnEl.textContent = "Create Share";
+  }
+}
+
 function parseDownloadFilename(contentDisposition, fallbackPath) {
   const fallbackName = String(fallbackPath || "download").split(/[\\/]/).pop() || "download";
   const header = String(contentDisposition || "");
@@ -1238,6 +1845,43 @@ function parentDir(dir) {
   return idx >= 0 ? cleaned.slice(0, idx) : "";
 }
 
+function getEditorCursorLineCol() {
+  if (!view) {
+    return { line: 1, col: 1 };
+  }
+  const head = view.state.selection.main.head;
+  const line = view.state.doc.lineAt(head);
+  return {
+    line: line.number,
+    col: Math.max(1, head - line.from + 1)
+  };
+}
+
+function buildDirectFileLabLink(pathValue, includeCursor = false) {
+  const normalizedPath = normalizeRelativePath(pathValue);
+  if (!normalizedPath) {
+    return "";
+  }
+
+  const params = new URLSearchParams({ path: normalizedPath });
+  const accessCode = normalizeWorkspaceCode(currentWorkspaceCode);
+  if (accessCode && accessCode !== "default") {
+    params.set("access_code", accessCode);
+  }
+
+  if (includeCursor) {
+    const cursor = getEditorCursorLineCol();
+    params.set("line", String(cursor.line));
+    params.set("col", String(cursor.col));
+  }
+
+  const url = new URL(window.location.href);
+  url.search = "";
+  url.hash = "";
+  url.search = params.toString();
+  return url.toString();
+}
+
 function formatByteSize(bytes) {
   const value = Number(bytes || 0);
   if (value < 1024) return `${value} B`;
@@ -1272,6 +1916,30 @@ function formatUploadProgress(loaded, total) {
   }
   const percent = Math.max(0, Math.min(100, Math.round((safeLoaded / safeTotal) * 100)));
   return `${percent}% (${formatByteSize(safeLoaded)} / ${formatByteSize(safeTotal)})`;
+}
+
+function getMultipartUploadPosition(files, loadedBytes) {
+  const list = Array.isArray(files) ? files : [];
+  if (list.length === 0) {
+    return "";
+  }
+
+  const loaded = Math.max(0, Number(loadedBytes || 0));
+  let cumulative = 0;
+  for (let index = 0; index < list.length; index += 1) {
+    const file = list[index];
+    const size = Math.max(0, Number(file?.size || 0));
+    const nextCumulative = cumulative + size;
+    const isCurrent = loaded <= nextCumulative || index === list.length - 1;
+    if (isCurrent) {
+      const withinFile = Math.max(0, Math.min(size, loaded - cumulative));
+      const fileName = String(file?.webkitRelativePath || file?.name || "unnamed");
+      return `[file ${index + 1}/${list.length}: ${fileName} ${formatByteSize(withinFile)} / ${formatByteSize(size)}]`;
+    }
+    cumulative = nextCumulative;
+  }
+
+  return `[file ${list.length}/${list.length}]`;
 }
 
 function uploadWithProgress(uploadUrl, requestHeaders, form, onProgress, onUploadSent) {
@@ -1536,8 +2204,18 @@ function renderFileList(entries) {
       entry.hidden ? "hidden-entry" : "",
       entry.executable ? "executable" : ""
     ].filter(Boolean).join(" ");
-    btn.textContent = `${entry.type === "directory" ? "[D]" : "[F]"} ${entry.name}`;
-    btn.title = `${entry.name} (${entry.size} bytes)`;
+    const name = document.createElement("span");
+    name.className = "file-item-name";
+    name.textContent = `${entry.type === "directory" ? "[D]" : "[F]"} ${entry.name}`;
+    const details = document.createElement("span");
+    details.className = "file-item-details";
+    details.textContent = entry.type === "directory"
+      ? `${formatByteSize(entry.size)} · ${Number(entry.fileCount || 0)} files · ${Number(entry.directoryCount || 0)} folders`
+      : formatByteSize(entry.size);
+    btn.append(name, details);
+    btn.title = entry.type === "directory"
+      ? `${entry.name}: ${entry.size} bytes, ${Number(entry.fileCount || 0)} files, ${Number(entry.directoryCount || 0)} folders`
+      : `${entry.name} (${entry.size} bytes)`;
 
     btn.addEventListener("click", async () => {
       const targetPath = joinPath(currentDir, entry.name);
@@ -1547,6 +2225,7 @@ function renderFileList(entries) {
         activePathLabelEl.textContent = `Folder selected: ${targetPath}`;
         setStatus(`Selected folder ${targetPath}. Double-click to open.`);
         markSelectedFileItem(btn);
+        loadPreview(targetPath, { force: true });
         return;
       }
 
@@ -1556,6 +2235,7 @@ function renderFileList(entries) {
       selectedPath = targetPath;
       selectedPathType = "file";
       markSelectedFileItem(btn);
+      loadPreview(targetPath, { force: true });
 
       try {
         if (activeFilePath !== targetPath && !confirmDiscardUnsavedChanges("open another file")) {
@@ -1570,6 +2250,7 @@ function renderFileList(entries) {
         setEditorContent(fileData.content || "", activeFilePath);
         clearLintDiagnostics();
         setStatus(`Loaded ${activeFilePath}`);
+        loadPreview(activeFilePath, { force: true });
       } catch (error) {
         setStatus(`Could not open ${targetPath}: ${error.message}. It remains selected and can be downloaded.`);
       }
@@ -1632,6 +2313,7 @@ async function openFileByPath(targetPath, line, col) {
     setCursorPosition(line, col);
   }
   setStatus(`Loaded ${activeFilePath}`);
+  loadPreview(activeFilePath, { force: true });
 }
 
 function previewAndSave() {
@@ -1743,17 +2425,19 @@ async function uploadFiles(files) {
   let lastTotal = totalBytes;
   let lastProgressAt = Date.now();
   let waitingOnServer = false;
+  let lastProgressLabel = `Uploading ${files.length} file(s)... 0%`;
   let heartbeatTicks = 0;
   const heartbeat = window.setInterval(() => {
     heartbeatTicks += 1;
     const elapsed = Math.round((Date.now() - lastProgressAt) / 1000);
+    const positionLabel = getMultipartUploadPosition(files, lastLoaded);
     if (waitingOnServer) {
       const dotCount = (heartbeatTicks % 3) + 1;
-      setStatus(`Upload sent. Waiting on server${".".repeat(dotCount)} (${elapsed}s)`);
+      setStatus(`${lastProgressLabel} ${positionLabel} Upload sent. Waiting on server${".".repeat(dotCount)} (${elapsed}s)`);
       return;
     }
     if (elapsed >= 3) {
-      setStatus(`Uploading ${files.length} file(s)... ${formatUploadProgress(lastLoaded, lastTotal)} (${elapsed}s without new progress)`);
+      setStatus(`${lastProgressLabel} ${positionLabel} (${elapsed}s without new progress)`);
     }
   }, 1000);
 
@@ -1776,12 +2460,15 @@ async function uploadFiles(files) {
           lastLoaded = Math.max(0, Number(loaded || 0));
           lastTotal = lengthComputable ? Math.max(0, Number(total || 0)) : totalBytes;
           lastProgressAt = Date.now();
-          setStatus(`Uploading ${files.length} file(s)... ${formatUploadProgress(lastLoaded, lastTotal)}`);
+          lastProgressLabel = `Uploading ${files.length} file(s)... ${formatUploadProgress(lastLoaded, lastTotal)}`;
+          const positionLabel = getMultipartUploadPosition(files, lastLoaded);
+          setStatus(`${lastProgressLabel} ${positionLabel}`);
         },
         () => {
           waitingOnServer = true;
           lastProgressAt = Date.now();
-          setStatus("Upload sent. Waiting on server... (0s)");
+          const positionLabel = getMultipartUploadPosition(files, lastLoaded);
+          setStatus(`${lastProgressLabel} ${positionLabel} Upload sent. Waiting on server... (0s)`);
         }
       );
       data = result.data;
@@ -2072,6 +2759,110 @@ downloadBtnEl.addEventListener("click", async () => {
   }
 });
 
+if (copyDirectLinkBtnEl) {
+  copyDirectLinkBtnEl.addEventListener("click", async () => {
+    const pathTarget = selectedPath || activeFilePath;
+    if (!pathTarget) {
+      setStatus("Select a file or folder first.");
+      return;
+    }
+
+    const includeCursor = selectedPathType === "file"
+      && normalizeRelativePath(pathTarget) === normalizeRelativePath(activeFilePath);
+    const directLink = buildDirectFileLabLink(pathTarget, includeCursor);
+    if (!directLink) {
+      setStatus("Could not build a direct link for the selected path.");
+      return;
+    }
+
+    try {
+      await copyTextToClipboard(directLink);
+      setStatus(includeCursor
+        ? "Direct File Lab link copied with line and column."
+        : "Direct File Lab link copied.");
+    } catch (error) {
+      setStatus(`Error: ${error.message}`);
+    }
+  });
+}
+
+if (shareFileBtnEl) {
+  shareFileBtnEl.addEventListener("click", () => {
+    const pathTarget = normalizeRelativePath(selectedPath || activeFilePath);
+    shareSelectionLabelEl.textContent = pathTarget && selectedPathType !== "directory"
+      ? `Ready to share: ${pathTarget}`
+      : "Select a file to create an expiring public link.";
+    sharePanelEl.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+}
+
+if (createShareBtnEl) {
+  createShareBtnEl.addEventListener("click", () => {
+    createFileShare().catch((error) => setStatus(`Error: ${error.message}`));
+  });
+}
+
+if (refreshSharesBtnEl) {
+  refreshSharesBtnEl.addEventListener("click", () => {
+    loadFileShares().catch((error) => setStatus(`Error: ${error.message}`));
+  });
+}
+
+if (copyShareViewBtnEl) {
+  copyShareViewBtnEl.addEventListener("click", () => {
+    copyTextToClipboard(shareViewUrlInputEl.value)
+      .then(() => setStatus("Public view URL copied."))
+      .catch((error) => setStatus(`Error: ${error.message}`));
+  });
+}
+
+if (copyShareDirectBtnEl) {
+  copyShareDirectBtnEl.addEventListener("click", () => {
+    copyTextToClipboard(shareDirectUrlInputEl.value)
+      .then(() => setStatus("Public direct URL copied."))
+      .catch((error) => setStatus(`Error: ${error.message}`));
+  });
+}
+
+if (refreshPreviewBtnEl) {
+  refreshPreviewBtnEl.addEventListener("click", () => {
+    const pathTarget = selectedPath || activeFilePath;
+    loadPreview(pathTarget, { force: true });
+  });
+}
+
+if (openPreviewNewTabBtnEl) {
+  openPreviewNewTabBtnEl.addEventListener("click", async () => {
+    const pathTarget = normalizeRelativePath(selectedPath || activeFilePath);
+    if (!pathTarget) {
+      setStatus("Select a file first.");
+      return;
+    }
+    const kind = detectPreviewKind(pathTarget);
+    if (kind === "none") {
+      setStatus("Selected file type does not support preview.");
+      return;
+    }
+    const endpoint = kind === "video" ? "/api/files/video-preview" : kind === "image" ? "/api/files/media-preview" : "/api/files/download";
+    const targetUrl = `${endpoint}?${new URLSearchParams({ path: pathTarget }).toString()}`;
+    const previewWindow = window.open("about:blank", "_blank");
+    if (!previewWindow) {
+      setStatus("Could not open preview. Allow pop-ups for this site and retry.");
+      return;
+    }
+    previewWindow.opener = null;
+    try {
+      await ensureBrowserFileSession();
+      if (kind === "video") await waitForVideoPreview(targetUrl, pathTarget);
+      previewWindow.location.replace(targetUrl);
+      setStatus("Opened file preview in a new tab.");
+    } catch (error) {
+      previewWindow.close();
+      setStatus(`Error: ${error.message}`);
+    }
+  });
+}
+
 if (copyGitRemoteBtnEl) {
   copyGitRemoteBtnEl.addEventListener("click", async () => {
     try {
@@ -2256,6 +3047,10 @@ if (launchPath) {
   loadDirectory("").catch((error) => setStatus(`Error: ${error.message}`));
 }
 
+setPreviewMeta("", "none");
+setPreviewVisibility("none");
+
 loadWorkspaceInfo().catch(() => {});
 loadWorkspaceGitInfo().catch(() => {});
 loadUploadPolicy().catch(() => {});
+loadFileShares().catch(() => {});

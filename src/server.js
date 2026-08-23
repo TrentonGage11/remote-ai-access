@@ -14,6 +14,8 @@ import { promisify } from "util";
 import { execFile, spawn } from "child_process";
 import { fileURLToPath } from "url";
 import { AsyncLocalStorage } from "async_hooks";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scrypt, timingSafeEqual } from "crypto";
+import { pipeline } from "stream/promises";
 
 const app = express();
 
@@ -50,6 +52,10 @@ const workspaceUploadBypassCodes = parseWorkspaceUploadBypassCodes(workspaceUplo
 const chunkUploadThresholdBytes = Math.max(1024 * 1024, Number(process.env.FILE_API_CHUNK_UPLOAD_THRESHOLD_BYTES || 64 * 1024 * 1024));
 const chunkUploadChunkSizeBytes = Math.max(256 * 1024, Number(process.env.FILE_API_CHUNK_SIZE_BYTES || 4 * 1024 * 1024));
 const chunkUploadSessionMaxAgeMs = Math.max(60_000, Number(process.env.FILE_API_CHUNK_SESSION_MAX_AGE_MS || 2 * 60 * 60 * 1000));
+const fileShareDbPath = path.resolve(process.env.FILE_SHARE_DB_PATH || path.join(sandboxBaseRoot, "_admin", "file-shares.json"));
+const fileShareDataRoot = path.resolve(process.env.FILE_SHARE_DATA_ROOT || path.join(sandboxBaseRoot, "_admin", "file-share-data"));
+const fileShareEncryptionSecret = String(process.env.FILE_SHARE_ENCRYPTION_SECRET || "");
+const videoPreviewTranscodeTimeoutMs = Math.max(60_000, Number(process.env.VIDEO_PREVIEW_TRANSCODE_TIMEOUT_MS || 2 * 60 * 60 * 1000));
 
 const execFileAsync = promisify(execFile);
 const safeTerminalCommands = new Set([
@@ -169,12 +175,18 @@ const terminalVfaCommand = String(process.env.TERMINAL_VFA_COMMAND || "").trim()
 const terminalVfaScript = String(process.env.TERMINAL_VFA_SCRIPT || "../VFA/vfa.py").trim() || "../VFA/vfa.py";
 let workspaceBackupTimer = null;
 let lastAuditRetentionRunAt = 0;
+let fileShareWriteQueue = Promise.resolve();
 
 const port = Number(process.env.PORT || 8787);
-const appBaseUrl = process.env.APP_BASE_URL || `http://localhost:${port}`;
+const host = String(process.env.HOST || "127.0.0.1").trim() || "127.0.0.1";
+const configuredAppBaseUrl = String(process.env.APP_BASE_URL || "").trim().replace(/\/+$/, "");
+const appBaseUrl = configuredAppBaseUrl || `http://localhost:${port}`;
+const apiRateLimitWindowMs = Math.max(1000, Math.min(60 * 60 * 1000, Number(process.env.API_RATE_LIMIT_WINDOW_MS || 60 * 1000)));
+const apiRateLimitMax = Math.max(1, Math.min(200000, Number(process.env.API_RATE_LIMIT_MAX || 3000)));
 const defaultModel = process.env.OPENAI_MODEL || "gpt-4.1";
 const defaultProvider = "openai";
-const xaiDefaultModel = process.env.XAI_MODEL || "grok-4.3";
+const xaiDefaultModel = process.env.XAI_MODEL || "grok-4.6";
+const googleDefaultModel = process.env.GOOGLE_MODEL || "gemini-3.7-flash";
 const agentMaxStepsHardLimit = Math.max(16, Math.min(4096, Number(process.env.AGENT_MAX_STEPS_HARD_LIMIT || 1024)));
 const agentMaxSteps = Math.max(1, Math.min(agentMaxStepsHardLimit, Number(process.env.AGENT_MAX_STEPS || 16)));
 const agentMaxStepsOverrideLimit = Math.max(agentMaxSteps, Math.min(agentMaxStepsHardLimit, Number(process.env.AGENT_MAX_STEPS_OVERRIDE_LIMIT || 40)));
@@ -192,6 +204,8 @@ const auditRetentionPruneIntervalMs = Math.max(30_000, Math.min(60 * 60 * 1000, 
 const githubPat = String(process.env.GITHUB_PAT || process.env.GITHUB_TOKEN || "").trim();
 const xaiApiKey = String(process.env.XAI_API_KEY || "").trim();
 const xaiApiBaseUrl = String(process.env.XAI_API_BASE_URL || "https://api.x.ai/v1").trim().replace(/\/+$/, "");
+const googleApiKey = String(process.env.GOOGLE_API_KEY || "").trim();
+const googleApiBaseUrl = String(process.env.GOOGLE_API_BASE_URL || "https://generativelanguage.googleapis.com/v1beta/openai").trim().replace(/\/+$/, "");
 const copilotApiBaseUrl = String(process.env.COPILOT_API_BASE_URL || "https://models.github.ai/inference").trim();
 const copilotApiVersion = String(process.env.COPILOT_API_VERSION || "2026-03-10").trim();
 const allowedModels = String(process.env.OPENAI_ALLOWED_MODELS || "")
@@ -199,6 +213,10 @@ const allowedModels = String(process.env.OPENAI_ALLOWED_MODELS || "")
   .map((item) => item.trim())
   .filter(Boolean);
 const xaiAllowedModels = String(process.env.XAI_ALLOWED_MODELS || "")
+  .split(",")
+  .map((item) => item.trim())
+  .filter(Boolean);
+const googleAllowedModels = String(process.env.GOOGLE_ALLOWED_MODELS || "")
   .split(",")
   .map((item) => item.trim())
   .filter(Boolean);
@@ -223,14 +241,19 @@ const apiKeyExemptPathPrefixes = String(process.env.API_KEY_EXEMPT_PATH_PREFIXES
   .map((item) => String(item || "").trim())
   .filter(Boolean);
 const apiKeyRequireHeaderOnly = String(process.env.API_KEY_REQUIRE_HEADER_ONLY || "true").trim().toLowerCase() !== "false";
+const browserFileSessionCookieName = "raa_file_session";
+const browserFileSessionTtlMs = 2 * 60 * 60 * 1000;
+const browserFileSessions = new Map();
+const videoPreviewCacheRoot = path.join(os.tmpdir(), "remote-ai-video-preview-cache");
+const videoPreviewJobs = new Map();
 const adminDashboardToken = String(process.env.ADMIN_DASHBOARD_TOKEN || "").trim();
 const adminSettingsDbPath = path.resolve(process.env.ADMIN_SETTINGS_DB_PATH || path.join(sandboxBaseRoot, "_admin", "settings-db.json"));
 let adminSettingsCache = null;
 let adminSettingsLoaded = false;
 
 const openaiApiKey = process.env.OPENAI_API_KEY;
-if (!openaiApiKey && !xaiApiKey && !githubPat) {
-  console.error("Missing provider credentials. Set at least one of OPENAI_API_KEY, XAI_API_KEY, or GITHUB_PAT/GITHUB_TOKEN.");
+if (!openaiApiKey && !xaiApiKey && !googleApiKey && !githubPat) {
+  console.error("Missing provider credentials. Set at least one of OPENAI_API_KEY, XAI_API_KEY, GOOGLE_API_KEY, or GITHUB_PAT/GITHUB_TOKEN.");
   process.exit(1);
 }
 
@@ -275,12 +298,28 @@ function resolveXaiModel(requestedModel) {
   return requestedModel;
 }
 
+function isValidGoogleModelName(value) {
+  return typeof value === "string" && /^[a-zA-Z0-9._-]{2,120}$/.test(value);
+}
+
+function resolveGoogleModel(requestedModel) {
+  if (!isValidGoogleModelName(requestedModel)) {
+    return googleDefaultModel;
+  }
+
+  if (googleAllowedModels.length > 0 && !googleAllowedModels.includes(requestedModel)) {
+    return googleDefaultModel;
+  }
+
+  return requestedModel;
+}
+
 function normalizeReasoningEffort(value) {
   const normalized = String(value || "").trim().toLowerCase();
   if (!normalized) {
     return null;
   }
-  if (["none", "minimal", "low", "medium", "high", "xhigh"].includes(normalized)) {
+  if (["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(normalized)) {
     return normalized;
   }
   return null;
@@ -521,6 +560,25 @@ function pathMatchesAnyPrefix(pathname, prefixes) {
   return false;
 }
 
+function hasValidBrowserFileSession(req, pathname) {
+  const allowedPaths = new Set(["/api/files/download", "/api/files/media-preview", "/api/files/video-preview"]);
+  if ((req.method !== "GET" && req.method !== "HEAD") || !allowedPaths.has(pathname)) {
+    return false;
+  }
+
+  const cookies = parseCookieHeader(req.headers.cookie || "");
+  const token = String(cookies[browserFileSessionCookieName] || "").trim();
+  const expiresAt = browserFileSessions.get(token);
+  if (!token || !expiresAt) {
+    return false;
+  }
+  if (expiresAt <= Date.now()) {
+    browserFileSessions.delete(token);
+    return false;
+  }
+  return true;
+}
+
 function workspaceContextForCode(codeValue) {
   const workspaceCode = normalizeWorkspaceCode(codeValue) || defaultWorkspaceCode;
   const root = path.resolve(sandboxBaseRoot, "workspaces", workspaceCode);
@@ -655,6 +713,271 @@ function resolveSandboxPath(inputPath = "") {
   return { rel, absolute };
 }
 
+const fileShareMimeTypes = new Map([
+  [".apng", "image/apng"], [".avif", "image/avif"], [".bmp", "image/bmp"], [".cur", "image/x-icon"],
+  [".gif", "image/gif"], [".heic", "image/heic"], [".heif", "image/heif"], [".ico", "image/x-icon"],
+  [".jpe", "image/jpeg"], [".jpeg", "image/jpeg"], [".jfif", "image/jpeg"], [".jpg", "image/jpeg"],
+  [".png", "image/png"], [".svg", "image/svg+xml"], [".svgz", "image/svg+xml"], [".tif", "image/tiff"],
+  [".tiff", "image/tiff"], [".webp", "image/webp"],
+  [".3gp", "video/3gpp"], [".avi", "video/x-msvideo"], [".m4v", "video/x-m4v"], [".mkv", "video/x-matroska"],
+  [".mov", "video/quicktime"], [".mp4", "video/mp4"], [".mpeg", "video/mpeg"], [".mpg", "video/mpeg"],
+  [".ogv", "video/ogg"], [".ts", "video/mp2t"], [".webm", "video/webm"], [".wmv", "video/x-ms-wmv"],
+  [".flv", "video/x-flv"], [".f4v", "video/mp4"], [".m2ts", "video/mp2t"], [".mts", "video/mp2t"],
+  [".3g2", "video/3gpp2"], [".mpe", "video/mpeg"],
+  [".css", "text/css; charset=utf-8"], [".csv", "text/csv; charset=utf-8"], [".htm", "text/html; charset=utf-8"],
+  [".html", "text/html; charset=utf-8"], [".js", "text/javascript; charset=utf-8"], [".json", "application/json; charset=utf-8"],
+  [".md", "text/markdown; charset=utf-8"], [".pdf", "application/pdf"], [".txt", "text/plain; charset=utf-8"],
+  [".mp3", "audio/mpeg"], [".ogg", "audio/ogg"], [".wav", "audio/wav"]
+]);
+
+function fileShareMimeType(fileName) {
+  return fileShareMimeTypes.get(path.extname(String(fileName || "")).toLowerCase()) || "application/octet-stream";
+}
+
+function fileShareTokenHash(token) {
+  return createHash("sha256").update(String(token || "")).digest("hex");
+}
+
+function scryptBuffer(value, salt, length = 32) {
+  return new Promise((resolve, reject) => {
+    scrypt(value, salt, length, (error, derivedKey) => error ? reject(error) : resolve(derivedKey));
+  });
+}
+
+async function readFileShareDb() {
+  try {
+    const parsed = JSON.parse(await fsp.readFile(fileShareDbPath, "utf8"));
+    return Array.isArray(parsed?.shares) ? parsed : { shares: [] };
+  } catch (error) {
+    if (error?.code === "ENOENT") return { shares: [] };
+    throw error;
+  }
+}
+
+function writeFileShareDb(db) {
+  const operation = fileShareWriteQueue.then(async () => {
+    await fsp.mkdir(path.dirname(fileShareDbPath), { recursive: true });
+    const tempPath = `${fileShareDbPath}.${process.pid}.${Date.now()}.tmp`;
+    await fsp.writeFile(tempPath, `${JSON.stringify(db, null, 2)}\n`, { mode: 0o600 });
+    await fsp.rename(tempPath, fileShareDbPath);
+  });
+  fileShareWriteQueue = operation.catch(() => {});
+  return operation;
+}
+
+function publicFileShareRecord(share) {
+  return {
+    id: share.id,
+    path: share.relativePath,
+    fileName: share.fileName,
+    size: share.size,
+    mimeType: share.mimeType,
+    createdAt: share.createdAt,
+    expiresAt: share.expiresAt,
+    passwordProtected: Boolean(share.passwordHash),
+    encrypted: Boolean(share.encrypted),
+    accessCount: Number(share.accessCount || 0)
+  };
+}
+
+async function encryptFileShareToken(token) {
+  if (!fileShareEncryptionSecret) return {};
+  const salt = randomBytes(16);
+  const iv = randomBytes(12);
+  const key = await scryptBuffer(fileShareEncryptionSecret, salt);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([cipher.update(String(token), "utf8"), cipher.final()]);
+  return {
+    tokenCiphertext: ciphertext.toString("hex"),
+    tokenEncryptionSalt: salt.toString("hex"),
+    tokenEncryptionIv: iv.toString("hex"),
+    tokenEncryptionTag: cipher.getAuthTag().toString("hex")
+  };
+}
+
+async function decryptFileShareToken(share) {
+  if (!fileShareEncryptionSecret || !share.tokenCiphertext) return "";
+  const key = await scryptBuffer(fileShareEncryptionSecret, Buffer.from(share.tokenEncryptionSalt, "hex"));
+  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(share.tokenEncryptionIv, "hex"));
+  decipher.setAuthTag(Buffer.from(share.tokenEncryptionTag, "hex"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(share.tokenCiphertext, "hex")),
+    decipher.final()
+  ]).toString("utf8");
+}
+
+async function encryptFileSharePassword(password) {
+  if (!fileShareEncryptionSecret || !password) return {};
+  const salt = randomBytes(16);
+  const iv = randomBytes(12);
+  const key = await scryptBuffer(fileShareEncryptionSecret, salt);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([cipher.update(String(password), "utf8"), cipher.final()]);
+  return {
+    passwordCiphertext: ciphertext.toString("hex"),
+    passwordEncryptionSalt: salt.toString("hex"),
+    passwordEncryptionIv: iv.toString("hex"),
+    passwordEncryptionTag: cipher.getAuthTag().toString("hex")
+  };
+}
+
+async function decryptFileSharePassword(share) {
+  if (!fileShareEncryptionSecret || !share.passwordCiphertext) return "";
+  const key = await scryptBuffer(fileShareEncryptionSecret, Buffer.from(share.passwordEncryptionSalt, "hex"));
+  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(share.passwordEncryptionIv, "hex"));
+  decipher.setAuthTag(Buffer.from(share.passwordEncryptionTag, "hex"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(share.passwordCiphertext, "hex")),
+    decipher.final()
+  ]).toString("utf8");
+}
+
+async function publicFileShareRecordWithUrls(share, publicBaseUrl) {
+  const record = publicFileShareRecord(share);
+  try {
+    const token = await decryptFileShareToken(share);
+    const passwordCode = await decryptFileSharePassword(share);
+    const baseUrl = String(publicBaseUrl || appBaseUrl).replace(/\/+$/, "");
+    return {
+      ...record,
+      ...(token ? {
+        viewUrl: `${baseUrl}/share/${token}`,
+        directUrl: `${baseUrl}/share/${token}/content`
+      } : {}),
+      ...(passwordCode ? { passwordCode } : {})
+    };
+  } catch {
+    return record;
+  }
+}
+
+function resolveSharedSourcePath(share) {
+  if (share.encrypted) {
+    const absolute = path.resolve(fileShareDataRoot, String(share.encryptedFile || ""));
+    if (!absolute.startsWith(`${fileShareDataRoot}${path.sep}`)) throw new Error("invalid encrypted share path");
+    return absolute;
+  }
+  const workspaceRoot = workspaceContextForCode(share.workspaceCode).sandboxRoot;
+  const absolute = path.resolve(workspaceRoot, normalizeSandboxRelativePath(share.relativePath));
+  if (absolute !== workspaceRoot && !absolute.startsWith(`${workspaceRoot}${path.sep}`)) throw new Error("invalid shared path");
+  return absolute;
+}
+
+async function findActiveFileShare(token) {
+  const tokenHash = fileShareTokenHash(token);
+  const db = await readFileShareDb();
+  const share = db.shares.find((item) => item.tokenHash === tokenHash && !item.revokedAt);
+  if (!share || (share.expiresAt && Date.parse(share.expiresAt) <= Date.now())) return null;
+  return { db, share };
+}
+
+function fileShareUnlockCookieName(share) {
+  return `raa_share_${share.id}`;
+}
+
+function fileShareUnlockValue(share) {
+  return createHash("sha256").update(`${share.tokenHash}:${share.passwordHash}`).digest("hex");
+}
+
+function isFileShareUnlocked(req, share) {
+  if (!share.passwordHash) return true;
+  const cookies = parseCookieHeader(req.headers.cookie || "");
+  const provided = Buffer.from(String(cookies[fileShareUnlockCookieName(share)] || ""), "utf8");
+  const expected = Buffer.from(fileShareUnlockValue(share), "utf8");
+  return provided.length === expected.length && timingSafeEqual(provided, expected);
+}
+
+function escapeShareHtml(value) {
+  return String(value || "").replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
+  })[character]);
+}
+
+function renderFileSharePage(token, share, { error = "" } = {}) {
+  const name = escapeShareHtml(share.fileName);
+  const tokenPath = encodeURIComponent(token);
+  const contentUrl = `/share/${tokenPath}/content`;
+  const locked = Boolean(share.passwordHash);
+  const preparingMov = !share.encrypted && path.extname(share.fileName).toLowerCase() === ".mov";
+  const media = share.mimeType.startsWith("video/")
+    ? preparingMov
+      ? `<p id="media-status">Preparing browser-compatible video…</p><video id="shared-video" controls preload="metadata" data-content-url="${contentUrl}"></video><script src="/share-media.js" defer></script>`
+      : `<video controls preload="metadata" src="${contentUrl}"></video>`
+    : share.mimeType.startsWith("audio/")
+      ? `<audio controls src="${contentUrl}"></audio>`
+      : share.mimeType.startsWith("image/")
+        ? `<img src="${contentUrl}" alt="${name}">`
+        : "";
+  const body = locked
+    ? `<form method="post" action="/share/${tokenPath}/unlock"><label>Password<input name="password" type="password" required autofocus></label>${error ? `<p class="error">${escapeShareHtml(error)}</p>` : ""}<button type="submit">Unlock</button></form>`
+    : `${media}<p><a href="${contentUrl}">Open or download ${name}</a></p>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${name}</title><style>body{margin:0;background:#101713;color:#eef7f0;font:16px/1.5 system-ui,sans-serif}main{width:min(960px,calc(100% - 32px));margin:8vh auto}h1{font-size:clamp(1.4rem,4vw,2.4rem);overflow-wrap:anywhere}video,img{display:block;width:100%;max-height:72vh;object-fit:contain;background:#050706}audio{width:100%}form{max-width:420px;display:grid;gap:12px}label{display:grid;gap:6px}input,button{font:inherit;padding:10px 12px;border-radius:6px;border:1px solid #63816d}button{cursor:pointer;background:#35b56f;color:#07140c;font-weight:700}.error{color:#ff9d9d}a{color:#74d99c}</style></head><body><main><h1>${name}</h1>${share.encrypted ? "<p>Encrypted share. Seeking may be unavailable.</p>" : ""}${body}</main></body></html>`;
+}
+
+async function streamFileShare(req, res, share) {
+  let absolute = resolveSharedSourcePath(share);
+  let stat = await fsp.stat(absolute);
+  let safeName = String(share.fileName || "shared-file").replace(/[\r\n"]/g, "_");
+  let mimeType = share.mimeType || fileShareMimeType(safeName);
+  if (!share.encrypted && path.extname(safeName).toLowerCase() === ".mov") {
+    const preview = await getCachedMovPreview(
+      absolute,
+      safeName,
+      `share\0${share.workspaceCode}\0${share.relativePath}\0${stat.size}\0${stat.mtimeMs}`,
+      { waitForReady: false }
+    );
+    if (preview.preparing) {
+      res.setHeader("Retry-After", "2");
+      return res.status(202).end();
+    }
+    absolute = preview.absolute;
+    stat = await fsp.stat(absolute);
+    safeName = preview.rel;
+    mimeType = "video/mp4";
+  }
+  res.setHeader("Content-Type", mimeType);
+  res.setHeader("Content-Disposition", `inline; filename="${safeName}"`);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Cache-Control", "private, max-age=300");
+
+  if (share.encrypted) {
+    const key = await scryptBuffer(fileShareEncryptionSecret, Buffer.from(share.encryptionSalt, "hex"));
+    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(share.encryptionIv, "hex"));
+    decipher.setAuthTag(Buffer.from(share.encryptionTag, "hex"));
+    res.setHeader("Content-Length", String(share.size));
+    await pipeline(fs.createReadStream(absolute), decipher, res);
+    return;
+  }
+
+  res.setHeader("Accept-Ranges", "bytes");
+  const range = String(req.headers.range || "");
+  const match = range.match(/^bytes=(\d*)-(\d*)$/);
+  if (range && !match) {
+    res.setHeader("Content-Range", `bytes */${stat.size}`);
+    res.status(416).end();
+    return;
+  }
+  let start = 0;
+  let end = stat.size - 1;
+  if (match) {
+    if (!match[1] && match[2]) {
+      start = Math.max(0, stat.size - Number(match[2]));
+    } else {
+      start = Number(match[1] || 0);
+      end = match[2] ? Number(match[2]) : end;
+    }
+    if (start > end || start >= stat.size || end >= stat.size) {
+      res.setHeader("Content-Range", `bytes */${stat.size}`);
+      res.status(416).end();
+      return;
+    }
+    res.status(206);
+    res.setHeader("Content-Range", `bytes ${start}-${end}/${stat.size}`);
+  }
+  res.setHeader("Content-Length", String(end - start + 1));
+  await pipeline(fs.createReadStream(absolute, { start, end }), res);
+}
+
 async function runGit(args, allowFail = false) {
   const sandboxRoot = getSandboxRoot();
   try {
@@ -708,6 +1031,10 @@ function getRequestOrigin(req) {
   const proto = String(req?.headers?.["x-forwarded-proto"] || req?.protocol || "http").split(",")[0].trim() || "http";
   const host = String(req?.headers?.["x-forwarded-host"] || req?.headers?.host || "").split(",")[0].trim();
   return host ? `${proto}://${host}` : appBaseUrl.replace(/\/+$/, "");
+}
+
+function getPublicBaseUrl(req) {
+  return configuredAppBaseUrl || getRequestOrigin(req);
 }
 
 function getWorkspaceBareRepoHttpsUrl(req, code = getWorkspaceContext().code) {
@@ -2135,21 +2462,129 @@ function resolveMessageContext(body) {
   return null;
 }
 
+async function summarizeDirectoryContents(rootPath) {
+  let size = 0;
+  let fileCount = 0;
+  let directoryCount = 0;
+  const pending = [rootPath];
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    const entries = await fsp.readdir(current, { withFileTypes: true });
+    for (const entry of entries) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        directoryCount += 1;
+        pending.push(entryPath);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      const stat = await fsp.stat(entryPath);
+      size += stat.size;
+      fileCount += 1;
+    }
+  }
+
+  return { size, fileCount, directoryCount };
+}
+
 async function getFileList(pathValue) {
   const { absolute, rel } = resolveSandboxPath(pathValue || "");
   const entries = await fsp.readdir(absolute, { withFileTypes: true });
   const mapped = await Promise.all(entries.map(async (entry) => {
     const entryPath = path.join(absolute, entry.name);
     const stat = await fsp.stat(entryPath);
+    const summary = entry.isDirectory()
+      ? await summarizeDirectoryContents(entryPath)
+      : { size: stat.size, fileCount: 1, directoryCount: 0 };
     return {
       name: entry.name,
       type: entry.isDirectory() ? "directory" : "file",
-      size: stat.size,
+      size: summary.size,
+      fileCount: summary.fileCount,
+      directoryCount: summary.directoryCount,
+      mode: (stat.mode & 0o777).toString(8).padStart(3, "0"),
+      hidden: entry.name.startsWith("."),
+      executable: !entry.isDirectory() && Boolean(stat.mode & 0o111),
       modifiedAt: stat.mtime.toISOString()
     };
   }));
   mapped.sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
   return { path: rel, entries: mapped };
+}
+
+async function getBrowserVideoPreview(pathValue, { waitForReady = true } = {}) {
+  const { absolute, rel } = resolveSandboxPath(pathValue || "");
+  const stat = await fsp.stat(absolute);
+  if (!stat.isFile()) {
+    throw new Error("video preview path must be a file");
+  }
+
+  if (path.extname(rel).toLowerCase() !== ".mov") {
+    return { absolute, rel, transcoded: false };
+  }
+
+  return getCachedMovPreview(
+    absolute,
+    rel,
+    `${getWorkspaceContext().code}\0${rel}\0${stat.size}\0${stat.mtimeMs}`,
+    { waitForReady }
+  );
+}
+
+async function getCachedMovPreview(absolute, rel, cacheIdentity, { waitForReady = true } = {}) {
+  const cacheKey = createHash("sha256").update(cacheIdentity).digest("hex");
+  const outputPath = path.join(videoPreviewCacheRoot, `${cacheKey}.mp4`);
+  await fsp.mkdir(videoPreviewCacheRoot, { recursive: true });
+
+  try {
+    const cachedStat = await fsp.stat(outputPath);
+    if (cachedStat.isFile() && cachedStat.size > 0) {
+      return { absolute: outputPath, rel: `${path.basename(rel, path.extname(rel))}.mp4`, transcoded: true };
+    }
+  } catch {
+    // Generate the preview below.
+  }
+
+  let job = videoPreviewJobs.get(cacheKey);
+  if (job?.error) {
+    throw job.error;
+  }
+  if (!job) {
+    job = { promise: null, error: null };
+    job.promise = (async () => {
+      const tempPath = `${outputPath}.${process.pid}.tmp.mp4`;
+      try {
+        await execFileAsync("ffmpeg", [
+          "-y", "-i", absolute,
+          "-map", "0:v:0", "-map", "0:a:0?",
+          "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+          "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
+          tempPath
+        ], { timeout: videoPreviewTranscodeTimeoutMs, maxBuffer: 2 * 1024 * 1024 });
+        await fsp.rename(tempPath, outputPath);
+      } finally {
+        await fsp.rm(tempPath, { force: true }).catch(() => {});
+      }
+    })();
+    videoPreviewJobs.set(cacheKey, job);
+    job.promise.then(
+      () => videoPreviewJobs.delete(cacheKey),
+      (error) => {
+        job.error = error;
+        setTimeout(() => {
+          if (videoPreviewJobs.get(cacheKey) === job) videoPreviewJobs.delete(cacheKey);
+        }, 5 * 60 * 1000).unref?.();
+      }
+    );
+  }
+  if (!waitForReady) {
+    return { rel: `${path.basename(rel, path.extname(rel))}.mp4`, transcoded: true, preparing: true };
+  }
+  await job.promise;
+  return { absolute: outputPath, rel: `${path.basename(rel, path.extname(rel))}.mp4`, transcoded: true };
 }
 
 async function readTextFile(pathValue) {
@@ -4648,7 +5083,7 @@ async function executeAgentTool(req, callName, args) {
       const result = {
         apis: [
           { method: "GET", path: "/api/config", purpose: "Runtime model/provider configuration" },
-          { method: "POST", path: "/api/chat", purpose: "Chat endpoint (supports agentMode for OpenAI and xAI)" },
+          { method: "POST", path: "/api/chat", purpose: "Chat endpoint (supports agentMode for OpenAI, Google, and xAI)" },
           { method: "GET", path: "/api/tools", purpose: "Tool catalog and capabilities" },
           { method: "GET", path: "/api/notifications?limit=...", purpose: "Recent notify_user entries" },
           { method: "GET", path: "/api/files/list?path=...", purpose: "List directory" },
@@ -5167,7 +5602,8 @@ async function runOpenAiAgentWithTools(req, model, messages, maxSteps = agentMax
       model,
       messages: conversation,
       tools: agentToolDefinitions,
-      tool_choice: "auto"
+      tool_choice: "auto",
+      ...(model.startsWith("gpt-5.6-") ? { reasoning_effort: "none" } : {})
     });
 
     const assistant = completion.choices?.[0]?.message;
@@ -5266,7 +5702,8 @@ async function runOpenAiAgentWithTools(req, model, messages, maxSteps = agentMax
       model,
       messages: conversation,
       tools: agentToolDefinitions,
-      tool_choice: "none"
+      tool_choice: "none",
+      ...(model.startsWith("gpt-5.6-") ? { reasoning_effort: "none" } : {})
     });
     const finalAssistant = finalize.choices?.[0]?.message;
     const finalText = String(finalAssistant?.content || "").trim();
@@ -5329,9 +5766,53 @@ async function createXaiChatCompletion(model, conversation, options = {}) {
   return data;
 }
 
-async function runXaiAgentWithTools(req, model, messages, maxSteps = agentMaxSteps, reasoningEffort = null) {
+async function createGoogleChatCompletion(model, conversation, options = {}) {
+  const payload = {
+    model,
+    messages: conversation,
+    ...options
+  };
+  const abortSignal = options.abortSignal;
+  if (Object.prototype.hasOwnProperty.call(payload, "abortSignal")) {
+    delete payload.abortSignal;
+  }
+
+  const response = await fetch(`${googleApiBaseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${googleApiKey}`
+    },
+    signal: abortSignal,
+    body: JSON.stringify(payload)
+  });
+
+  const rawBody = await response.text();
+  const data = (() => {
+    try {
+      return JSON.parse(rawBody);
+    } catch {
+      return {};
+    }
+  })();
+
+  if (!response.ok) {
+    const details = data?.error?.message
+      || data?.message
+      || rawBody
+      || `HTTP ${response.status}`;
+    const error = new Error(`Google AI request failed: ${details}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  return data;
+}
+
+async function runCompatibleAgentWithTools(req, provider, model, messages, maxSteps = agentMaxSteps, reasoningEffort = null) {
   const executedTools = [];
   const traceId = resolveRequestTraceId(req) || createTraceId();
+  const createCompletion = provider === "google" ? createGoogleChatCompletion : createXaiChatCompletion;
   const latestUserText = [...messages]
     .reverse()
     .find((item) => item.role === "user")?.content || "";
@@ -5347,12 +5828,12 @@ async function runXaiAgentWithTools(req, model, messages, maxSteps = agentMaxSte
 
   for (let step = 0; step < maxSteps; step += 1) {
     assertNotAborted(req);
-    emitJobProgress(req, "agent-step", { step: step + 1, maxSteps, provider: "xai", traceId });
-    const completion = await createXaiChatCompletion(model, conversation, {
+    emitJobProgress(req, "agent-step", { step: step + 1, maxSteps, provider, traceId });
+    const completion = await createCompletion(model, conversation, {
       tools: agentToolDefinitions,
       tool_choice: "auto",
       abortSignal: req?.abortSignal,
-      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
+      ...(provider === "xai" && reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
     });
 
     const assistant = completion?.choices?.[0]?.message;
@@ -5381,7 +5862,7 @@ async function runXaiAgentWithTools(req, model, messages, maxSteps = agentMaxSte
         let output;
         let ok = true;
         emitJobProgress(req, "tool-start", {
-          provider: "xai",
+          provider,
           name: String(name || ""),
           args: sanitizeAuditPayload(args),
           traceId
@@ -5411,7 +5892,7 @@ async function runXaiAgentWithTools(req, model, messages, maxSteps = agentMaxSte
           output: sanitizeAuditPayload(output)
         });
         emitJobProgress(req, "tool-end", {
-          provider: "xai",
+          provider,
           name: String(name || ""),
           ok,
           durationMs,
@@ -5447,11 +5928,11 @@ async function runXaiAgentWithTools(req, model, messages, maxSteps = agentMaxSte
       content: "Tool execution budget has been reached. Do not call tools. Provide a concise final answer summarizing completed actions, outputs, and any remaining blockers."
     });
 
-    const finalize = await createXaiChatCompletion(model, conversation, {
+    const finalize = await createCompletion(model, conversation, {
       tools: agentToolDefinitions,
       tool_choice: "none",
       abortSignal: req?.abortSignal,
-      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
+      ...(provider === "xai" && reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
     });
     const finalAssistant = finalize?.choices?.[0]?.message;
     const finalText = String(finalAssistant?.content || "").trim();
@@ -5487,6 +5968,7 @@ app.use(helmet({
 }));
 
 app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: false, limit: "16kb" }));
 
 app.use((req, res, next) => {
   const traceId = resolveRequestTraceId(req) || createTraceId();
@@ -5504,6 +5986,81 @@ app.use((req, res, next) => {
     setWorkspaceCookie(res, queryCode);
   }
   next();
+});
+
+const publicFileShareLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+app.get("/share/:token", publicFileShareLimiter, async (req, res) => {
+  try {
+    const found = await findActiveFileShare(req.params.token);
+    if (!found) return res.status(404).send("Share not found or expired.");
+    const visibleShare = isFileShareUnlocked(req, found.share)
+      ? { ...found.share, passwordHash: "" }
+      : found.share;
+    return res.type("html").send(renderFileSharePage(req.params.token, visibleShare));
+  } catch {
+    return res.status(404).send("Share not found or unavailable.");
+  }
+});
+
+app.post("/share/:token/unlock", publicFileShareLimiter, async (req, res) => {
+  try {
+    const found = await findActiveFileShare(req.params.token);
+    if (!found?.share?.passwordHash) return res.status(404).send("Share not found or expired.");
+    const candidate = await scryptBuffer(String(req.body?.password || ""), Buffer.from(found.share.passwordSalt, "hex"));
+    const expected = Buffer.from(found.share.passwordHash, "hex");
+    if (candidate.length !== expected.length || !timingSafeEqual(candidate, expected)) {
+      return res.status(401).type("html").send(renderFileSharePage(req.params.token, found.share, { error: "Incorrect password." }));
+    }
+    res.cookie(fileShareUnlockCookieName(found.share), fileShareUnlockValue(found.share), {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: appBaseUrl.startsWith("https://"),
+      maxAge: Math.max(60_000, Math.min(24 * 60 * 60 * 1000, Date.parse(found.share.expiresAt) - Date.now()))
+    });
+    return res.redirect(303, `/share/${encodeURIComponent(req.params.token)}`);
+  } catch {
+    return res.status(400).send("Unable to unlock share.");
+  }
+});
+
+app.get("/share/:token/content", publicFileShareLimiter, async (req, res) => {
+  try {
+    const found = await findActiveFileShare(req.params.token);
+    if (!found) return res.status(404).send("Share not found or expired.");
+    if (!isFileShareUnlocked(req, found.share)) return res.status(401).send("Open the share page and enter its password first.");
+    if (!found.share.encrypted && path.extname(found.share.fileName).toLowerCase() === ".mov") {
+      const absolute = resolveSharedSourcePath(found.share);
+      const stat = await fsp.stat(absolute);
+      const preview = await getCachedMovPreview(
+        absolute,
+        found.share.fileName,
+        `share\0${found.share.workspaceCode}\0${found.share.relativePath}\0${stat.size}\0${stat.mtimeMs}`,
+        { waitForReady: false }
+      );
+      if (preview.preparing) {
+        res.setHeader("Retry-After", "2");
+        return res.status(202).end();
+      }
+    }
+    found.share.accessCount = Number(found.share.accessCount || 0) + 1;
+    found.share.lastAccessedAt = new Date().toISOString();
+    await writeFileShareDb(found.db);
+    return await streamFileShare(req, res, found.share);
+  } catch (error) {
+    if (!res.headersSent) return res.status(404).send("Shared file is unavailable.");
+    res.destroy(error);
+  }
+});
+
+app.get("/share-media.js", publicFileShareLimiter, (_req, res) => {
+  res.type("text/javascript");
+  return res.sendFile(path.join(publicDir, "share-media.js"));
 });
 
 const authEnabled = String(process.env.ENABLE_BASIC_AUTH).toLowerCase() === "true";
@@ -5535,8 +6092,8 @@ if (authEnabled) {
 app.use(
   "/api",
   rateLimit({
-    windowMs: 60 * 1000,
-    max: 20,
+    windowMs: apiRateLimitWindowMs,
+    max: apiRateLimitMax,
     standardHeaders: true,
     legacyHeaders: false
   })
@@ -5565,7 +6122,7 @@ app.use("/api", (req, res, next) => {
   const headerValue = String(req.headers[security.apiKeyHeaderName] || "").trim();
   const providedKey = headerValue;
 
-  if (!providedKey || !security.apiKeys.includes(providedKey)) {
+  if ((!providedKey || !security.apiKeys.includes(providedKey)) && !hasValidBrowserFileSession(req, pathname)) {
     const hint = security.apiKeyRequireHeaderOnly
       ? `Provide header ${security.apiKeyHeaderName}`
       : `Provide header ${security.apiKeyHeaderName}`;
@@ -5616,6 +6173,25 @@ app.use("/api/admin", (req, res, next) => {
   }
 
   next();
+});
+
+app.post("/api/files/browser-session", (req, res) => {
+  const token = randomBytes(32).toString("base64url");
+  const expiresAt = Date.now() + browserFileSessionTtlMs;
+  browserFileSessions.set(token, expiresAt);
+
+  for (const [storedToken, storedExpiresAt] of browserFileSessions) {
+    if (storedExpiresAt <= Date.now()) {
+      browserFileSessions.delete(storedToken);
+    }
+  }
+
+  const secure = req.secure ? "; Secure" : "";
+  res.setHeader(
+    "Set-Cookie",
+    `${browserFileSessionCookieName}=${encodeURIComponent(token)}; Path=/api/files; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(browserFileSessionTtlMs / 1000)}${secure}`
+  );
+  return res.json({ ok: true, expiresAt: new Date(expiresAt).toISOString() });
 });
 
 app.get("/api/admin/security", async (_req, res) => {
@@ -5949,7 +6525,7 @@ async function generateChatResponse(req) {
   assertNotAborted(req);
   const provider = String(req.body?.provider || defaultProvider).trim().toLowerCase();
   const agentMode = Boolean(req.body?.agentMode);
-  if (provider !== "openai" && provider !== "copilot" && provider !== "xai") {
+  if (provider !== "openai" && provider !== "copilot" && provider !== "xai" && provider !== "google") {
     const error = new Error(`provider '${provider}' is not configured on this server yet`);
     error.status = 400;
     throw error;
@@ -5974,7 +6550,7 @@ async function generateChatResponse(req) {
     const model = resolveModel(req.body?.model);
     const reasoningEffort = normalizeReasoningEffort(req.body?.reasoningEffort || req.body?.reasoning_effort);
     if ((req.body?.reasoningEffort || req.body?.reasoning_effort) && !reasoningEffort) {
-      const error = new Error("reasoningEffort must be one of: none, minimal, low, medium, high, xhigh");
+      const error = new Error("reasoningEffort must be one of: none, minimal, low, medium, high, xhigh, max");
       error.status = 400;
       throw error;
     }
@@ -6089,6 +6665,63 @@ async function generateChatResponse(req) {
     };
   }
 
+  if (provider === "google") {
+    if (!googleApiKey) {
+      const error = new Error("google provider is not enabled: missing GOOGLE_API_KEY");
+      error.status = 400;
+      throw error;
+    }
+
+    let model = resolveGoogleModel(req.body?.model);
+    const stepBudget = agentMode ? resolveAgentStepBudget(req) : { maxSteps: agentMaxSteps, override: false };
+    if (agentMode) {
+      const result = await runCompatibleAgentWithTools(req, "google", model, messages, stepBudget.maxSteps);
+      return {
+        reply: result.text,
+        model,
+        provider: "google",
+        traceId,
+        contextCompaction: compaction,
+        agentMode: true,
+        agentMaxStepsUsed: stepBudget.maxSteps,
+        agentMaxStepsOverrideUsed: stepBudget.override,
+        executedTools: result.executedTools
+      };
+    }
+
+    let googleData;
+    try {
+      googleData = await createGoogleChatCompletion(model, messages, {
+        model,
+        messages,
+        abortSignal: req?.abortSignal
+      });
+    } catch (error) {
+      // Some Google models remain listed but are unavailable for specific accounts.
+      if (Number(error?.status || 0) === 404 && model !== googleDefaultModel) {
+        model = googleDefaultModel;
+        googleData = await createGoogleChatCompletion(model, messages, {
+          model,
+          messages,
+          abortSignal: req?.abortSignal
+        });
+      } else {
+        throw error;
+      }
+    }
+    const text = Array.isArray(googleData?.choices)
+      ? (googleData.choices[0]?.message?.content || "")
+      : "";
+
+    return {
+      reply: typeof text === "string" ? text : JSON.stringify(text),
+      model,
+      provider: "google",
+      traceId,
+      contextCompaction: compaction
+    };
+  }
+
   if (!xaiApiKey) {
     const error = new Error("xai provider is not enabled: missing XAI_API_KEY");
     error.status = 400;
@@ -6098,14 +6731,14 @@ async function generateChatResponse(req) {
   const model = resolveXaiModel(req.body?.model);
   const reasoningEffort = normalizeReasoningEffort(req.body?.reasoningEffort || req.body?.reasoning_effort);
   if ((req.body?.reasoningEffort || req.body?.reasoning_effort) && !reasoningEffort) {
-    const error = new Error("reasoningEffort must be one of: none, minimal, low, medium, high, xhigh");
+    const error = new Error("reasoningEffort must be one of: none, minimal, low, medium, high, xhigh, max");
     error.status = 400;
     throw error;
   }
 
   const stepBudget = agentMode ? resolveAgentStepBudget(req) : { maxSteps: agentMaxSteps, override: false };
   if (agentMode) {
-    const result = await runXaiAgentWithTools(req, model, messages, stepBudget.maxSteps, reasoningEffort);
+    const result = await runCompatibleAgentWithTools(req, "xai", model, messages, stepBudget.maxSteps, reasoningEffort);
     return {
       reply: result.text,
       model,
@@ -6307,6 +6940,9 @@ app.get("/api/config", (_req, res) => {
   if (githubPat) {
     supportedProviders.push("copilot");
   }
+  if (googleApiKey) {
+    supportedProviders.push("google");
+  }
   if (xaiApiKey) {
     supportedProviders.push("xai");
   }
@@ -6315,10 +6951,16 @@ app.get("/api/config", (_req, res) => {
     defaultProvider,
     defaultModel,
     allowedModels,
+    googleDefaultModel,
+    googleAllowedModels,
     xaiDefaultModel,
     xaiAllowedModels,
     supportedProviders,
-    agentModeSupportedProviders: xaiApiKey ? ["openai", "xai"] : ["openai"],
+    agentModeSupportedProviders: [
+      ...(openaiApiKey ? ["openai"] : []),
+      ...(googleApiKey ? ["google"] : []),
+      ...(xaiApiKey ? ["xai"] : [])
+    ],
     agentStepOverride: {
       enabled: Boolean(security.agentMaxStepsOverrideCode),
       baseMaxSteps: agentMaxSteps,
@@ -6598,24 +7240,9 @@ app.get("/api/notifications", async (req, res) => {
 
 app.get("/api/files/list", async (req, res) => {
   try {
-    const { absolute, rel } = resolveSandboxPath(req.query.path || "");
-    const entries = await fsp.readdir(absolute, { withFileTypes: true });
-    const mapped = await Promise.all(entries.map(async (entry) => {
-      const entryPath = path.join(absolute, entry.name);
-      const stat = await fsp.stat(entryPath);
-      return {
-        name: entry.name,
-        type: entry.isDirectory() ? "directory" : "file",
-        size: stat.size,
-        mode: (stat.mode & 0o777).toString(8).padStart(3, "0"),
-        hidden: entry.name.startsWith("."),
-        executable: !entry.isDirectory() && Boolean(stat.mode & 0o111),
-        modifiedAt: stat.mtime.toISOString()
-      };
-    }));
-    mapped.sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
-    await appendAuditLog(req, "list", { path: rel, count: mapped.length });
-    return res.json({ path: rel, entries: mapped });
+    const result = await getFileList(req.query.path || "");
+    await appendAuditLog(req, "list", { path: result.path, count: result.entries.length });
+    return res.json(result);
   } catch (error) {
     return res.status(400).json({ error: String(error?.message || "Failed to list directory") });
   }
@@ -6890,6 +7517,135 @@ app.get("/api/files/download", async (req, res) => {
     return res.download(absolute, path.basename(rel || absolute));
   } catch (error) {
     return res.status(400).json({ error: String(error?.message || "Failed to download path") });
+  }
+});
+
+app.get("/api/files/video-preview", async (req, res) => {
+  try {
+    const preview = await getBrowserVideoPreview(req.query.path || "", { waitForReady: req.method !== "HEAD" });
+    if (preview.preparing) {
+      res.setHeader("Retry-After", "2");
+      return res.status(202).end();
+    }
+    res.setHeader("Content-Type", preview.transcoded ? "video/mp4" : fileShareMimeType(preview.rel));
+    res.setHeader("Content-Disposition", `inline; filename="${path.basename(preview.rel).replaceAll('"', '')}"`);
+    return res.sendFile(preview.absolute);
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to prepare video preview") });
+  }
+});
+
+app.get("/api/files/media-preview", async (req, res) => {
+  try {
+    const { absolute, rel } = resolveSandboxPath(req.query.path || "");
+    const stat = await fsp.stat(absolute);
+    if (!stat.isFile()) return res.status(400).json({ error: "media preview path must be a file" });
+    res.setHeader("Content-Type", fileShareMimeType(rel));
+    res.setHeader("Content-Disposition", `inline; filename="${path.basename(rel).replaceAll('"', '')}"`);
+    return res.sendFile(absolute);
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to stream media preview") });
+  }
+});
+
+app.get("/api/files/shares", async (req, res) => {
+  try {
+    const db = await readFileShareDb();
+    const workspaceCode = getWorkspaceContext().code;
+    const activeShares = db.shares
+      .filter((share) => share.workspaceCode === workspaceCode && !share.revokedAt)
+      .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
+    const publicBaseUrl = getPublicBaseUrl(req);
+    const shares = await Promise.all(activeShares.map((share) => publicFileShareRecordWithUrls(share, publicBaseUrl)));
+    return res.json({ shares });
+  } catch (error) {
+    return res.status(500).json({ error: String(error?.message || "Failed to list file shares") });
+  }
+});
+
+app.post("/api/files/shares", async (req, res) => {
+  let encryptedPath = "";
+  try {
+    const { absolute, rel } = resolveSandboxPath(req.body?.path || "");
+    const stat = await fsp.stat(absolute);
+    if (!stat.isFile()) return res.status(400).json({ error: "Only files can be shared" });
+
+    const expiresInHours = Number(req.body?.expiresInHours ?? 168);
+    if (!Number.isFinite(expiresInHours) || expiresInHours < 1 || expiresInHours > 8760) {
+      return res.status(400).json({ error: "Expiration must be between 1 and 8760 hours" });
+    }
+    const password = String(req.body?.password || "");
+    if (password.length > 256) return res.status(400).json({ error: "Password is too long" });
+    const encrypted = Boolean(req.body?.encrypted);
+    if (encrypted && !fileShareEncryptionSecret) {
+      return res.status(400).json({ error: "Encrypted shares require FILE_SHARE_ENCRYPTION_SECRET on the server" });
+    }
+
+    const token = randomBytes(32).toString("base64url");
+    const id = randomBytes(12).toString("hex");
+    const passwordSalt = password ? randomBytes(16) : null;
+    const passwordHash = password ? await scryptBuffer(password, passwordSalt) : null;
+    const share = {
+      id,
+      tokenHash: fileShareTokenHash(token),
+      ...await encryptFileShareToken(token),
+      ...await encryptFileSharePassword(password),
+      workspaceCode: getWorkspaceContext().code,
+      relativePath: rel,
+      fileName: path.basename(rel || absolute),
+      size: stat.size,
+      mimeType: fileShareMimeType(rel),
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + expiresInHours * 60 * 60 * 1000).toISOString(),
+      passwordSalt: passwordSalt?.toString("hex") || "",
+      passwordHash: passwordHash?.toString("hex") || "",
+      encrypted,
+      accessCount: 0
+    };
+
+    if (encrypted) {
+      await fsp.mkdir(fileShareDataRoot, { recursive: true });
+      const salt = randomBytes(16);
+      const iv = randomBytes(12);
+      const key = await scryptBuffer(fileShareEncryptionSecret, salt);
+      const cipher = createCipheriv("aes-256-gcm", key, iv);
+      const encryptedFile = `${id}.enc`;
+      encryptedPath = path.join(fileShareDataRoot, encryptedFile);
+      await pipeline(fs.createReadStream(absolute), cipher, fs.createWriteStream(encryptedPath, { mode: 0o600 }));
+      share.encryptedFile = encryptedFile;
+      share.encryptionSalt = salt.toString("hex");
+      share.encryptionIv = iv.toString("hex");
+      share.encryptionTag = cipher.getAuthTag().toString("hex");
+    }
+
+    const db = await readFileShareDb();
+    db.shares.push(share);
+    await writeFileShareDb(db);
+    await appendAuditLog(req, "create-file-share", { path: rel, shareId: id, encrypted, expiresAt: share.expiresAt });
+    const baseUrl = getPublicBaseUrl(req);
+    return res.status(201).json({
+      share: publicFileShareRecord(share),
+      viewUrl: `${baseUrl}/share/${token}`,
+      directUrl: `${baseUrl}/share/${token}/content`
+    });
+  } catch (error) {
+    if (encryptedPath) await fsp.unlink(encryptedPath).catch(() => {});
+    return res.status(400).json({ error: String(error?.message || "Failed to create file share") });
+  }
+});
+
+app.delete("/api/files/shares/:id", async (req, res) => {
+  try {
+    const db = await readFileShareDb();
+    const share = db.shares.find((item) => item.id === req.params.id && item.workspaceCode === getWorkspaceContext().code && !item.revokedAt);
+    if (!share) return res.status(404).json({ error: "File share not found" });
+    share.revokedAt = new Date().toISOString();
+    await writeFileShareDb(db);
+    if (share.encryptedFile) await fsp.unlink(resolveSharedSourcePath(share)).catch(() => {});
+    await appendAuditLog(req, "revoke-file-share", { path: share.relativePath, shareId: share.id });
+    return res.json({ ok: true });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to revoke file share") });
   }
 });
 
@@ -7300,6 +8056,6 @@ await ensureSandboxReady();
 await loadAdminSecuritySettings();
 scheduleNightlyWorkspaceBackups();
 
-app.listen(port, () => {
-  console.log(`Remote AI Access running at ${appBaseUrl}`);
+app.listen(port, host, () => {
+  console.log(`Remote AI Access listening on ${host}:${port} (${appBaseUrl})`);
 });

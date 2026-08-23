@@ -43,30 +43,47 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
 
 - `PORT`: server port, default `8787`
 - `APP_BASE_URL`: for CSP/connect settings, ex: `http://localhost:8787`
+- `API_RATE_LIMIT_WINDOW_MS`: rate-limit window for `/api` routes in ms (default `60000`)
+- `API_RATE_LIMIT_MAX`: max `/api` requests per window per IP (default `3000`)
 - `OPENAI_API_KEY`: required
-- `OPENAI_MODEL`: default `gpt-4.1` (change to your preferred available model)
+- `OPENAI_MODEL`: default `gpt-4.1` (current frontier choices include `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`)
+- `GOOGLE_API_KEY`: optional; enables `google` provider (Gemini via OpenAI-compatible endpoint)
+- `GOOGLE_MODEL`: default Google model (default `gemini-3.7-flash`)
+- `GOOGLE_API_BASE_URL`: Google OpenAI-compatible base URL (default `https://generativelanguage.googleapis.com/v1beta/openai`)
+- `GOOGLE_ALLOWED_MODELS`: optional comma-separated Google allow-list
 - `XAI_API_KEY`: optional; enables `xai` provider (Grok)
-- `XAI_MODEL`: default xAI model (default `grok-4.3`)
+- `XAI_MODEL`: default xAI model (default `grok-4.6`)
 - `XAI_API_BASE_URL`: xAI OpenAI-compatible base URL (default `https://api.x.ai/v1`)
 - `XAI_ALLOWED_MODELS`: optional comma-separated xAI allow-list
 - `ENABLE_BASIC_AUTH`: `true` or `false`
 - `BASIC_AUTH_USER`, `BASIC_AUTH_PASS`: only used if basic auth enabled
+- `HOST`: Node listen address (default `127.0.0.1`; keep loopback when using a reverse proxy)
 - `ALLOWED_ORIGINS`: optional comma-separated CORS allowlist for `/api/chat`
 - `SANDBOX_ROOT`: folder used by file APIs (default `./sandbox`)
 - `FILE_API_MAX_READ_BYTES`: max bytes for file read endpoint (default `1048576`)
 - `FILE_API_UPLOAD_MAX_BYTES`: max upload bytes (default `20971520`)
+- `FILE_SHARE_DB_PATH`: public-share metadata store (default `./sandbox/_admin/file-shares.json`)
+- `FILE_SHARE_DATA_ROOT`: encrypted share snapshot folder (default `./sandbox/_admin/file-share-data`)
+- `FILE_SHARE_ENCRYPTION_SECRET`: long server secret required to create encrypted share snapshots
 - `SANDBOX_GIT_USER_NAME`, `SANDBOX_GIT_USER_EMAIL`: git commit identity for sandbox snapshots
 
 ## File Lab features
 
 - `filelab.html`: in-browser CodeMirror editor
 - Drag and drop upload, multi-file upload, and folder upload
+- File rows show human-readable sizes; folder rows show recursive size plus contained file/folder counts
 - Directory browsing + read/write + download + move + rename + delete
 - Format endpoint using Prettier
 - Lint endpoint for JS/TS feedback with ESLint
 - Side-by-side diff preview before save in the editor
 - Inline lint markers in editor gutter after lint run
+- Image previews stream directly instead of buffering the full file in browser memory
+- Video previews stream with byte-range seeking; MOV preparation runs asynchronously and is cached as browser-compatible H.264/AAC MP4 when FFmpeg is available
 - Git log and revert actions for sandbox rollback
+- Expiring public file shares with optional passwords, encrypted snapshots, access counts, and revocation
+- Unencrypted, unpassworded direct media links support HTTP byte ranges for browser and external video players
+- Password-protected links require browser unlock; encrypted links intentionally do not support byte-range seeking
+- Public share URLs use `APP_BASE_URL` when configured, otherwise the trusted reverse-proxy request origin
 
 ## Chat archive and portability
 
@@ -76,11 +93,12 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
 - Main chat page includes per-reply copy buttons for Markdown, plain text, and rendered HTML
 - One-click button to copy all assistant replies in active chat
 - Markdown rendering now supports horizontal rules (`---`) and GitHub-style tables
+- Browser-local chat/global context entries support master toggles and individual include/exclude controls for every line
 - Chat requests support automatic provider-context compaction when message size limits are hit. This only changes the payload sent to the model; full local chat history remains available through Archive and History JSON.
 
 ## Agent tool-calling mode
 
-- Chat UI includes an `Agent Tools` toggle (OpenAI provider).
+- Chat UI includes an `Agent Tools` toggle for configured OpenAI, Google Gemini, and xAI providers.
 - When enabled, `/api/chat` runs a server-side tool-calling loop so the model can actually execute tools.
 - Built-in agent tools:
    - `list_tools`, `list_apis`, `tool_status`

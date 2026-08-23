@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=20260823f" />
   </head>
   <body>
     <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
@@ -42,6 +42,8 @@
           <button id="moveBtn" class="btn btn-soft" type="button">Move</button>
           <button id="deleteBtn" class="btn btn-soft danger" type="button">Delete</button>
           <button id="downloadBtn" class="btn btn-soft" type="button">Download</button>
+          <button id="copyDirectLinkBtn" class="btn btn-soft" type="button">Copy Link</button>
+          <button id="shareFileBtn" class="btn btn-soft" type="button">Share File</button>
         </div>
 
         <div id="downloadProgress" class="download-progress" hidden aria-live="polite">
@@ -119,6 +121,39 @@
           </div>
         </section>
 
+        <section id="sharePanel" class="card share-panel reveal" style="--d: 105ms" aria-labelledby="sharePanelTitle">
+          <div class="git-panel-head">
+            <div>
+              <h2 id="sharePanelTitle">Public Shares</h2>
+              <p id="shareSelectionLabel">Select a file to create an expiring public link.</p>
+            </div>
+            <button id="refreshSharesBtn" class="btn btn-soft" type="button">Refresh</button>
+          </div>
+          <div class="share-controls">
+            <label>Expires
+              <select id="shareExpirySelect">
+                <option value="1">1 hour</option>
+                <option value="24">1 day</option>
+                <option value="168" selected>7 days</option>
+                <option value="720">30 days</option>
+              </select>
+            </label>
+            <label>Password
+              <input id="sharePasswordInput" type="password" maxlength="256" placeholder="Optional" autocomplete="new-password" />
+            </label>
+            <label class="share-toggle"><input id="shareEncryptInput" type="checkbox" /> Encrypt stored copy</label>
+            <button id="createShareBtn" class="btn" type="button">Create Share</button>
+          </div>
+          <p class="share-compat-note">Direct video players work with links that have no password or encryption. Encrypted links do not support seeking.</p>
+          <div id="shareResult" class="share-result" hidden>
+            <label>View URL <input id="shareViewUrlInput" type="text" readonly /></label>
+            <button id="copyShareViewBtn" class="btn btn-soft" type="button">Copy View URL</button>
+            <label>Direct URL <input id="shareDirectUrlInput" type="text" readonly /></label>
+            <button id="copyShareDirectBtn" class="btn btn-soft" type="button">Copy Direct URL</button>
+          </div>
+          <div id="shareList" class="share-list" aria-live="polite"></div>
+        </section>
+
         <section class="card editor-panel reveal" style="--d: 120ms">
           <div class="editor-meta">
             <strong id="activePathLabel">No file selected</strong>
@@ -152,6 +187,27 @@
           </div>
         </section>
 
+        <section class="card preview-panel reveal" style="--d: 140ms" aria-labelledby="filePreviewTitle">
+          <div class="preview-head-row">
+            <div>
+              <h2 id="filePreviewTitle">Preview</h2>
+              <p id="previewMetaLabel" class="muted-inline">Select a file to preview markdown, html, images, or videos.</p>
+            </div>
+            <div class="top-actions">
+              <span id="previewTypeChip" class="tool-chip">No preview</span>
+              <button id="refreshPreviewBtn" class="btn btn-soft" type="button">Refresh Preview</button>
+              <button id="openPreviewNewTabBtn" class="btn btn-soft" type="button">Open Preview</button>
+            </div>
+          </div>
+          <div id="previewRoot" class="preview-root">
+            <div id="previewEmpty" class="preview-empty">No preview available for this selection.</div>
+            <article id="previewMarkdown" class="preview-markdown" hidden></article>
+            <iframe id="previewHtmlFrame" class="preview-html-frame" title="HTML Preview" sandbox="allow-same-origin allow-scripts" hidden></iframe>
+            <img id="previewImage" class="preview-image" alt="Selected image preview" hidden />
+            <video id="previewVideo" class="preview-video" controls preload="metadata" hidden></video>
+          </div>
+        </section>
+
         <section id="diffModal" class="diff-modal" aria-hidden="true">
           <div class="card diff-dialog">
             <h2>Review Changes Before Save</h2>
@@ -175,6 +231,6 @@
     </main>
 
     <script src="api-auth.js"></script>
-    <script type="module" src="filelab.js?v=20260612b"></script>
+    <script type="module" src="filelab.js?v=20260823f"></script>
   </body>
 </html>

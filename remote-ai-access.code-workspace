@@ -133,6 +133,7 @@
 			"iex": false
 		},
 		"chat.tools.terminal.ignoreDefaultAutoApproveRules": true,
-		"chat.tools.terminal.preventShellHistory": false
+		"chat.tools.terminal.preventShellHistory": false,
+		"compile-hero.disable-compile-files-on-did-save-code": false
 	}
 }

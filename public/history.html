@@ -27,9 +27,12 @@
             <a class="btn btn-soft" href="index.html">Back to Chat</a>
             <button id="themeToggle" class="btn btn-soft" type="button">Dark mode</button>
             <button id="copyBtn" class="btn btn-soft" type="button">Copy JSON</button>
+            <button id="repairHistoryStateBtn" class="btn btn-soft" type="button">Repair Chat State</button>
             <button id="downloadBtn" class="btn">Download</button>
           </div>
         </header>
+
+        <p id="historyStatus" class="muted-inline" style="margin: 8px 2px 0;">Ready.</p>
 
         <section class="card chat-panel" style="min-height: 65vh;">
           <pre id="jsonOutput" style="margin: 0;"></pre>
@@ -37,7 +40,7 @@
       </section>
     </main>
 
-    <script src="api-auth.js"></script>
-    <script type="module" src="history.js"></script>
+    <script src="api-auth.js?v=20260805a"></script>
+    <script type="module" src="history.js?v=20260805a"></script>
   </body>
 </html>
