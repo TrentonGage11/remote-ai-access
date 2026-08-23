@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="styles.css?v=20260823f" />
+    <link rel="stylesheet" href="styles.css?v=20260823g" />
   </head>
   <body>
     <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
@@ -195,6 +195,7 @@
             </div>
             <div class="top-actions">
               <span id="previewTypeChip" class="tool-chip">No preview</span>
+              <button id="previewToggleBtn" class="btn btn-soft" type="button" aria-expanded="true" aria-controls="previewRoot">Hide Preview</button>
               <button id="refreshPreviewBtn" class="btn btn-soft" type="button">Refresh Preview</button>
               <button id="openPreviewNewTabBtn" class="btn btn-soft" type="button">Open Preview</button>
             </div>
@@ -205,6 +206,7 @@
             <iframe id="previewHtmlFrame" class="preview-html-frame" title="HTML Preview" sandbox="allow-same-origin allow-scripts" hidden></iframe>
             <img id="previewImage" class="preview-image" alt="Selected image preview" hidden />
             <video id="previewVideo" class="preview-video" controls preload="metadata" hidden></video>
+            <audio id="previewAudio" class="preview-audio" controls preload="metadata" hidden></audio>
           </div>
         </section>
 
@@ -231,6 +233,6 @@
     </main>
 
     <script src="api-auth.js"></script>
-    <script type="module" src="filelab.js?v=20260823f"></script>
+    <script type="module" src="filelab.js?v=20260823g"></script>
   </body>
 </html>

@@ -163,8 +163,10 @@ const previewMarkdownEl = document.getElementById("previewMarkdown");
 const previewHtmlFrameEl = document.getElementById("previewHtmlFrame");
 const previewImageEl = document.getElementById("previewImage");
 const previewVideoEl = document.getElementById("previewVideo");
+const previewAudioEl = document.getElementById("previewAudio");
 const previewTypeChipEl = document.getElementById("previewTypeChip");
 const previewMetaLabelEl = document.getElementById("previewMetaLabel");
+const previewToggleBtnEl = document.getElementById("previewToggleBtn");
 const refreshPreviewBtnEl = document.getElementById("refreshPreviewBtn");
 const openPreviewNewTabBtnEl = document.getElementById("openPreviewNewTabBtn");
 
@@ -223,8 +225,11 @@ const IMAGE_EXTENSIONS = new Set([
   "dib", "svg", "svgz", "ico", "cur", "apng", "avif", "tif", "tiff", "heic", "heif"
 ]);
 const VIDEO_EXTENSIONS = new Set([
-  "mp4", "m4v", "webm", "ogv", "ogg", "mov", "mkv", "avi", "wmv", "flv", "f4v",
+  "mp4", "m4v", "webm", "ogv", "mov", "mkv", "avi", "wmv", "flv", "f4v",
   "mpeg", "mpg", "mpe", "3gp", "3g2", "mts", "m2ts", "ts"
+]);
+const AUDIO_EXTENSIONS = new Set([
+  "mp3", "wav", "wave", "ogg", "oga", "opus", "m4a", "aac", "flac", "wma"
 ]);
 
 let currentDir = "";
@@ -802,6 +807,9 @@ function detectPreviewKind(pathValue) {
   if (VIDEO_EXTENSIONS.has(ext)) {
     return "video";
   }
+  if (AUDIO_EXTENSIONS.has(ext)) {
+    return "audio";
+  }
   return "none";
 }
 
@@ -823,7 +831,7 @@ function setPreviewMeta(pathValue, kind, note = "") {
     } else if (pathValue) {
       previewMetaLabelEl.textContent = `Previewing ${pathValue}`;
     } else {
-      previewMetaLabelEl.textContent = "Select a file to preview markdown, html, images, or videos.";
+      previewMetaLabelEl.textContent = "Select a file to preview markdown, html, images, video, or audio.";
     }
   }
 }
@@ -838,6 +846,7 @@ function setPreviewVisibility(kind) {
   if (previewHtmlFrameEl) previewHtmlFrameEl.hidden = kind !== "html";
   if (previewImageEl) previewImageEl.hidden = kind !== "image";
   if (previewVideoEl) previewVideoEl.hidden = kind !== "video";
+  if (previewAudioEl) previewAudioEl.hidden = kind !== "audio";
 }
 
 function renderSimpleMarkdown(markdownText) {
@@ -1092,12 +1101,17 @@ async function loadPreview(pathValue, { force = false } = {}) {
       previewVideoEl.removeAttribute("src");
       previewVideoEl.load();
     }
+    if (previewAudioEl) {
+      previewAudioEl.pause();
+      previewAudioEl.removeAttribute("src");
+      previewAudioEl.load();
+    }
     if (previewHtmlFrameEl) previewHtmlFrameEl.srcdoc = "";
     if (previewMarkdownEl) previewMarkdownEl.innerHTML = "";
     setPreviewVisibility("none");
     setPreviewMeta(normalizedPath, "none", normalizedPath
-      ? `No markdown/html/image/video preview for ${normalizedPath}.`
-      : "Select a file to preview markdown, html, images, or videos.");
+      ? `No markdown/html/image/video/audio preview for ${normalizedPath}.`
+      : "Select a file to preview markdown, html, images, video, or audio.");
     previewPath = normalizedPath;
     return;
   }
@@ -1121,17 +1135,22 @@ async function loadPreview(pathValue, { force = false } = {}) {
         previewVideoEl.load();
       }
       setPreviewVisibility("video");
-      setPreviewMeta(normalizedPath, kind, getPathExtension(normalizedPath) === "mov"
-        ? `Playing browser-compatible MP4 preview of ${normalizedPath}`
-        : `Streaming ${normalizedPath}`);
+      const directVideo = ["mp4", "m4v"].includes(getPathExtension(normalizedPath));
+      setPreviewMeta(normalizedPath, kind, directVideo
+        ? `Streaming ${normalizedPath}`
+        : `Playing browser-compatible MP4 preview of ${normalizedPath}`);
       return;
     }
 
-    if (kind === "image") {
+    if (kind === "image" || kind === "audio") {
       await ensureBrowserFileSession();
-      const imageUrl = `/api/files/media-preview?${new URLSearchParams({ path: normalizedPath }).toString()}`;
-      if (previewImageEl) previewImageEl.src = imageUrl;
-      setPreviewVisibility("image");
+      const mediaUrl = `/api/files/media-preview?${new URLSearchParams({ path: normalizedPath }).toString()}`;
+      if (kind === "image" && previewImageEl) previewImageEl.src = mediaUrl;
+      if (kind === "audio" && previewAudioEl) {
+        previewAudioEl.src = mediaUrl;
+        previewAudioEl.load();
+      }
+      setPreviewVisibility(kind);
       setPreviewMeta(normalizedPath, kind, `Streaming ${normalizedPath}`);
       return;
     }
@@ -2831,6 +2850,15 @@ if (refreshPreviewBtnEl) {
   });
 }
 
+if (previewToggleBtnEl && previewRootEl) {
+  previewToggleBtnEl.addEventListener("click", () => {
+    const expanded = previewToggleBtnEl.getAttribute("aria-expanded") === "true";
+    previewToggleBtnEl.setAttribute("aria-expanded", String(!expanded));
+    previewToggleBtnEl.textContent = expanded ? "Show Preview" : "Hide Preview";
+    previewRootEl.hidden = expanded;
+  });
+}
+
 if (openPreviewNewTabBtnEl) {
   openPreviewNewTabBtnEl.addEventListener("click", async () => {
     const pathTarget = normalizeRelativePath(selectedPath || activeFilePath);
@@ -2843,7 +2871,7 @@ if (openPreviewNewTabBtnEl) {
       setStatus("Selected file type does not support preview.");
       return;
     }
-    const endpoint = kind === "video" ? "/api/files/video-preview" : kind === "image" ? "/api/files/media-preview" : "/api/files/download";
+    const endpoint = kind === "video" ? "/api/files/video-preview" : ["image", "audio"].includes(kind) ? "/api/files/media-preview" : "/api/files/download";
     const targetUrl = `${endpoint}?${new URLSearchParams({ path: pathTarget }).toString()}`;
     const previewWindow = window.open("about:blank", "_blank");
     if (!previewWindow) {

@@ -1339,6 +1339,12 @@ textarea:focus {
   background: #000;
 }
 
+.preview-audio {
+  display: block;
+  width: calc(100% - 36px);
+  margin: 36px 18px;
+}
+
 .editor-meta {
   display: flex;
   justify-content: space-between;

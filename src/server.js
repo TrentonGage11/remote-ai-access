@@ -246,6 +246,8 @@ const browserFileSessionTtlMs = 2 * 60 * 60 * 1000;
 const browserFileSessions = new Map();
 const videoPreviewCacheRoot = path.join(os.tmpdir(), "remote-ai-video-preview-cache");
 const videoPreviewJobs = new Map();
+const imagePreviewCacheRoot = path.join(os.tmpdir(), "remote-ai-image-preview-cache");
+const imagePreviewJobs = new Map();
 const adminDashboardToken = String(process.env.ADMIN_DASHBOARD_TOKEN || "").trim();
 const adminSettingsDbPath = path.resolve(process.env.ADMIN_SETTINGS_DB_PATH || path.join(sandboxBaseRoot, "_admin", "settings-db.json"));
 let adminSettingsCache = null;
@@ -727,8 +729,21 @@ const fileShareMimeTypes = new Map([
   [".css", "text/css; charset=utf-8"], [".csv", "text/csv; charset=utf-8"], [".htm", "text/html; charset=utf-8"],
   [".html", "text/html; charset=utf-8"], [".js", "text/javascript; charset=utf-8"], [".json", "application/json; charset=utf-8"],
   [".md", "text/markdown; charset=utf-8"], [".pdf", "application/pdf"], [".txt", "text/plain; charset=utf-8"],
-  [".mp3", "audio/mpeg"], [".ogg", "audio/ogg"], [".wav", "audio/wav"]
+  [".aac", "audio/aac"], [".flac", "audio/flac"], [".m4a", "audio/mp4"], [".mp3", "audio/mpeg"],
+  [".oga", "audio/ogg"], [".ogg", "audio/ogg"], [".opus", "audio/ogg"], [".wav", "audio/wav"],
+  [".wave", "audio/wav"], [".wma", "audio/x-ms-wma"]
 ]);
+
+const browserNativeVideoExtensions = new Set([".mp4", ".m4v"]);
+const browserImageConversionExtensions = new Set([".tif", ".tiff"]);
+
+function shouldTranscodeVideo(fileName) {
+  return fileShareMimeType(fileName).startsWith("video/") && !browserNativeVideoExtensions.has(path.extname(fileName).toLowerCase());
+}
+
+function shouldConvertImage(fileName) {
+  return browserImageConversionExtensions.has(path.extname(fileName).toLowerCase());
+}
 
 function fileShareMimeType(fileName) {
   return fileShareMimeTypes.get(path.extname(String(fileName || "")).toLowerCase()) || "application/octet-stream";
@@ -898,9 +913,9 @@ function renderFileSharePage(token, share, { error = "" } = {}) {
   const tokenPath = encodeURIComponent(token);
   const contentUrl = `/share/${tokenPath}/content`;
   const locked = Boolean(share.passwordHash);
-  const preparingMov = !share.encrypted && path.extname(share.fileName).toLowerCase() === ".mov";
+  const preparingVideo = !share.encrypted && shouldTranscodeVideo(share.fileName);
   const media = share.mimeType.startsWith("video/")
-    ? preparingMov
+    ? preparingVideo
       ? `<p id="media-status">Preparing browser-compatible video…</p><video id="shared-video" controls preload="metadata" data-content-url="${contentUrl}"></video><script src="/share-media.js" defer></script>`
       : `<video controls preload="metadata" src="${contentUrl}"></video>`
     : share.mimeType.startsWith("audio/")
@@ -919,8 +934,8 @@ async function streamFileShare(req, res, share) {
   let stat = await fsp.stat(absolute);
   let safeName = String(share.fileName || "shared-file").replace(/[\r\n"]/g, "_");
   let mimeType = share.mimeType || fileShareMimeType(safeName);
-  if (!share.encrypted && path.extname(safeName).toLowerCase() === ".mov") {
-    const preview = await getCachedMovPreview(
+  if (!share.encrypted && shouldTranscodeVideo(safeName)) {
+    const preview = await getCachedVideoPreview(
       absolute,
       safeName,
       `share\0${share.workspaceCode}\0${share.relativePath}\0${stat.size}\0${stat.mtimeMs}`,
@@ -2522,11 +2537,11 @@ async function getBrowserVideoPreview(pathValue, { waitForReady = true } = {}) {
     throw new Error("video preview path must be a file");
   }
 
-  if (path.extname(rel).toLowerCase() !== ".mov") {
+  if (!shouldTranscodeVideo(rel)) {
     return { absolute, rel, transcoded: false };
   }
 
-  return getCachedMovPreview(
+  return getCachedVideoPreview(
     absolute,
     rel,
     `${getWorkspaceContext().code}\0${rel}\0${stat.size}\0${stat.mtimeMs}`,
@@ -2534,7 +2549,7 @@ async function getBrowserVideoPreview(pathValue, { waitForReady = true } = {}) {
   );
 }
 
-async function getCachedMovPreview(absolute, rel, cacheIdentity, { waitForReady = true } = {}) {
+async function getCachedVideoPreview(absolute, rel, cacheIdentity, { waitForReady = true } = {}) {
   const cacheKey = createHash("sha256").update(cacheIdentity).digest("hex");
   const outputPath = path.join(videoPreviewCacheRoot, `${cacheKey}.mp4`);
   await fsp.mkdir(videoPreviewCacheRoot, { recursive: true });
@@ -2585,6 +2600,51 @@ async function getCachedMovPreview(absolute, rel, cacheIdentity, { waitForReady 
   }
   await job.promise;
   return { absolute: outputPath, rel: `${path.basename(rel, path.extname(rel))}.mp4`, transcoded: true };
+}
+
+async function getBrowserImagePreview(pathValue) {
+  const { absolute, rel } = resolveSandboxPath(pathValue || "");
+  const stat = await fsp.stat(absolute);
+  if (!stat.isFile()) {
+    throw new Error("image preview path must be a file");
+  }
+  if (!shouldConvertImage(rel)) {
+    return { absolute, rel, converted: false };
+  }
+
+  const cacheKey = createHash("sha256")
+    .update(`${getWorkspaceContext().code}\0${rel}\0${stat.size}\0${stat.mtimeMs}`)
+    .digest("hex");
+  const outputPath = path.join(imagePreviewCacheRoot, `${cacheKey}.png`);
+  await fsp.mkdir(imagePreviewCacheRoot, { recursive: true });
+  try {
+    const cachedStat = await fsp.stat(outputPath);
+    if (cachedStat.isFile() && cachedStat.size > 0) {
+      return { absolute: outputPath, rel: `${path.basename(rel, path.extname(rel))}.png`, converted: true };
+    }
+  } catch {
+    // Generate the preview below.
+  }
+
+  let job = imagePreviewJobs.get(cacheKey);
+  if (!job) {
+    job = (async () => {
+      const tempPath = `${outputPath}.${process.pid}.tmp.png`;
+      try {
+        await execFileAsync("ffmpeg", ["-y", "-i", absolute, "-frames:v", "1", tempPath], {
+          timeout: Math.min(videoPreviewTranscodeTimeoutMs, 120_000),
+          maxBuffer: 2 * 1024 * 1024
+        });
+        await fsp.rename(tempPath, outputPath);
+      } finally {
+        await fsp.rm(tempPath, { force: true }).catch(() => {});
+      }
+    })();
+    imagePreviewJobs.set(cacheKey, job);
+    job.finally(() => imagePreviewJobs.delete(cacheKey)).catch(() => {});
+  }
+  await job;
+  return { absolute: outputPath, rel: `${path.basename(rel, path.extname(rel))}.png`, converted: true };
 }
 
 async function readTextFile(pathValue) {
@@ -6034,10 +6094,10 @@ app.get("/share/:token/content", publicFileShareLimiter, async (req, res) => {
     const found = await findActiveFileShare(req.params.token);
     if (!found) return res.status(404).send("Share not found or expired.");
     if (!isFileShareUnlocked(req, found.share)) return res.status(401).send("Open the share page and enter its password first.");
-    if (!found.share.encrypted && path.extname(found.share.fileName).toLowerCase() === ".mov") {
+    if (!found.share.encrypted && shouldTranscodeVideo(found.share.fileName)) {
       const absolute = resolveSharedSourcePath(found.share);
       const stat = await fsp.stat(absolute);
-      const preview = await getCachedMovPreview(
+      const preview = await getCachedVideoPreview(
         absolute,
         found.share.fileName,
         `share\0${found.share.workspaceCode}\0${found.share.relativePath}\0${stat.size}\0${stat.mtimeMs}`,
@@ -7537,12 +7597,17 @@ app.get("/api/files/video-preview", async (req, res) => {
 
 app.get("/api/files/media-preview", async (req, res) => {
   try {
-    const { absolute, rel } = resolveSandboxPath(req.query.path || "");
-    const stat = await fsp.stat(absolute);
+    const preview = shouldConvertImage(req.query.path || "")
+      ? await getBrowserImagePreview(req.query.path || "")
+      : (() => {
+          const { absolute, rel } = resolveSandboxPath(req.query.path || "");
+          return { absolute, rel, converted: false };
+        })();
+    const stat = await fsp.stat(preview.absolute);
     if (!stat.isFile()) return res.status(400).json({ error: "media preview path must be a file" });
-    res.setHeader("Content-Type", fileShareMimeType(rel));
-    res.setHeader("Content-Disposition", `inline; filename="${path.basename(rel).replaceAll('"', '')}"`);
-    return res.sendFile(absolute);
+    res.setHeader("Content-Type", preview.converted ? "image/png" : fileShareMimeType(preview.rel));
+    res.setHeader("Content-Disposition", `inline; filename="${path.basename(preview.rel).replaceAll('"', '')}"`);
+    return res.sendFile(preview.absolute);
   } catch (error) {
     return res.status(400).json({ error: String(error?.message || "Failed to stream media preview") });
   }

@@ -77,8 +77,9 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
 - Lint endpoint for JS/TS feedback with ESLint
 - Side-by-side diff preview before save in the editor
 - Inline lint markers in editor gutter after lint run
-- Image previews stream directly instead of buffering the full file in browser memory
-- Video previews stream with byte-range seeking; MOV preparation runs asynchronously and is cached as browser-compatible H.264/AAC MP4 when FFmpeg is available
+- Image previews stream directly instead of buffering the full file in browser memory; TIFF images are cached as browser-compatible PNG previews when FFmpeg is available
+- Video previews stream with byte-range seeking; non-MP4/M4V containers are prepared asynchronously and cached as browser-compatible H.264/AAC MP4 when FFmpeg is available
+- Audio previews stream inline for MP3, WAV, Ogg/Opus, M4A/AAC, FLAC, and WMA files
 - Git log and revert actions for sandbox rollback
 - Expiring public file shares with optional passwords, encrypted snapshots, access counts, and revocation
 - Unencrypted, unpassworded direct media links support HTTP byte ranges for browser and external video players
