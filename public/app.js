@@ -1057,7 +1057,7 @@ function buildContextPreamble(chat) {
   return [
     "Persistent context maintained by the user for this conversation. Treat it as standing instructions and reference material.",
     middleTruncate(body, CONTEXT_PREAMBLE_MAX_CHARS),
-    "You may update this stored context by including a fenced block in your reply:",
+    "When context tools are available, use list_context, add_context, update_context, or remove_context to manage this stored context. Otherwise, include a fenced block in your reply:",
     "```raa-context add\nscope: chat\nlabel: Short label\n<content to remember>\n```",
     "Use scope: global to store it for every chat, and ```raa-context remove``` with a matching label to delete an entry."
   ].join("\n\n");
@@ -1263,6 +1263,57 @@ function applyAssistantContextDirectives(chatId, replyText) {
   return applied;
 }
 
+function applyAgentContextMutations(chatId, mutations) {
+  const chat = getChatById(chatId);
+  if (!chat || !Array.isArray(mutations)) return 0;
+  const entriesByScope = {
+    chat: getChatContextEntries(chat),
+    global: loadGlobalContextEntries()
+  };
+  const changedScopes = new Set();
+  let applied = 0;
+
+  for (const mutation of mutations.slice(0, CONTEXT_MAX_ENTRIES)) {
+    const action = String(mutation?.action || "").toLowerCase();
+    const scope = String(mutation?.scope || "chat").toLowerCase() === "global" ? "global" : "chat";
+    const id = String(mutation?.id || "").trim();
+    const label = String(mutation?.label || "").trim();
+    const entries = entriesByScope[scope];
+    const matchIndex = entries.findIndex((entry) => (id && entry.id === id)
+      || (label && entry.label.toLowerCase() === label.toLowerCase()));
+
+    if (action === "remove" && matchIndex >= 0) {
+      entries.splice(matchIndex, 1);
+    } else if (action === "update" && matchIndex >= 0) {
+      const existing = entries[matchIndex];
+      entries[matchIndex] = normalizeContextEntry({
+        ...existing,
+        label: typeof mutation.newLabel === "string" && mutation.newLabel.trim() ? mutation.newLabel : existing.label,
+        content: typeof mutation.content === "string" ? mutation.content : existing.content,
+        enabled: typeof mutation.enabled === "boolean" ? mutation.enabled : existing.enabled
+      });
+    } else if (action === "add" && String(mutation.content || "").trim()) {
+      const entry = normalizeContextEntry({
+        id: id || uid(),
+        label: label || "Agent context",
+        content: String(mutation.content || ""),
+        enabled: mutation.enabled !== false
+      });
+      if (id && matchIndex >= 0) entries[matchIndex] = entry;
+      else entries.push(entry);
+    } else {
+      continue;
+    }
+    changedScopes.add(scope);
+    applied += 1;
+  }
+
+  for (const scope of changedScopes) {
+    writeScopedContextEntries(scope, scope === "chat" ? chat : null, entriesByScope[scope]);
+  }
+  return applied;
+}
+
 function renderTabs() {
   const activeId = getActiveChat().id;
   tabListEl.innerHTML = "";
@@ -1378,6 +1429,10 @@ function buildRequestBodyForUserMessage(chat, userMessageId) {
       : undefined,
     agentMaxStepsOverrideCode: chat.agentMaxStepsOverrideCode || undefined,
     autoCompact: config.chatCompaction?.enabled !== false,
+    contextEntries: {
+      chat: getChatContextEntries(chat),
+      global: loadGlobalContextEntries()
+    },
     messages: messagesWithContext
   };
 }
@@ -1435,7 +1490,8 @@ async function submitUserMessageRequest(chatId, userMessageId) {
     writeChat.model = data.model;
   }
 
-  lastContextDirectiveCount = applyAssistantContextDirectives(chatId, data.reply || "");
+  lastContextDirectiveCount = applyAgentContextMutations(chatId, data.contextMutations)
+    + applyAssistantContextDirectives(chatId, data.reply || "");
   saveState();
   renderAll();
   loadToolRuns();

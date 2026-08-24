@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="styles.css?v=20260823h" />
+    <link rel="stylesheet" href="styles.css?v=20260824b" />
   </head>
   <body>
     <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
@@ -44,6 +44,19 @@
           <button id="downloadBtn" class="btn btn-soft" type="button">Download</button>
           <button id="copyDirectLinkBtn" class="btn btn-soft" type="button">Copy Link</button>
           <button id="shareFileBtn" class="btn btn-soft" type="button">Share File</button>
+        </div>
+
+        <label class="upload-chunk-control" for="uploadChunkSizeSelect">
+          <span>Upload chunk size</span>
+          <select id="uploadChunkSizeSelect" aria-label="Upload chunk size"></select>
+        </label>
+
+        <div id="uploadProgress" class="upload-progress" hidden aria-live="polite">
+          <div id="uploadProgressSummary">Uploading 0 files | Total time 0s | ETA -- | Without progress 0s | Chunk size --</div>
+          <div id="uploadProgressFile">Uploading file 0/0 | Total time 0s | ETA -- | Without progress 0s</div>
+          <div id="uploadProgressChunks">Chunks current file 0/0 | All 0/0</div>
+          <div id="uploadProgressPercents">Progress current file 0% | All 0%</div>
+          <div id="uploadProgressBytes">Data current file 0 B/0 B | All 0 B/0 B</div>
         </div>
 
         <div id="downloadProgress" class="download-progress" hidden aria-live="polite">
@@ -233,6 +246,6 @@
     </main>
 
     <script src="api-auth.js"></script>
-    <script type="module" src="filelab.js?v=20260824a"></script>
+    <script type="module" src="filelab.js?v=20260824b"></script>
   </body>
 </html>

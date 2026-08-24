@@ -125,6 +125,13 @@ const dirPathInputEl = document.getElementById("dirPathInput");
 const fileUploadInputEl = document.getElementById("fileUploadInput");
 const folderUploadInputEl = document.getElementById("folderUploadInput");
 const uploadBypassCodeInputEl = document.getElementById("uploadBypassCodeInput");
+const uploadChunkSizeSelectEl = document.getElementById("uploadChunkSizeSelect");
+const uploadProgressEl = document.getElementById("uploadProgress");
+const uploadProgressSummaryEl = document.getElementById("uploadProgressSummary");
+const uploadProgressFileEl = document.getElementById("uploadProgressFile");
+const uploadProgressChunksEl = document.getElementById("uploadProgressChunks");
+const uploadProgressPercentsEl = document.getElementById("uploadProgressPercents");
+const uploadProgressBytesEl = document.getElementById("uploadProgressBytes");
 const dropZoneEl = document.getElementById("dropZone");
 const activePathLabelEl = document.getElementById("activePathLabel");
 const fileStatusEl = document.getElementById("fileStatus");
@@ -208,6 +215,7 @@ const FILELAB_FONT_SIZE_KEY = "filelab-font-size";
 const FILELAB_MINIMAP_KEY = "filelab-minimap-enabled";
 const FILELAB_UPLOAD_BYPASS_CODE_KEY = "filelab-upload-bypass-code";
 const FILELAB_CHUNK_SESSIONS_KEY = "filelab-chunk-sessions-v1";
+const FILELAB_CHUNK_SIZE_KEY = "filelab-chunk-size-v1";
 const languageCompartment = new Compartment();
 const editorThemeCompartment = new Compartment();
 const DEFAULT_MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
@@ -262,6 +270,9 @@ let uploadPolicy = {
   }
 };
 let uploadInFlight = false;
+let activeUploadRequest = null;
+let activeUploadController = null;
+let uploadTelemetry = null;
 let minimapFrame = 0;
 let minimapBoundScroller = null;
 let previewObjectUrl = "";
@@ -1378,6 +1389,7 @@ async function loadUploadPolicy() {
       }
     };
   }
+  populateUploadChunkSizes();
 }
 
 async function switchWorkspace() {
@@ -1622,6 +1634,23 @@ async function apiJson(url, options = {}) {
     throw new Error(data.error || `Request failed (${response.status})`);
   }
   return data;
+}
+
+async function uploadControlJson(url, options = {}) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 10 * 60 * 1000);
+  activeUploadController = controller;
+  try {
+    return await apiJson(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("Upload request interrupted or timed out. Reselect the same files to resume.");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+    if (activeUploadController === controller) activeUploadController = null;
+  }
 }
 
 function formatShareDate(value) {
@@ -1925,10 +1954,99 @@ function formatUploadProgress(loaded, total) {
   return `${percent}% (${formatByteSize(safeLoaded)} / ${formatByteSize(safeTotal)})`;
 }
 
-function getMultipartUploadPosition(files, loadedBytes) {
+function formatUploadDuration(milliseconds) {
+  const totalSeconds = Math.max(0, Math.floor(Number(milliseconds || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+function uploadPercent(loaded, total) {
+  if (!Number(total || 0)) return 0;
+  return Math.max(0, Math.min(100, Math.floor((Number(loaded || 0) / Number(total)) * 100)));
+}
+
+function renderUploadTelemetry() {
+  if (!uploadTelemetry || !uploadProgressEl) return;
+  const now = Date.now();
+  const elapsed = now - uploadTelemetry.startedAt;
+  const fileElapsed = now - uploadTelemetry.fileStartedAt;
+  const idle = now - uploadTelemetry.lastProgressAt;
+  const rate = elapsed > 0 ? uploadTelemetry.overallLoaded / (elapsed / 1000) : 0;
+  const etaMs = rate > 0 ? ((uploadTelemetry.totalBytes - uploadTelemetry.overallLoaded) / rate) * 1000 : null;
+  const chunkSizeLabel = uploadTelemetry.chunked ? formatByteSize(uploadTelemetry.chunkSize) : "single request";
+  const currentFileNumber = Math.min(uploadTelemetry.totalFiles, uploadTelemetry.fileIndex + 1);
+
+  uploadProgressEl.hidden = false;
+  uploadProgressSummaryEl.textContent = `Uploading ${uploadTelemetry.totalFiles} files | Total time ${formatUploadDuration(elapsed)} | ETA ${etaMs == null ? "--" : formatUploadDuration(etaMs)} | Without progress ${formatUploadDuration(idle)} | Chunk size ${chunkSizeLabel}`;
+  uploadProgressFileEl.textContent = `Uploading file ${currentFileNumber}/${uploadTelemetry.totalFiles} | Total time ${formatUploadDuration(fileElapsed)} | ETA ${etaMs == null ? "--" : formatUploadDuration(etaMs)} | Without progress ${formatUploadDuration(idle)}`;
+  uploadProgressChunksEl.textContent = `Chunks current file ${uploadTelemetry.fileChunksComplete}/${uploadTelemetry.fileChunksTotal} | All ${uploadTelemetry.allChunksComplete}/${uploadTelemetry.allChunksTotal}`;
+  uploadProgressPercentsEl.textContent = `Progress current file ${uploadPercent(uploadTelemetry.fileLoaded, uploadTelemetry.fileSize)}% | All ${uploadPercent(uploadTelemetry.overallLoaded, uploadTelemetry.totalBytes)}%`;
+  uploadProgressBytesEl.textContent = `Data current file ${formatByteSize(uploadTelemetry.fileLoaded)}/${formatByteSize(uploadTelemetry.fileSize)} | All ${formatByteSize(uploadTelemetry.overallLoaded)}/${formatByteSize(uploadTelemetry.totalBytes)}`;
+}
+
+function updateUploadTelemetry(patch, progressed = false) {
+  if (!uploadTelemetry) return;
+  Object.assign(uploadTelemetry, patch || {});
+  if (progressed) uploadTelemetry.lastProgressAt = Date.now();
+  renderUploadTelemetry();
+}
+
+function startUploadTelemetry(files, totalBytes, chunkSize, chunked) {
+  const now = Date.now();
+  const allChunksTotal = chunked
+    ? files.reduce((sum, file) => sum + Math.max(1, Math.ceil(Number(file.size || 0) / chunkSize)), 0)
+    : 1;
+  uploadTelemetry = {
+    startedAt: now,
+    fileStartedAt: now,
+    lastProgressAt: now,
+    totalFiles: files.length,
+    totalBytes,
+    chunked,
+    chunkSize,
+    fileIndex: 0,
+    fileSize: Number(files[0]?.size || 0),
+    fileLoaded: 0,
+    overallLoaded: 0,
+    fileChunksComplete: 0,
+    fileChunksTotal: chunked ? Math.max(1, Math.ceil(Number(files[0]?.size || 0) / chunkSize)) : 1,
+    allChunksComplete: 0,
+    allChunksTotal
+  };
+  renderUploadTelemetry();
+}
+
+function selectedUploadChunkSize() {
+  const configuredMax = Math.max(256 * 1024, Number(uploadPolicy?.chunked?.chunkSizeBytes || (4 * 1024 * 1024)));
+  const selected = Number(uploadChunkSizeSelectEl?.value || configuredMax);
+  return Math.max(256 * 1024, Math.min(configuredMax, selected));
+}
+
+function populateUploadChunkSizes() {
+  if (!uploadChunkSizeSelectEl) return;
+  const maxSize = Math.max(256 * 1024, Number(uploadPolicy?.chunked?.chunkSizeBytes || (4 * 1024 * 1024)));
+  const sizes = [256, 512, 1024, 2048, 4096, 8192, 16384].map((value) => value * 1024)
+    .filter((value) => value <= maxSize);
+  if (!sizes.includes(maxSize)) sizes.push(maxSize);
+  const stored = Number(localStorage.getItem(FILELAB_CHUNK_SIZE_KEY) || maxSize);
+  const selected = sizes.reduce((best, value) => (value <= stored ? value : best), sizes[0]);
+  uploadChunkSizeSelectEl.replaceChildren(...sizes.map((value) => {
+    const option = document.createElement("option");
+    option.value = String(value);
+    option.textContent = formatByteSize(value);
+    option.selected = value === selected;
+    return option;
+  }));
+}
+
+function getMultipartUploadPositionData(files, loadedBytes) {
   const list = Array.isArray(files) ? files : [];
   if (list.length === 0) {
-    return "";
+    return { index: 0, name: "", loaded: 0, size: 0 };
   }
 
   const loaded = Math.max(0, Number(loadedBytes || 0));
@@ -1941,18 +2059,25 @@ function getMultipartUploadPosition(files, loadedBytes) {
     if (isCurrent) {
       const withinFile = Math.max(0, Math.min(size, loaded - cumulative));
       const fileName = String(file?.webkitRelativePath || file?.name || "unnamed");
-      return `[file ${index + 1}/${list.length}: ${fileName} ${formatByteSize(withinFile)} / ${formatByteSize(size)}]`;
+      return { index, name: fileName, loaded: withinFile, size };
     }
     cumulative = nextCumulative;
   }
 
-  return `[file ${list.length}/${list.length}]`;
+  const last = list[list.length - 1];
+  return { index: list.length - 1, name: String(last?.name || "unnamed"), loaded: Number(last?.size || 0), size: Number(last?.size || 0) };
+}
+
+function getMultipartUploadPosition(files, loadedBytes) {
+  const position = getMultipartUploadPositionData(files, loadedBytes);
+  return `[file ${position.index + 1}/${files.length}: ${position.name} ${formatByteSize(position.loaded)} / ${formatByteSize(position.size)}]`;
 }
 
 function uploadWithProgress(uploadUrl, requestHeaders, form, onProgress, onUploadSent) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", uploadUrl, true);
+    activeUploadRequest = xhr;
     xhr.responseType = "text";
     xhr.timeout = 10 * 60 * 1000;
     for (const [key, value] of Object.entries(requestHeaders || {})) {
@@ -1966,10 +2091,15 @@ function uploadWithProgress(uploadUrl, requestHeaders, form, onProgress, onUploa
       onUploadSent?.();
     });
 
-    xhr.addEventListener("error", () => reject(new Error("Network error while uploading.")));
-    xhr.addEventListener("timeout", () => reject(new Error("Upload timed out.")));
-    xhr.addEventListener("abort", () => reject(new Error("Upload cancelled.")));
+    const fail = (message) => {
+      if (activeUploadRequest === xhr) activeUploadRequest = null;
+      reject(new Error(message));
+    };
+    xhr.addEventListener("error", () => fail("Network error while uploading."));
+    xhr.addEventListener("timeout", () => fail("Upload timed out."));
+    xhr.addEventListener("abort", () => fail("Upload cancelled."));
     xhr.addEventListener("load", () => {
+      if (activeUploadRequest === xhr) activeUploadRequest = null;
       const raw = String(xhr.responseText || "");
       let data = {};
       try {
@@ -1989,6 +2119,38 @@ function uploadWithProgress(uploadUrl, requestHeaders, form, onProgress, onUploa
     });
 
     xhr.send(form);
+  });
+}
+
+function uploadChunkWithProgress(uploadUrl, requestHeaders, chunk, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", uploadUrl, true);
+    xhr.responseType = "text";
+    xhr.timeout = 10 * 60 * 1000;
+    activeUploadRequest = xhr;
+    for (const [key, value] of Object.entries(requestHeaders || {})) {
+      xhr.setRequestHeader(key, String(value));
+    }
+    xhr.upload.addEventListener("progress", (event) => onProgress?.(event.loaded, chunk.size));
+    const fail = (message) => {
+      if (activeUploadRequest === xhr) activeUploadRequest = null;
+      reject(new Error(message));
+    };
+    xhr.addEventListener("error", () => fail("Network error while uploading chunk."));
+    xhr.addEventListener("timeout", () => fail("Chunk upload timed out. Reselect the same files to resume."));
+    xhr.addEventListener("abort", () => fail("Upload interrupted. Reselect the same files to resume."));
+    xhr.addEventListener("load", () => {
+      if (activeUploadRequest === xhr) activeUploadRequest = null;
+      let data = {};
+      try { data = xhr.responseText ? JSON.parse(xhr.responseText) : {}; } catch { data = {}; }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(data);
+        return;
+      }
+      fail(data.error || `Chunk upload failed (${xhr.status})`);
+    });
+    xhr.send(chunk);
   });
 }
 
@@ -2023,7 +2185,7 @@ function makeChunkResumeKey(file, relativePath) {
   ].join("|");
 }
 
-async function uploadFilesChunked(files, bypassCode, totalBytes) {
+async function uploadFilesChunked(files, bypassCode, totalBytes, requestedChunkSize) {
   const requestHeaders = {};
   if (bypassCode) {
     requestHeaders["X-Upload-Bypass-Code"] = bypassCode;
@@ -2034,6 +2196,7 @@ async function uploadFilesChunked(files, bypassCode, totalBytes) {
   }
 
   let uploadedOverall = 0;
+  let completedChunksOverall = 0;
   const saved = [];
 
   for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
@@ -2044,16 +2207,18 @@ async function uploadFilesChunked(files, bypassCode, totalBytes) {
     const resumeUploadId = String(sessions?.[resumeKey]?.uploadId || "");
 
     let uploadId = "";
-    let chunkSize = Math.max(256 * 1024, Number(uploadPolicy?.chunked?.chunkSizeBytes || (4 * 1024 * 1024)));
+    const estimatedChunks = Math.max(1, Math.ceil(Number(file.size || 0) / requestedChunkSize));
+    let chunkSize = requestedChunkSize;
     let expectedChunks = Math.max(1, Math.ceil(Number(file.size || 0) / chunkSize));
     let startChunkIndex = 0;
 
     if (resumeUploadId) {
       try {
         const statusUrl = `/api/files/upload/chunk/${encodeURIComponent(resumeUploadId)}`;
-        const status = await apiJson(statusUrl, { headers: requestHeaders });
+        const status = await uploadControlJson(statusUrl, { headers: requestHeaders });
         if (Number(status.expectedSize || 0) === Number(file.size || 0)) {
           uploadId = resumeUploadId;
+          chunkSize = Math.max(256 * 1024, Number(status.chunkSizeBytes || chunkSize));
           expectedChunks = Math.max(1, Number(status.totalChunks || expectedChunks));
           startChunkIndex = Math.max(0, Number(status.nextChunkIndex || 0));
           setStatus(`Resuming upload: file ${fileIndex + 1}/${files.length} from chunk ${startChunkIndex + 1}/${expectedChunks}...`);
@@ -2069,12 +2234,13 @@ async function uploadFilesChunked(files, bypassCode, totalBytes) {
       name: file.name,
       relativePath,
       size: Number(file.size || 0),
-      mimeType: String(file.type || "application/octet-stream")
+      mimeType: String(file.type || "application/octet-stream"),
+      chunkSizeBytes: requestedChunkSize
     };
 
     const startUrl = "/api/files/upload/chunk/start";
 
-      const started = await apiJson(startUrl, {
+      const started = await uploadControlJson(startUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...requestHeaders },
       body: JSON.stringify(startPayload)
@@ -2090,6 +2256,22 @@ async function uploadFilesChunked(files, bypassCode, totalBytes) {
     updatedSessions[resumeKey] = { uploadId, updatedAt: Date.now() };
     setSavedChunkSessions(updatedSessions);
 
+    updateUploadTelemetry({
+      allChunksTotal: Math.max(1, Number(uploadTelemetry?.allChunksTotal || 0) + expectedChunks - estimatedChunks)
+    });
+
+    updateUploadTelemetry({
+      fileIndex,
+      fileStartedAt: Date.now(),
+      chunkSize,
+      fileSize: Number(file.size || 0),
+      fileLoaded: Math.min(Number(file.size || 0), startChunkIndex * chunkSize),
+      overallLoaded: uploadedOverall + Math.min(Number(file.size || 0), startChunkIndex * chunkSize),
+      fileChunksComplete: startChunkIndex,
+      fileChunksTotal: expectedChunks,
+      allChunksComplete: completedChunksOverall + startChunkIndex
+    }, startChunkIndex > 0);
+
     for (let chunkIndex = startChunkIndex; chunkIndex < expectedChunks; chunkIndex += 1) {
       const start = chunkIndex * chunkSize;
       const end = Math.min(file.size, start + chunkSize);
@@ -2097,25 +2279,32 @@ async function uploadFilesChunked(files, bypassCode, totalBytes) {
 
       const chunkUrl = `/api/files/upload/chunk/${encodeURIComponent(uploadId)}?index=${chunkIndex}`;
 
-      await fetch(chunkUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream", ...requestHeaders },
-        body: chunk
-      }).then(async (response) => {
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          throw new Error(data.error || `Chunk upload failed (${response.status})`);
-        }
-      });
+      await uploadChunkWithProgress(
+        chunkUrl,
+        { "Content-Type": "application/octet-stream", ...requestHeaders },
+        chunk,
+        (loaded) => updateUploadTelemetry({
+          fileLoaded: start + loaded,
+          overallLoaded: uploadedOverall + start + loaded,
+          fileChunksComplete: chunkIndex,
+          allChunksComplete: completedChunksOverall + chunkIndex
+        }, true)
+      );
 
       const fileProgress = end;
       const currentOverall = uploadedOverall + fileProgress;
+      updateUploadTelemetry({
+        fileLoaded: fileProgress,
+        overallLoaded: currentOverall,
+        fileChunksComplete: chunkIndex + 1,
+        allChunksComplete: completedChunksOverall + chunkIndex + 1
+      }, true);
       setStatus(`Uploading ${files.length} file(s)... ${formatUploadProgress(currentOverall, totalBytes)} [file ${fileIndex + 1}/${files.length}, chunk ${chunkIndex + 1}/${expectedChunks}]`);
     }
 
     const completeUrl = `/api/files/upload/chunk/${encodeURIComponent(uploadId)}/complete`;
 
-    const completed = await apiJson(completeUrl, {
+    const completed = await uploadControlJson(completeUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...requestHeaders },
       body: JSON.stringify({})
@@ -2123,6 +2312,7 @@ async function uploadFilesChunked(files, bypassCode, totalBytes) {
 
     saved.push({ path: completed.path, size: completed.size });
     uploadedOverall += Number(file.size || 0);
+    completedChunksOverall += expectedChunks;
     const doneSessions = getSavedChunkSessions();
     delete doneSessions[resumeKey];
     setSavedChunkSessions(doneSessions);
@@ -2425,6 +2615,7 @@ async function uploadFiles(files) {
   let heartbeatTicks = 0;
   const heartbeat = window.setInterval(() => {
     heartbeatTicks += 1;
+    renderUploadTelemetry();
     const elapsed = Math.round((Date.now() - lastProgressAt) / 1000);
     const positionLabel = getMultipartUploadPosition(files, lastLoaded);
     if (waitingOnServer) {
@@ -2443,10 +2634,13 @@ async function uploadFiles(files) {
       && files.some((file) => Number(file?.size || 0) >= Number(uploadPolicy?.chunked?.thresholdBytes || (64 * 1024 * 1024)));
 
     if (shouldUseChunked) {
+      const chunkSize = selectedUploadChunkSize();
+      startUploadTelemetry(files, totalBytes, chunkSize, true);
       setStatus(`Uploading ${files.length} file(s)... 0% [chunked mode]`);
-      data = await uploadFilesChunked(files, bypassCode, totalBytes);
+      data = await uploadFilesChunked(files, bypassCode, totalBytes, chunkSize);
       setStatus("Chunked upload complete. Finalizing file list...");
     } else {
+      startUploadTelemetry(files, totalBytes, totalBytes, false);
       setStatus(`Uploading ${files.length} file(s)... 0%`);
       const result = await uploadWithProgress(
         uploadUrl,
@@ -2456,6 +2650,17 @@ async function uploadFiles(files) {
           lastLoaded = Math.max(0, Number(loaded || 0));
           lastTotal = lengthComputable ? Math.max(0, Number(total || 0)) : totalBytes;
           lastProgressAt = Date.now();
+          const position = getMultipartUploadPositionData(files, lastLoaded);
+          const fileChanged = position.index !== uploadTelemetry?.fileIndex;
+          updateUploadTelemetry({
+            fileIndex: position.index,
+            fileStartedAt: fileChanged ? Date.now() : uploadTelemetry?.fileStartedAt,
+            fileSize: position.size,
+            fileLoaded: position.loaded,
+            overallLoaded: lastLoaded,
+            fileChunksComplete: lastLoaded >= lastTotal ? 1 : 0,
+            allChunksComplete: lastLoaded >= lastTotal ? 1 : 0
+          }, true);
           lastProgressLabel = `Uploading ${files.length} file(s)... ${formatUploadProgress(lastLoaded, lastTotal)}`;
           const positionLabel = getMultipartUploadPosition(files, lastLoaded);
           setStatus(`${lastProgressLabel} ${positionLabel}`);
@@ -2476,6 +2681,14 @@ async function uploadFiles(files) {
   }
 
   const count = Array.isArray(data.files) ? data.files.length : (data.path ? 1 : 0);
+  updateUploadTelemetry({
+    fileIndex: Math.max(0, files.length - 1),
+    fileSize: Number(files[files.length - 1]?.size || 0),
+    fileLoaded: Number(files[files.length - 1]?.size || 0),
+    overallLoaded: totalBytes,
+    fileChunksComplete: uploadTelemetry?.fileChunksTotal || 1,
+    allChunksComplete: uploadTelemetry?.allChunksTotal || 1
+  }, true);
   const responseWorkspace = normalizeWorkspaceCode(data?.workspaceCode);
   if (responseWorkspace && currentWorkspaceCode && responseWorkspace !== currentWorkspaceCode) {
     setStatus(`Error: upload landed in workspace '${responseWorkspace}' while UI is '${currentWorkspaceCode}'.`);
@@ -2999,6 +3212,17 @@ window.addEventListener("beforeunload", (event) => {
   event.preventDefault();
   event.returnValue = "";
 });
+
+window.addEventListener("pagehide", () => {
+  activeUploadRequest?.abort();
+  activeUploadController?.abort();
+});
+
+if (uploadChunkSizeSelectEl) {
+  uploadChunkSizeSelectEl.addEventListener("change", () => {
+    localStorage.setItem(FILELAB_CHUNK_SIZE_KEY, uploadChunkSizeSelectEl.value);
+  });
+}
 
 ["dragenter", "dragover"].forEach((eventName) => {
   dropZoneEl.addEventListener(eventName, (event) => {

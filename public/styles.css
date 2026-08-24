@@ -858,7 +858,7 @@ textarea:focus {
   height: calc(100vh - 40px);
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto auto auto auto auto minmax(0, 1fr);
+  grid-template-rows: repeat(8, auto) minmax(0, 1fr);
   gap: 10px;
   overflow: hidden;
 }
@@ -1081,6 +1081,41 @@ textarea:focus {
   border: 1px solid var(--line);
   border-radius: 10px;
   background: rgba(65, 180, 112, 0.08);
+}
+
+.upload-chunk-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.upload-chunk-control select {
+  min-width: 96px;
+}
+
+.upload-progress {
+  display: grid;
+  grid-template-rows: repeat(5, minmax(1.25rem, auto));
+  gap: 3px;
+  padding: 8px 10px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(65, 180, 112, 0.08);
+  color: var(--muted);
+  font: 500 0.69rem/1.35 "IBM Plex Mono", monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.upload-progress > div {
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  scrollbar-width: thin;
 }
 
 .download-progress-meta {

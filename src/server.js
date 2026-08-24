@@ -696,6 +696,37 @@ function makeUploadSessionId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function getUploadSessionMetadataPath(uploadId) {
+  const safeId = String(uploadId || "").trim();
+  if (!/^[a-z0-9-]{8,80}$/i.test(safeId)) {
+    throw new Error("invalid upload session id");
+  }
+  return path.join(getChunkUploadRoot(), `${safeId}.json`);
+}
+
+async function persistUploadSession(session) {
+  const metadataPath = getUploadSessionMetadataPath(session.id);
+  const metadata = {
+    id: session.id,
+    workspaceCode: session.workspaceCode,
+    targetRel: session.targetRel,
+    expectedSize: session.expectedSize,
+    chunkSizeBytes: session.chunkSizeBytes,
+    totalChunks: session.totalChunks,
+    nextChunkIndex: session.nextChunkIndex,
+    receivedBytes: session.receivedBytes,
+    updatedAt: session.updatedAt
+  };
+  await fsp.writeFile(metadataPath, JSON.stringify(metadata), "utf8");
+}
+
+async function deleteUploadSessionFiles(session) {
+  await Promise.all([
+    session?.tempPath ? fsp.unlink(session.tempPath).catch(() => {}) : Promise.resolve(),
+    session?.id ? fsp.unlink(getUploadSessionMetadataPath(session.id)).catch(() => {}) : Promise.resolve()
+  ]);
+}
+
 function cleanupExpiredUploadSessions() {
   const now = Date.now();
   for (const [id, session] of uploadSessionStore.entries()) {
@@ -703,15 +734,82 @@ function cleanupExpiredUploadSessions() {
       continue;
     }
     uploadSessionStore.delete(id);
-    if (session?.tempPath) {
-      fsp.unlink(session.tempPath).catch(() => {});
-    }
+    deleteUploadSessionFiles(session).catch(() => {});
   }
 }
 
-function getUploadSessionOrThrow(uploadId) {
+async function cleanupExpiredUploadSessionFiles() {
+  const uploadRoot = getChunkUploadRoot();
+  const entries = await fsp.readdir(uploadRoot, { withFileTypes: true }).catch((error) => {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  });
+  const now = Date.now();
+  const entryNames = new Set(entries.filter((entry) => entry.isFile()).map((entry) => entry.name));
+  await Promise.all(entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+    .slice(0, 1000)
+    .map(async (entry) => {
+      const metadataPath = path.join(uploadRoot, entry.name);
+      try {
+        const metadata = JSON.parse(await fsp.readFile(metadataPath, "utf8"));
+        if (now - Number(metadata?.updatedAt || 0) < chunkUploadSessionMaxAgeMs) return;
+        await deleteUploadSessionFiles({
+          id: metadata.id || entry.name.slice(0, -5),
+          tempPath: path.join(uploadRoot, `${entry.name.slice(0, -5)}.part`)
+        });
+      } catch {
+        const stat = await fsp.stat(metadataPath).catch(() => null);
+        if (stat && now - stat.mtimeMs >= chunkUploadSessionMaxAgeMs) {
+          const id = entry.name.slice(0, -5);
+          await Promise.all([
+            fsp.unlink(metadataPath).catch(() => {}),
+            fsp.unlink(path.join(uploadRoot, `${id}.part`)).catch(() => {})
+          ]);
+        }
+      }
+    }));
+  await Promise.all(entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".part") && !entryNames.has(`${entry.name.slice(0, -5)}.json`))
+    .slice(0, 1000)
+    .map(async (entry) => {
+      const partPath = path.join(uploadRoot, entry.name);
+      const stat = await fsp.stat(partPath).catch(() => null);
+      if (stat && now - stat.mtimeMs >= chunkUploadSessionMaxAgeMs) {
+        await fsp.unlink(partPath).catch(() => {});
+      }
+    }));
+}
+
+async function getUploadSessionOrThrow(uploadId) {
   cleanupExpiredUploadSessions();
-  const session = uploadSessionStore.get(uploadId);
+  let session = uploadSessionStore.get(uploadId);
+  if (!session) {
+    const metadata = JSON.parse(await fsp.readFile(getUploadSessionMetadataPath(uploadId), "utf8"));
+    const { absolute: targetPath, rel: targetRel } = resolveSandboxPath(metadata.targetRel || "");
+    session = {
+      ...metadata,
+      targetRel,
+      targetPath,
+      tempPath: path.join(getChunkUploadRoot(), `${uploadId}.part`)
+    };
+    if (Date.now() - Number(session.updatedAt || 0) >= chunkUploadSessionMaxAgeMs) {
+      await deleteUploadSessionFiles(session);
+      throw new Error("upload session not found or expired");
+    }
+    const partStat = await fsp.stat(session.tempPath);
+    const partSize = Number(partStat.size || 0);
+    const chunkSize = Math.max(1, Number(session.chunkSizeBytes || chunkUploadChunkSizeBytes));
+    if (partSize > Number(session.expectedSize || 0)
+      || (partSize < Number(session.expectedSize || 0) && partSize % chunkSize !== 0)) {
+      throw new Error("upload session data is inconsistent");
+    }
+    session.receivedBytes = partSize;
+    session.nextChunkIndex = partSize === 0 ? 0 : Math.ceil(partSize / chunkSize);
+    session.updatedAt = Date.now();
+    await persistUploadSession(session);
+    uploadSessionStore.set(uploadId, session);
+  }
   if (!session) {
     throw new Error("upload session not found or expired");
   }
@@ -4839,6 +4937,35 @@ async function getYoutubeTranscriptWithAgentReach(urlValue, languageValue, maxCh
   }
 }
 
+function normalizeAgentContextScope(value) {
+  return String(value || "chat").trim().toLowerCase() === "global" ? "global" : "chat";
+}
+
+function getAgentContextEntries(req, scope) {
+  const source = req.body?.contextEntries?.[scope];
+  return (Array.isArray(source) ? source : []).slice(0, 60).map((entry) => ({
+    id: String(entry?.id || "").slice(0, 120),
+    label: String(entry?.label || "Untitled context").slice(0, 200),
+    content: String(entry?.content || "").slice(0, 12000),
+    enabled: entry?.enabled !== false,
+    disabledLines: (Array.isArray(entry?.disabledLines) ? entry.disabledLines : [])
+      .map((index) => Number(index))
+      .filter((index) => Number.isInteger(index) && index >= 0)
+      .slice(0, 1000)
+  }));
+}
+
+function queueAgentContextMutation(req, mutation) {
+  if (!Array.isArray(req.agentContextMutations)) {
+    req.agentContextMutations = [];
+  }
+  if (req.agentContextMutations.length >= 60) {
+    throw new Error("context mutation limit reached for this response");
+  }
+  req.agentContextMutations.push(mutation);
+  return mutation;
+}
+
 const agentToolDefinitions = [
   {
     type: "function",
@@ -4874,6 +5001,72 @@ const agentToolDefinitions = [
         properties: {
           name: { type: "string", description: "Optional specific tool name to inspect" },
           limit: { type: "number", description: "How many recent runs to inspect, default 10" }
+        },
+        required: []
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_context",
+      description: "List persistent context entries available to this chat, from either this chat or all chats.",
+      parameters: {
+        type: "object",
+        properties: {
+          scope: { type: "string", enum: ["chat", "global"], description: "Context scope, default chat" }
+        },
+        required: []
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "add_context",
+      description: "Add a persistent context entry for this chat or all chats.",
+      parameters: {
+        type: "object",
+        properties: {
+          scope: { type: "string", enum: ["chat", "global"] },
+          label: { type: "string" },
+          content: { type: "string" },
+          enabled: { type: "boolean" }
+        },
+        required: ["label", "content"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_context",
+      description: "Update a persistent context entry by id or exact label.",
+      parameters: {
+        type: "object",
+        properties: {
+          scope: { type: "string", enum: ["chat", "global"] },
+          id: { type: "string" },
+          label: { type: "string", description: "Existing exact label when id is omitted" },
+          newLabel: { type: "string" },
+          content: { type: "string" },
+          enabled: { type: "boolean" }
+        },
+        required: []
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "remove_context",
+      description: "Remove a persistent context entry by id or exact label.",
+      parameters: {
+        type: "object",
+        properties: {
+          scope: { type: "string", enum: ["chat", "global"] },
+          id: { type: "string" },
+          label: { type: "string", description: "Existing exact label when id is omitted" }
         },
         required: []
       }
@@ -5492,6 +5685,60 @@ async function executeAgentTool(req, callName, args) {
       };
       await appendAuditLog(req, "agent-tool", { name: callName, targetName: targetName || null, count: recentRuns.length });
       return result;
+    }
+    case "list_context": {
+      const scope = normalizeAgentContextScope(args?.scope);
+      const entries = getAgentContextEntries(req, scope);
+      await appendAuditLog(req, "agent-tool", { name: callName, scope, count: entries.length });
+      return { ok: true, scope, entries };
+    }
+    case "add_context": {
+      const scope = normalizeAgentContextScope(args?.scope);
+      const label = String(args?.label || "").trim().slice(0, 200);
+      const content = String(args?.content || "").trim().slice(0, 12000);
+      if (!label || !content) {
+        throw new Error("label and content are required");
+      }
+      const mutation = queueAgentContextMutation(req, {
+        action: "add",
+        scope,
+        id: `ctx-${randomBytes(8).toString("hex")}`,
+        label,
+        content,
+        enabled: args?.enabled !== false
+      });
+      await appendAuditLog(req, "agent-tool", { name: callName, scope, label });
+      return { ok: true, mutation };
+    }
+    case "update_context": {
+      const scope = normalizeAgentContextScope(args?.scope);
+      const id = String(args?.id || "").trim().slice(0, 120);
+      const label = String(args?.label || "").trim().slice(0, 200);
+      if (!id && !label) {
+        throw new Error("id or label is required");
+      }
+      const mutation = queueAgentContextMutation(req, {
+        action: "update",
+        scope,
+        id,
+        label,
+        newLabel: typeof args?.newLabel === "string" ? args.newLabel.trim().slice(0, 200) : undefined,
+        content: typeof args?.content === "string" ? args.content.slice(0, 12000) : undefined,
+        enabled: typeof args?.enabled === "boolean" ? args.enabled : undefined
+      });
+      await appendAuditLog(req, "agent-tool", { name: callName, scope, id: id || null, label: label || null });
+      return { ok: true, mutation };
+    }
+    case "remove_context": {
+      const scope = normalizeAgentContextScope(args?.scope);
+      const id = String(args?.id || "").trim().slice(0, 120);
+      const label = String(args?.label || "").trim().slice(0, 200);
+      if (!id && !label) {
+        throw new Error("id or label is required");
+      }
+      const mutation = queueAgentContextMutation(req, { action: "remove", scope, id, label });
+      await appendAuditLog(req, "agent-tool", { name: callName, scope, id: id || null, label: label || null });
+      return { ok: true, mutation };
     }
     case "list_directory": {
       const result = await getFileList(args?.path || "");
@@ -7169,6 +7416,7 @@ async function generateChatResponse(req) {
 app.post("/api/chat", async (req, res) => {
   try {
     const result = await generateChatResponse(req);
+    result.contextMutations = Array.isArray(req.agentContextMutations) ? req.agentContextMutations : [];
     return res.json(result);
   } catch (error) {
     const status = error?.status || 500;
@@ -7216,6 +7464,7 @@ app.post("/api/chat/jobs", async (req, res) => {
       setChatJobStatus(current, "running", { eventPayload: { provider, traceId: current.traceId } });
       try {
         const result = await generateChatResponse(reqClone);
+        result.contextMutations = Array.isArray(reqClone.agentContextMutations) ? reqClone.agentContextMutations : [];
         if (current.status !== "cancelled") {
           setChatJobStatus(current, "completed", { result, eventPayload: { traceId: current.traceId } });
         }
@@ -7733,6 +7982,7 @@ app.post("/api/files/upload", (req, res, next) => {
 app.post("/api/files/upload/chunk/start", async (req, res) => {
   try {
     cleanupExpiredUploadSessions();
+    await cleanupExpiredUploadSessionFiles();
     const size = Math.max(0, Number(req.body?.size || 0));
     const basePath = String(req.body?.path || "");
     const requestedRelative = normalizeSandboxRelativePath(req.body?.relativePath || req.body?.name || "upload.bin");
@@ -7753,26 +8003,32 @@ app.post("/api/files/upload/chunk/start", async (req, res) => {
     const tempPath = path.join(uploadRoot, `${uploadId}.part`);
     await fsp.writeFile(tempPath, Buffer.alloc(0));
 
-    const totalChunks = Math.max(1, Math.ceil(size / chunkUploadChunkSizeBytes));
-    uploadSessionStore.set(uploadId, {
+    const requestedChunkSizeValue = Number(req.body?.chunkSizeBytes || chunkUploadChunkSizeBytes);
+    const requestedChunkSize = Number.isFinite(requestedChunkSizeValue) ? requestedChunkSizeValue : chunkUploadChunkSizeBytes;
+    const selectedChunkSize = Math.max(256 * 1024, Math.min(chunkUploadChunkSizeBytes, requestedChunkSize));
+    const totalChunks = Math.max(1, Math.ceil(size / selectedChunkSize));
+    const session = {
       id: uploadId,
       workspaceCode: getWorkspaceContext().code,
       targetRel,
       targetPath,
       tempPath,
       expectedSize: size,
+      chunkSizeBytes: selectedChunkSize,
       totalChunks,
       nextChunkIndex: 0,
       receivedBytes: 0,
       updatedAt: Date.now()
-    });
+    };
+    uploadSessionStore.set(uploadId, session);
+    await persistUploadSession(session);
 
     return res.json({
       ok: true,
       workspaceCode: getWorkspaceContext().code,
       uploadId,
       path: targetRel,
-      chunkSizeBytes: chunkUploadChunkSizeBytes,
+      chunkSizeBytes: selectedChunkSize,
       totalChunks
     });
   } catch (error) {
@@ -7792,7 +8048,7 @@ app.post("/api/files/upload/chunk/:uploadId", express.raw({ type: "application/o
       return res.status(400).json({ error: "chunk index must be a non-negative integer" });
     }
 
-    const session = getUploadSessionOrThrow(uploadId);
+    const session = await getUploadSessionOrThrow(uploadId);
     if (chunkIndex < session.nextChunkIndex) {
       return res.json({
         ok: true,
@@ -7817,6 +8073,7 @@ app.post("/api/files/upload/chunk/:uploadId", express.raw({ type: "application/o
     session.nextChunkIndex += 1;
     session.receivedBytes += chunkBuffer.length;
     session.updatedAt = Date.now();
+    await persistUploadSession(session);
 
     return res.json({
       ok: true,
@@ -7838,13 +8095,14 @@ app.get("/api/files/upload/chunk/:uploadId", async (req, res) => {
       return res.status(400).json({ error: "uploadId is required" });
     }
 
-    const session = getUploadSessionOrThrow(uploadId);
+    const session = await getUploadSessionOrThrow(uploadId);
     return res.json({
       ok: true,
       workspaceCode: getWorkspaceContext().code,
       uploadId,
       path: session.targetRel,
       expectedSize: session.expectedSize,
+      chunkSizeBytes: session.chunkSizeBytes,
       receivedBytes: session.receivedBytes,
       nextChunkIndex: session.nextChunkIndex,
       totalChunks: session.totalChunks,
@@ -7862,7 +8120,7 @@ app.post("/api/files/upload/chunk/:uploadId/complete", async (req, res) => {
       return res.status(400).json({ error: "uploadId is required" });
     }
 
-    const session = getUploadSessionOrThrow(uploadId);
+    const session = await getUploadSessionOrThrow(uploadId);
     if (session.nextChunkIndex !== session.totalChunks) {
       return res.status(409).json({ error: `upload incomplete: ${session.nextChunkIndex}/${session.totalChunks} chunks received` });
     }
@@ -7875,6 +8133,7 @@ app.post("/api/files/upload/chunk/:uploadId/complete", async (req, res) => {
     await fsp.mkdir(path.dirname(session.targetPath), { recursive: true });
     await fsp.rename(session.tempPath, session.targetPath);
     uploadSessionStore.delete(uploadId);
+    await fsp.unlink(getUploadSessionMetadataPath(uploadId)).catch(() => {});
 
     await commitSandboxSnapshot(`upload chunked 1 file (${session.targetRel})`);
     await appendAuditLog(req, "upload-chunked", { path: session.targetRel, size: stat.size });
