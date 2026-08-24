@@ -4941,8 +4941,7 @@ function normalizeAgentContextScope(value) {
   return String(value || "chat").trim().toLowerCase() === "global" ? "global" : "chat";
 }
 
-function getAgentContextEntries(req, scope) {
-  const source = req.body?.contextEntries?.[scope];
+function normalizeAgentContextEntries(source) {
   return (Array.isArray(source) ? source : []).slice(0, 60).map((entry) => ({
     id: String(entry?.id || "").slice(0, 120),
     label: String(entry?.label || "Untitled context").slice(0, 200),
@@ -4955,12 +4954,58 @@ function getAgentContextEntries(req, scope) {
   }));
 }
 
+function getAgentContextState(req) {
+  if (!req.agentContextState) {
+    req.agentContextState = {
+      chat: normalizeAgentContextEntries(req.body?.contextEntries?.chat),
+      global: normalizeAgentContextEntries(req.body?.contextEntries?.global)
+    };
+  }
+  return req.agentContextState;
+}
+
+function getAgentContextEntries(req, scope) {
+  return getAgentContextState(req)[normalizeAgentContextScope(scope)];
+}
+
+function findAgentContextEntryIndex(entries, mutation) {
+  const id = String(mutation?.id || "").trim();
+  const label = String(mutation?.label || "").trim().toLowerCase();
+  return entries.findIndex((entry) => (id && entry.id === id)
+    || (label && entry.label.toLowerCase() === label));
+}
+
 function queueAgentContextMutation(req, mutation) {
   if (!Array.isArray(req.agentContextMutations)) {
     req.agentContextMutations = [];
   }
   if (req.agentContextMutations.length >= 60) {
     throw new Error("context mutation limit reached for this response");
+  }
+  const scope = normalizeAgentContextScope(mutation?.scope);
+  const entries = getAgentContextEntries(req, scope);
+  const matchIndex = findAgentContextEntryIndex(entries, mutation);
+  if (mutation.action === "add") {
+    if (entries.length >= 60) {
+      throw new Error("context entry limit reached for this scope");
+    }
+    entries.push(normalizeAgentContextEntries([mutation])[0]);
+  } else if (mutation.action === "update") {
+    if (matchIndex < 0) {
+      throw new Error("context entry not found");
+    }
+    const existing = entries[matchIndex];
+    entries[matchIndex] = normalizeAgentContextEntries([{
+      ...existing,
+      label: mutation.newLabel || existing.label,
+      content: mutation.content === undefined ? existing.content : mutation.content,
+      enabled: mutation.enabled === undefined ? existing.enabled : mutation.enabled
+    }])[0];
+  } else if (mutation.action === "remove") {
+    if (matchIndex < 0) {
+      throw new Error("context entry not found");
+    }
+    entries.splice(matchIndex, 1);
   }
   req.agentContextMutations.push(mutation);
   return mutation;

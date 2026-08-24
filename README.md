@@ -15,6 +15,7 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
 - OpenAPI schema endpoint for machine-readable API discovery
 - Chat Archive page for cross-device export/import of chat history
 - Per-operation audit log page for file and git tool usage
+- Planned bounded subagent orchestration described in [SUBAGENTS.md](SUBAGENTS.md)
 
 ## Requirements
 
