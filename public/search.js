@@ -52,7 +52,9 @@ function renderResults(items) {
     li.style.cursor = "default";
 
     const heading = document.createElement("div");
-    heading.innerHTML = `<strong>${result.path}</strong>`;
+    const path = document.createElement("strong");
+    path.textContent = String(result.path || "");
+    heading.appendChild(path);
 
     const meta = document.createElement("div");
     meta.style.marginTop = "4px";

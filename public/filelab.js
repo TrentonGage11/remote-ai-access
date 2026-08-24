@@ -1402,8 +1402,8 @@ async function switchWorkspace() {
       body: JSON.stringify({ accessCode: code })
     });
     const url = new URL(window.location.href);
-    url.searchParams.set("access_code", code);
-    window.location.href = url.toString();
+    url.searchParams.delete("access_code");
+    window.location.replace(url.toString());
   } catch (error) {
     setStatus(`Error: ${error.message}`);
   } finally {
@@ -1883,11 +1883,6 @@ function buildDirectFileLabLink(pathValue, includeCursor = false) {
   }
 
   const params = new URLSearchParams({ path: normalizedPath });
-  const accessCode = normalizeWorkspaceCode(currentWorkspaceCode);
-  if (accessCode && accessCode !== "default") {
-    params.set("access_code", accessCode);
-  }
-
   if (includeCursor) {
     const cursor = getEditorCursorLineCol();
     params.set("line", String(cursor.line));
@@ -2062,10 +2057,8 @@ async function uploadFilesChunked(files, bypassCode, totalBytes) {
 
     if (resumeUploadId) {
       try {
-        const statusUrl = bypassCode
-          ? `/api/files/upload/chunk/${encodeURIComponent(resumeUploadId)}?upload_code=${encodeURIComponent(bypassCode)}`
-          : `/api/files/upload/chunk/${encodeURIComponent(resumeUploadId)}`;
-        const status = await apiJson(statusUrl);
+        const statusUrl = `/api/files/upload/chunk/${encodeURIComponent(resumeUploadId)}`;
+        const status = await apiJson(statusUrl, { headers: requestHeaders });
         if (Number(status.expectedSize || 0) === Number(file.size || 0)) {
           uploadId = resumeUploadId;
           expectedChunks = Math.max(1, Number(status.totalChunks || expectedChunks));
@@ -2086,9 +2079,7 @@ async function uploadFilesChunked(files, bypassCode, totalBytes) {
       mimeType: String(file.type || "application/octet-stream")
     };
 
-    const startUrl = bypassCode
-      ? `/api/files/upload/chunk/start?upload_code=${encodeURIComponent(bypassCode)}`
-      : "/api/files/upload/chunk/start";
+    const startUrl = "/api/files/upload/chunk/start";
 
       const started = await apiJson(startUrl, {
       method: "POST",
@@ -2111,10 +2102,7 @@ async function uploadFilesChunked(files, bypassCode, totalBytes) {
       const end = Math.min(file.size, start + chunkSize);
       const chunk = file.slice(start, end);
 
-      const chunkUrlBase = `/api/files/upload/chunk/${encodeURIComponent(uploadId)}?index=${chunkIndex}`;
-      const chunkUrl = bypassCode
-        ? `${chunkUrlBase}&upload_code=${encodeURIComponent(bypassCode)}`
-        : chunkUrlBase;
+      const chunkUrl = `/api/files/upload/chunk/${encodeURIComponent(uploadId)}?index=${chunkIndex}`;
 
       await fetch(chunkUrl, {
         method: "POST",
@@ -2132,9 +2120,7 @@ async function uploadFilesChunked(files, bypassCode, totalBytes) {
       setStatus(`Uploading ${files.length} file(s)... ${formatUploadProgress(currentOverall, totalBytes)} [file ${fileIndex + 1}/${files.length}, chunk ${chunkIndex + 1}/${expectedChunks}]`);
     }
 
-    const completeUrl = bypassCode
-      ? `/api/files/upload/chunk/${encodeURIComponent(uploadId)}/complete?upload_code=${encodeURIComponent(bypassCode)}`
-      : `/api/files/upload/chunk/${encodeURIComponent(uploadId)}/complete`;
+    const completeUrl = `/api/files/upload/chunk/${encodeURIComponent(uploadId)}/complete`;
 
     const completed = await apiJson(completeUrl, {
       method: "POST",
@@ -2435,9 +2421,7 @@ async function uploadFiles(files) {
     requestHeaders[apiAuth.headerName] = apiAuth.key;
   }
 
-  const uploadUrl = bypassCode
-    ? `/api/files/upload?upload_code=${encodeURIComponent(bypassCode)}`
-    : "/api/files/upload";
+  const uploadUrl = "/api/files/upload";
 
   uploadInFlight = true;
   let lastLoaded = 0;

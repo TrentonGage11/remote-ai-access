@@ -58,7 +58,9 @@ async function loadSnapshots() {
       li.style.cursor = "default";
 
       const title = document.createElement("div");
-      title.innerHTML = `<strong>${item.shortHash || ""}</strong> ${item.subject || ""}`;
+      const hash = document.createElement("strong");
+      hash.textContent = String(item.shortHash || "");
+      title.append(hash, document.createTextNode(` ${String(item.subject || "")}`));
 
       const meta = document.createElement("div");
       meta.style.marginTop = "4px";

@@ -329,8 +329,8 @@ async function switchWorkspace() {
     }
 
     const url = new URL(window.location.href);
-    url.searchParams.set("access_code", code);
-    window.location.href = url.toString();
+    url.searchParams.delete("access_code");
+    window.location.replace(url.toString());
   } catch (error) {
     statusEl.textContent = `Error: ${error.message}`;
   } finally {

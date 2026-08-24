@@ -99,6 +99,10 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
 
 ## Agent tool-calling mode
 
+- Agent mode requires a valid configured API key, even when ordinary chat is available behind Basic Auth.
+- State-changing browser API requests must come from the configured application origin; non-browser clients must authenticate with an API key.
+- Chat and workspace-selection POST requests accept JSON only.
+
 - Chat UI includes an `Agent Tools` toggle for configured OpenAI, Google Gemini, and xAI providers.
 - When enabled, `/api/chat` runs a server-side tool-calling loop so the model can actually execute tools.
 - Built-in agent tools:
@@ -171,4 +175,6 @@ Detailed tool docs are exposed at `api-tools.html` and `GET /api/tools`.
 
 - Do not expose API key in frontend code
 - Enable `ENABLE_BASIC_AUTH=true` for shared deployments
+- Keep `APP_BASE_URL` set to the canonical HTTPS origin so same-origin request validation is deterministic
+- Raw workspace HTML previews run in a script-disabled, opaque-origin iframe
 - Keep dependencies updated

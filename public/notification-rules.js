@@ -138,7 +138,9 @@ function renderRules() {
     li.style.cursor = "default";
 
     const title = document.createElement("div");
-    title.innerHTML = `<strong>${rule.enabled ? "[ON]" : "[OFF]"} ${rule.name}</strong>`;
+    const name = document.createElement("strong");
+    name.textContent = `${rule.enabled ? "[ON]" : "[OFF]"} ${String(rule.name || "")}`;
+    title.appendChild(name);
 
     const meta = document.createElement("div");
     meta.style.marginTop = "4px";

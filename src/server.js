@@ -516,6 +516,28 @@ function getEffectiveSecuritySettingsSync() {
   };
 }
 
+function hasValidApiKey(req, security = getEffectiveSecuritySettingsSync()) {
+  if (!security.apiKeyAuthEnabled || security.apiKeys.length === 0) {
+    return false;
+  }
+  const providedKey = String(req?.headers?.[security.apiKeyHeaderName] || "").trim();
+  return Boolean(providedKey) && security.apiKeys.includes(providedKey);
+}
+
+function assertAgentToolAuthorized(req) {
+  const security = getEffectiveSecuritySettingsSync();
+  if (!security.apiKeyAuthEnabled || security.apiKeys.length === 0) {
+    const error = new Error("Agent tools require API key authentication to be configured");
+    error.status = 503;
+    throw error;
+  }
+  if (!hasValidApiKey(req, security)) {
+    const error = new Error("API key required for agent tools");
+    error.status = 401;
+    throw error;
+  }
+}
+
 function parseCookieHeader(headerValue) {
   const source = String(headerValue || "");
   const out = {};
@@ -607,7 +629,8 @@ function getAuditLogPath() {
 
 function setWorkspaceCookie(res, code) {
   const encoded = encodeURIComponent(code);
-  const cookieValue = `${workspaceCookieName}=${encoded}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`;
+  const secure = configuredAppBaseUrl.startsWith("https://") ? "; Secure" : "";
+  const cookieValue = `${workspaceCookieName}=${encoded}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000${secure}`;
   const existing = res.getHeader("Set-Cookie");
   if (!existing) {
     res.setHeader("Set-Cookie", cookieValue);
@@ -621,11 +644,10 @@ function setWorkspaceCookie(res, code) {
 }
 
 function resolveRequestedWorkspaceCode(req) {
-  const queryCode = normalizeWorkspaceCode(req.query?.access_code || req.query?.workspace || req.query?.code);
   const headerCode = normalizeWorkspaceCode(req.headers["x-workspace-code"]);
   const cookies = parseCookieHeader(req.headers.cookie || "");
   const cookieCode = normalizeWorkspaceCode(cookies[workspaceCookieName]);
-  const resolved = queryCode || headerCode || cookieCode || defaultWorkspaceCode;
+  const resolved = headerCode || cookieCode || defaultWorkspaceCode;
 
   if (allowedWorkspaceCodes.length > 0 && !allowedWorkspaceCodes.includes(resolved)) {
     return null;
@@ -636,8 +658,7 @@ function resolveRequestedWorkspaceCode(req) {
 
 function getUploadBypassCode(req) {
   const headerCode = normalizeUploadBypassCode(req.headers["x-upload-bypass-code"] || "");
-  const queryCode = normalizeUploadBypassCode(req.query?.upload_code || "");
-  return headerCode || queryCode || "";
+  return headerCode;
 }
 
 function isUploadLimitBypassAllowed(req) {
@@ -5128,6 +5149,7 @@ const agentToolDefinitions = [
 ];
 
 async function executeAgentTool(req, callName, args) {
+  assertAgentToolAuthorized(req);
   switch (callName) {
     case "list_tools": {
       const result = {
@@ -6031,20 +6053,13 @@ app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false, limit: "16kb" }));
 
 app.use((req, res, next) => {
-  const traceId = resolveRequestTraceId(req) || createTraceId();
+  const traceId = createTraceId();
   req.traceId = traceId;
   res.setHeader("x-trace-id", traceId);
   next();
 });
 
 app.use((req, res, next) => {
-  const queryCode = normalizeWorkspaceCode(req.query?.access_code || req.query?.workspace || req.query?.code);
-  if (queryCode) {
-    if (allowedWorkspaceCodes.length > 0 && !allowedWorkspaceCodes.includes(queryCode)) {
-      return res.status(403).send("Invalid workspace code.");
-    }
-    setWorkspaceCookie(res, queryCode);
-  }
   next();
 });
 
@@ -6179,10 +6194,7 @@ app.use("/api", (req, res, next) => {
     return;
   }
 
-  const headerValue = String(req.headers[security.apiKeyHeaderName] || "").trim();
-  const providedKey = headerValue;
-
-  if ((!providedKey || !security.apiKeys.includes(providedKey)) && !hasValidBrowserFileSession(req, pathname)) {
+  if (!hasValidApiKey(req, security) && !hasValidBrowserFileSession(req, pathname)) {
     const hint = security.apiKeyRequireHeaderOnly
       ? `Provide header ${security.apiKeyHeaderName}`
       : `Provide header ${security.apiKeyHeaderName}`;
@@ -6196,16 +6208,47 @@ app.use("/api", (req, res, next) => {
 });
 
 app.use("/api", (req, res, next) => {
+  if (["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+    return next();
+  }
+
+  const origin = String(req.headers.origin || "").trim();
+  const trustedOrigins = new Set(allowedOrigins);
+  try {
+    trustedOrigins.add(new URL(configuredAppBaseUrl || getRequestOrigin(req)).origin);
+  } catch {
+    // A malformed request origin is never trusted.
+  }
+
+  if (origin) {
+    if (!trustedOrigins.has(origin)) {
+      return res.status(403).json({ error: "Cross-origin state-changing requests are not allowed" });
+    }
+  } else if (!hasValidApiKey(req)) {
+    return res.status(403).json({ error: "State-changing API requests require a trusted Origin or API key" });
+  }
+
+  const pathname = new URL(req.originalUrl || req.url || "/", appBaseUrl).pathname;
+  const jsonOnlyPaths = new Set([
+    "/api/chat",
+    "/api/chat/jobs",
+    "/api/session/workspace",
+    "/api/session/branch"
+  ]);
+  if (req.method === "POST" && jsonOnlyPaths.has(pathname) && !req.is("application/json")) {
+    return res.status(415).json({ error: "Content-Type application/json is required" });
+  }
+
+  return next();
+});
+
+app.use("/api", (req, res, next) => {
   const workspaceCode = resolveRequestedWorkspaceCode(req);
   if (!workspaceCode) {
     return res.status(403).json({ error: "workspace access code is not allowed" });
   }
 
   const context = workspaceContextForCode(workspaceCode);
-  if (normalizeWorkspaceCode(req.query?.access_code || req.query?.workspace || req.query?.code) && workspaceCode) {
-    setWorkspaceCookie(res, workspaceCode);
-  }
-
   workspaceContextStore.run(context, async () => {
     try {
       await ensureSandboxReady();
@@ -6313,7 +6356,13 @@ app.use(
   "/api/chat",
   cors({
     origin(origin, callback) {
-      if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+      const trustedOrigins = new Set(allowedOrigins);
+      try {
+        trustedOrigins.add(new URL(configuredAppBaseUrl || appBaseUrl).origin);
+      } catch {
+        // Invalid configured origins are not trusted.
+      }
+      if (!origin || trustedOrigins.has(origin)) {
         callback(null, true);
         return;
       }
@@ -6327,10 +6376,6 @@ app.use(
 app.get("/api/session/workspace", async (req, res) => {
   const context = getWorkspaceContext();
   const currentBranch = await getCurrentBranchName().catch(() => "");
-  const host = workspaceGitSshHost || String(req.headers.host || "").split(":")[0].trim() || "";
-  const remoteSshUrl = host
-    ? `${workspaceGitSshUser}@${host}:${String(context.bareRepoPath || "").replaceAll("\\", "/")}`
-    : "";
   const remoteHttpsUrl = getWorkspaceBareRepoHttpsUrl(req, context.code);
   res.json({
     workspaceCode: context.code,
@@ -6340,8 +6385,6 @@ app.get("/api/session/workspace", async (req, res) => {
     currentBranch: currentBranch || workspaceBranchState.get(context.code) || null,
     gitRemote: {
       remoteName: workspaceGitRemoteName,
-      remotePath: context.bareRepoPath,
-      remoteSshUrl,
       remoteHttpsUrl
     }
   });
@@ -6585,6 +6628,9 @@ async function generateChatResponse(req) {
   assertNotAborted(req);
   const provider = String(req.body?.provider || defaultProvider).trim().toLowerCase();
   const agentMode = Boolean(req.body?.agentMode);
+  if (agentMode) {
+    assertAgentToolAuthorized(req);
+  }
   if (provider !== "openai" && provider !== "copilot" && provider !== "xai" && provider !== "google") {
     const error = new Error(`provider '${provider}' is not configured on this server yet`);
     error.status = 400;
@@ -7046,32 +7092,26 @@ app.get("/models.csv", (_req, res) => {
   res.sendFile(modelsCsvPath);
 });
 
-app.get("/api/tools", (_req, res) => {
+app.get("/api/tools", (req, res) => {
   const security = getEffectiveSecuritySettingsSync();
   const agentToolNames = agentToolDefinitions.map((tool) => tool.function.name);
   const context = getWorkspaceContext();
-  const workspaceRemotePath = context.bareRepoPath;
-  const host = workspaceGitSshHost || "<ssh-host>";
-  const workspaceRemoteSshUrl = `${workspaceGitSshUser}@${host}:${String(workspaceRemotePath || "").replaceAll("\\", "/")}`;
   res.json({
-    sandboxRoot: context.sandboxRoot,
     workspaceCode: context.code,
     workspaceRepository: {
-      sourceOfTruth: context.sandboxRoot,
+      sourceOfTruth: "server-managed workspace",
       autoSessionBranching: enableAutoSessionBranching,
       sessionBranchPrefix,
       lastKnownBranch: workspaceBranchState.get(context.code) || null
     },
     workspaceBackups: {
       enabled: enableNightlyWorkspaceBackup,
-      backupRoot: workspaceBackupRoot,
       utcHour: workspaceBackupUtcHour,
       retentionDays: workspaceBackupRetentionDays
     },
     workspaceGitRemote: {
       remoteName: workspaceGitRemoteName,
-      remotePath: workspaceRemotePath,
-      remoteSshUrl: workspaceRemoteSshUrl
+      remoteHttpsUrl: getWorkspaceBareRepoHttpsUrl(req, context.code)
     },
     uploadPolicy: {
       defaultMaxBytes: defaultUploadMaxBytes,
@@ -7120,7 +7160,7 @@ app.get("/api/tools", (_req, res) => {
       "Chat requests support autoCompact=true to send a bounded provider context while preserving the full browser chat archive/history.",
       "Use /api/files/format before /api/files/write when you want prettified output.",
       "Use /api/files/git/log to inspect snapshots and /api/files/git/revert to roll back.",
-      "Set agentMode=true in /api/chat (openai or xai provider) to enable automatic tool-calling."
+      "Set agentMode=true with a valid API key in /api/chat to enable automatic tool-calling."
     ],
     agentToolCalling: {
       enabled: true,
