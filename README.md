@@ -102,6 +102,8 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
 - Agent mode requires a valid configured API key, even when ordinary chat is available behind Basic Auth.
 - State-changing browser API requests must come from the configured application origin; non-browser clients must authenticate with an API key.
 - Chat and workspace-selection POST requests accept JSON only.
+- Optional Agent Reach tools provide semantic web search, YouTube search/transcripts, and backend health checks. Configure their fixed executable paths with the `AGENT_REACH_*` environment variables.
+- YouTube may block transcript extraction from VPS addresses. Use `AGENT_REACH_PROXY` or a cookie file exported from a dedicated account via `AGENT_REACH_YOUTUBE_COOKIES_FILE`; do not use a primary-account cookie file.
 
 - Chat UI includes an `Agent Tools` toggle for configured OpenAI, Google Gemini, and xAI providers.
 - When enabled, `/api/chat` runs a server-side tool-calling loop so the model can actually execute tools.

@@ -93,6 +93,7 @@ let chatJobCounter = 0;
 const workspaceContextStore = new AsyncLocalStorage();
 const workspaceReadyPromises = new Map();
 const workspaceBranchState = new Map();
+const workspaceGitQueues = new Map();
 const terminalRuntime = String(process.env.TERMINAL_RUNTIME || "host").trim().toLowerCase() === "docker" ? "docker" : "host";
 const terminalDockerImage = String(process.env.TERMINAL_DOCKER_IMAGE || "node:20-bookworm").trim() || "node:20-bookworm";
 const terminalDockerMemory = String(process.env.TERMINAL_DOCKER_MEMORY || "1g").trim() || "1g";
@@ -192,6 +193,13 @@ const agentMaxSteps = Math.max(1, Math.min(agentMaxStepsHardLimit, Number(proces
 const agentMaxStepsOverrideLimit = Math.max(agentMaxSteps, Math.min(agentMaxStepsHardLimit, Number(process.env.AGENT_MAX_STEPS_OVERRIDE_LIMIT || 40)));
 const agentMaxStepsOverrideCode = String(process.env.AGENT_MAX_STEPS_OVERRIDE_CODE || "").trim();
 const agentWebTimeoutMs = Math.max(1000, Math.min(40000, Number(process.env.AGENT_WEB_TIMEOUT_MS || 16000)));
+const agentReachHome = path.resolve(process.env.AGENT_REACH_HOME || "/var/lib/remote-ai-access");
+const agentReachBin = path.resolve(process.env.AGENT_REACH_BIN || "/opt/agent-reach/venv/bin/agent-reach");
+const agentReachMcporterBin = path.resolve(process.env.AGENT_REACH_MCPORTER_BIN || "/opt/agent-reach/npm/bin/mcporter");
+const agentReachYtDlpBin = path.resolve(process.env.AGENT_REACH_YTDLP_BIN || "/opt/agent-reach/venv/bin/yt-dlp");
+const agentReachTimeoutMs = Math.max(5000, Math.min(120000, Number(process.env.AGENT_REACH_TIMEOUT_MS || 45000)));
+const agentReachProxy = String(process.env.AGENT_REACH_PROXY || "").trim();
+const agentReachYoutubeCookiesFile = String(process.env.AGENT_REACH_YOUTUBE_COOKIES_FILE || "").trim();
 const chatMessageMaxChars = Math.max(1000, Math.min(20000, Number(process.env.CHAT_MESSAGE_MAX_CHARS || 8000)));
 const chatContextMaxChars = Math.max(chatMessageMaxChars, Math.min(200000, Number(process.env.CHAT_CONTEXT_MAX_CHARS || 32000)));
 const chatCompactionSummaryMaxChars = Math.max(1000, Math.min(chatContextMaxChars, Number(process.env.CHAT_COMPACTION_SUMMARY_MAX_CHARS || 6000)));
@@ -1014,8 +1022,20 @@ async function streamFileShare(req, res, share) {
   await pipeline(fs.createReadStream(absolute, { start, end }), res);
 }
 
-async function runGit(args, allowFail = false) {
-  const sandboxRoot = getSandboxRoot();
+function enqueueWorkspaceGitOperation(operation) {
+  const workspaceCode = getWorkspaceContext().code;
+  const previous = workspaceGitQueues.get(workspaceCode) || Promise.resolve();
+  const current = previous.catch(() => {}).then(operation);
+  workspaceGitQueues.set(workspaceCode, current);
+  current.finally(() => {
+    if (workspaceGitQueues.get(workspaceCode) === current) {
+      workspaceGitQueues.delete(workspaceCode);
+    }
+  }).catch(() => {});
+  return current;
+}
+
+async function runGitCommand(sandboxRoot, args, allowFail = false) {
   try {
     return await execFileAsync("git", args, { cwd: sandboxRoot });
   } catch (error) {
@@ -1028,6 +1048,11 @@ async function runGit(args, allowFail = false) {
     }
     throw error;
   }
+}
+
+async function runGit(args, allowFail = false) {
+  const sandboxRoot = getSandboxRoot();
+  return enqueueWorkspaceGitOperation(() => runGitCommand(sandboxRoot, args, allowFail));
 }
 
 async function runGitInRepo(repoRoot, args, allowFail = false) {
@@ -1352,13 +1377,17 @@ async function ensureSandboxReady() {
   return readyPromise;
 }
 
-async function commitSandboxSnapshot(message) {
-  await runGit(["add", "-A"]);
-  const result = await runGit(["commit", "-m", message], true);
-  const nothingToCommit = /nothing to commit|no changes added/i.test(result.stderr || "");
-  if (!nothingToCommit && result.code && result.code !== 0) {
-    throw new Error(result.stderr || "git commit failed");
-  }
+async function commitSandboxSnapshot(message, paths = []) {
+  const sandboxRoot = getSandboxRoot();
+  const scopedPaths = [...new Set(paths.map((item) => String(item || "").trim()).filter(Boolean))];
+  return enqueueWorkspaceGitOperation(async () => {
+    await runGitCommand(sandboxRoot, ["add", "-A", ...(scopedPaths.length > 0 ? ["--", ...scopedPaths] : [])]);
+    const result = await runGitCommand(sandboxRoot, ["commit", "-m", message], true);
+    const nothingToCommit = /nothing to commit|no changes added/i.test(result.stderr || "");
+    if (!nothingToCommit && result.code && result.code !== 0) {
+      throw new Error(result.stderr || "git commit failed");
+    }
+  });
 }
 
 function createTraceId() {
@@ -2686,7 +2715,7 @@ async function writeTextFile(pathValue, content) {
   const text = typeof content === "string" ? content : "";
   await fsp.mkdir(path.dirname(absolute), { recursive: true });
   await fsp.writeFile(absolute, text, "utf8");
-  await commitSandboxSnapshot(`write ${rel || "."}`);
+  await commitSandboxSnapshot(`write ${rel || "."}`, [rel]);
   return { ok: true, path: rel };
 }
 
@@ -4631,6 +4660,185 @@ async function searchDuckDuckGo(query, limit) {
   }
 }
 
+async function runAgentReachCommand(command, args, timeout = agentReachTimeoutMs) {
+  const result = await execFileAsync(command, args, {
+    timeout,
+    maxBuffer: 4 * 1024 * 1024,
+    env: {
+      ...process.env,
+      HOME: agentReachHome,
+      AGENT_REACH_LANG: "en",
+      PATH: [
+        path.dirname(agentReachBin),
+        path.dirname(agentReachMcporterBin),
+        process.env.PATH || "/usr/local/bin:/usr/bin:/bin"
+      ].join(path.delimiter)
+    }
+  });
+  return String(result.stdout || "").trim();
+}
+
+function parseAgentReachJson(output, label) {
+  try {
+    return JSON.parse(output);
+  } catch {
+    throw new Error(`${label} returned invalid JSON`);
+  }
+}
+
+async function getAgentReachStatus() {
+  const output = await runAgentReachCommand(agentReachBin, ["doctor", "--json"]);
+  const raw = parseAgentReachJson(output, "Agent Reach doctor");
+  const channels = Object.fromEntries(Object.entries(raw).map(([id, channel]) => [id, {
+    status: String(channel?.status || "unknown"),
+    tier: Number.isFinite(Number(channel?.tier)) ? Number(channel.tier) : null,
+    activeBackend: channel?.active_backend || null,
+    backends: Array.isArray(channel?.backends) ? channel.backends.map((item) => String(item)) : []
+  }]));
+  const available = Object.values(channels).filter((channel) => channel.status === "ok").length;
+  return { summary: { available, total: Object.keys(channels).length }, channels };
+}
+
+async function searchInternetWithAgentReach(queryValue, limitValue) {
+  const query = String(queryValue || "").trim().slice(0, 500);
+  if (!query) {
+    throw new Error("query is required");
+  }
+  const limit = Math.max(1, Math.min(10, Number(limitValue || 5)));
+  const output = await runAgentReachCommand(agentReachMcporterBin, [
+    "call",
+    "exa.web_search_exa",
+    `query=${query}`,
+    `numResults=${limit}`,
+    "--output",
+    "json",
+    "--timeout",
+    String(agentReachTimeoutMs)
+  ]);
+  return { query, limit, provider: "exa", result: parseAgentReachJson(output, "Exa search") };
+}
+
+async function searchYoutubeWithAgentReach(queryValue, limitValue) {
+  const query = String(queryValue || "").trim().slice(0, 300);
+  if (!query) {
+    throw new Error("query is required");
+  }
+  const limit = Math.max(1, Math.min(10, Number(limitValue || 5)));
+  const output = await runAgentReachCommand(agentReachYtDlpBin, [
+    "--flat-playlist",
+    "--playlist-end",
+    String(limit),
+    "--dump-single-json",
+    "--no-warnings",
+    `ytsearch${limit}:${query}`
+  ]);
+  const data = parseAgentReachJson(output, "YouTube search");
+  const results = (Array.isArray(data?.entries) ? data.entries : []).slice(0, limit).map((item) => ({
+    id: String(item?.id || ""),
+    title: String(item?.title || ""),
+    url: item?.id ? `https://www.youtube.com/watch?v=${encodeURIComponent(item.id)}` : String(item?.url || ""),
+    channel: String(item?.channel || item?.uploader || ""),
+    duration: Number.isFinite(Number(item?.duration)) ? Number(item.duration) : null
+  }));
+  return { query, provider: "yt-dlp", results };
+}
+
+function assertYoutubeUrl(value) {
+  let url;
+  try {
+    url = new URL(String(value || "").trim());
+  } catch {
+    throw new Error("A valid YouTube URL is required");
+  }
+  const hostname = url.hostname.toLowerCase().replace(/^www\./, "");
+  if (!new Set(["youtube.com", "youtu.be", "youtube-nocookie.com", "m.youtube.com"]).has(hostname)) {
+    throw new Error("Only YouTube URLs are supported");
+  }
+  return url.toString();
+}
+
+function captionTextFromJson(data) {
+  return (Array.isArray(data?.events) ? data.events : [])
+    .map((event) => (Array.isArray(event?.segs) ? event.segs : []).map((segment) => String(segment?.utf8 || "")).join(""))
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function captionTextFromVtt(value) {
+  const seen = new Set();
+  return String(value || "")
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && line !== "WEBVTT" && !/^\d+$/.test(line) && !/-->/.test(line) && !/^Kind:|^Language:/i.test(line))
+    .map((line) => stripHtml(line))
+    .filter((line) => line && !seen.has(line) && seen.add(line))
+    .join("\n");
+}
+
+async function getYoutubeTranscriptWithAgentReach(urlValue, languageValue, maxCharsValue) {
+  const url = assertYoutubeUrl(urlValue);
+  const language = String(languageValue || "en").trim().toLowerCase().slice(0, 20) || "en";
+  const maxChars = Math.max(1000, Math.min(100000, Number(maxCharsValue || 30000)));
+  const accessArgs = [
+    ...(agentReachProxy ? ["--proxy", agentReachProxy] : []),
+    ...(agentReachYoutubeCookiesFile ? ["--cookies", path.resolve(agentReachYoutubeCookiesFile)] : [])
+  ];
+  let output;
+  try {
+    output = await runAgentReachCommand(agentReachYtDlpBin, [
+      "--dump-single-json",
+      "--skip-download",
+      "--no-warnings",
+      ...accessArgs,
+      url
+    ]);
+  } catch (error) {
+    const details = String(error?.stderr || error?.message || error);
+    if (/not a bot|sign in|cookies/i.test(details)) {
+      throw new Error("YouTube blocked transcript access from this server IP. Configure AGENT_REACH_PROXY or a dedicated-account AGENT_REACH_YOUTUBE_COOKIES_FILE.");
+    }
+    throw error;
+  }
+  const info = parseAgentReachJson(output, "YouTube metadata");
+  const captions = { ...(info?.automatic_captions || {}), ...(info?.subtitles || {}) };
+  const languageKey = Object.keys(captions).find((key) => key.toLowerCase() === language)
+    || Object.keys(captions).find((key) => key.toLowerCase().startsWith(`${language}-`))
+    || Object.keys(captions).find((key) => key.toLowerCase().startsWith("en"));
+  const tracks = languageKey ? captions[languageKey] : [];
+  const track = (Array.isArray(tracks) ? tracks : []).find((item) => item?.ext === "json3")
+    || (Array.isArray(tracks) ? tracks : []).find((item) => item?.ext === "vtt")
+    || (Array.isArray(tracks) ? tracks : [])[0];
+  if (!track?.url) {
+    throw new Error("No transcript is available for this video");
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), agentReachTimeoutMs);
+  try {
+    const response = await fetch(track.url, { signal: controller.signal, headers: info?.http_headers || {} });
+    if (!response.ok) {
+      throw new Error(`Transcript download failed (${response.status})`);
+    }
+    const raw = await response.text();
+    const transcript = track.ext === "json3"
+      ? captionTextFromJson(parseAgentReachJson(raw, "YouTube transcript"))
+      : captionTextFromVtt(raw);
+    return {
+      url,
+      id: String(info?.id || ""),
+      title: String(info?.title || ""),
+      channel: String(info?.channel || info?.uploader || ""),
+      language: languageKey,
+      transcript: transcript.slice(0, maxChars),
+      truncated: transcript.length > maxChars
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const agentToolDefinitions = [
   {
     type: "function",
@@ -4756,6 +4964,60 @@ const agentToolDefinitions = [
           limit: { type: "number" }
         },
         required: ["query"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "agent_reach_status",
+      description: "Check which Agent Reach internet channels and backends are currently available.",
+      parameters: { type: "object", properties: {}, required: [] }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_internet",
+      description: "Run a deeper semantic internet search through Agent Reach and Exa.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          limit: { type: "number", description: "Result count from 1 to 10" }
+        },
+        required: ["query"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_youtube",
+      description: "Search YouTube videos through Agent Reach and yt-dlp.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          limit: { type: "number", description: "Result count from 1 to 10" }
+        },
+        required: ["query"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_youtube_transcript",
+      description: "Extract available subtitles or automatic captions from a YouTube video.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string" },
+          language: { type: "string", description: "Preferred caption language, default en" },
+          maxChars: { type: "number", description: "Maximum transcript characters, up to 100000" }
+        },
+        required: ["url"]
       }
     }
   },
@@ -5265,6 +5527,26 @@ async function executeAgentTool(req, callName, args) {
       ]);
       const result = { query, stackOverflow, duckduckgo };
       await appendAuditLog(req, "agent-tool", { name: callName, query, stackCount: stackOverflow.length, webCount: duckduckgo.length });
+      return result;
+    }
+    case "agent_reach_status": {
+      const result = await getAgentReachStatus();
+      await appendAuditLog(req, "agent-tool", { name: callName, channelCount: result.summary.total, available: result.summary.available });
+      return result;
+    }
+    case "search_internet": {
+      const result = await searchInternetWithAgentReach(args?.query, args?.limit);
+      await appendAuditLog(req, "agent-tool", { name: callName, query: result.query, limit: result.limit, provider: result.provider });
+      return result;
+    }
+    case "search_youtube": {
+      const result = await searchYoutubeWithAgentReach(args?.query, args?.limit);
+      await appendAuditLog(req, "agent-tool", { name: callName, query: result.query, resultCount: result.results.length });
+      return result;
+    }
+    case "get_youtube_transcript": {
+      const result = await getYoutubeTranscriptWithAgentReach(args?.url, args?.language, args?.maxChars);
+      await appendAuditLog(req, "agent-tool", { name: callName, videoId: result.id, language: result.language, truncated: result.truncated });
       return result;
     }
     case "fetch_webpage": {
@@ -7168,6 +7450,10 @@ app.get("/api/tools", (req, res) => {
       tools: agentToolNames
     },
     agentToolReference: [
+      { toolName: "agent_reach_status", description: "Check Agent Reach channel health", whyUseful: "Know which internet backends are live" },
+      { toolName: "search_internet", description: "Semantic web search through Exa", whyUseful: "Deeper current web research" },
+      { toolName: "search_youtube", description: "Search YouTube through yt-dlp", whyUseful: "Find relevant videos" },
+      { toolName: "get_youtube_transcript", description: "Extract YouTube captions", whyUseful: "Research and summarize videos" },
       { toolName: "delete_file", description: "Delete file/folder", whyUseful: "Housekeeping control" },
       { toolName: "rename_file", description: "Rename/move files/folders", whyUseful: "Reorganize easily" },
       { toolName: "create_directory", description: "Create new folders", whyUseful: "Structured workspace" },
@@ -7373,7 +7659,7 @@ app.post("/api/files/write", async (req, res) => {
     const content = typeof req.body?.content === "string" ? req.body.content : "";
     await fsp.mkdir(path.dirname(absolute), { recursive: true });
     await fsp.writeFile(absolute, content, "utf8");
-    await commitSandboxSnapshot(`write ${rel || "."}`);
+    await commitSandboxSnapshot(`write ${rel || "."}`, [rel]);
     await appendAuditLog(req, "write", { path: rel, size: Buffer.byteLength(content, "utf8") });
     return res.json({ ok: true, path: rel });
   } catch (error) {
