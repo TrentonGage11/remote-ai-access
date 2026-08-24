@@ -1907,14 +1907,7 @@ function openPickerForInput(inputEl) {
   if (!inputEl) {
     return;
   }
-  if (typeof inputEl.showPicker === "function") {
-    try {
-      inputEl.showPicker();
-      return;
-    } catch {
-      // Fallback to click if showPicker is unsupported by the browser runtime.
-    }
-  }
+  inputEl.value = "";
   inputEl.click();
 }
 
