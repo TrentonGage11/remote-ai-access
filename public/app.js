@@ -1420,10 +1420,6 @@ function buildRequestBodyForUserMessage(chat, userMessageId) {
   const contextMessages = chat.messages.slice(0, userIndex + 1);
   const payloadMessages = buildPayloadMessages(contextMessages);
   const contextPreamble = buildContextPreamble(chat);
-  const messagesWithContext = contextPreamble
-    ? [{ role: "user", content: contextPreamble }, ...payloadMessages]
-    : payloadMessages;
-
   return {
     provider: chat.provider,
     model: chat.model,
@@ -1436,11 +1432,12 @@ function buildRequestBodyForUserMessage(chat, userMessageId) {
       : undefined,
     agentMaxStepsOverrideCode: chat.agentMaxStepsOverrideCode || undefined,
     autoCompact: config.chatCompaction?.enabled !== false,
+    persistentContext: contextPreamble || undefined,
     contextEntries: {
       chat: getChatContextEntries(chat),
       global: loadGlobalContextEntries()
     },
-    messages: messagesWithContext
+    messages: payloadMessages
   };
 }
 

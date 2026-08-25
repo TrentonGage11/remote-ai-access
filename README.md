@@ -96,7 +96,7 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
 - One-click button to copy all assistant replies in active chat
 - Markdown rendering now supports horizontal rules (`---`) and GitHub-style tables
 - Browser-local chat/global context entries support master toggles and individual include/exclude controls for every line
-- Chat requests support automatic provider-context compaction when message size limits are hit. This only changes the payload sent to the model; full local chat history remains available through Archive and History JSON.
+- Chat requests support automatic provider-context compaction when message size limits are hit. Persistent Context Manager content receives a reserved budget and remains in the provider payload while older chat is compacted; full local chat history remains available through Archive and History JSON.
 
 ## Agent tool-calling mode
 
@@ -122,6 +122,7 @@ Small web app you can host on an approved domain. It keeps your OpenAI API key o
 - Tool-calling metadata is exposed from `GET /api/tools`.
 - `run_terminal` accepts either `{ command: "git", args: ["status"] }` or command strings such as `git clone https://github.com/org/repo.git repo`, `cd repo && grep -R TODO .`, and `pwd && ls -la && git status 2>&1 || echo "No git repo here"`.
 - When `TERMINAL_RUNTIME=docker`, command strings run through `sh -lc` inside the container, so normal shell syntax works: `&&`, `||`, pipes, redirects, multiline backslashes, command substitution, and flags.
+- The hardened systemd service runs as `remote-ai-access` with `SupplementaryGroups=docker`; deployments must ensure that user and group exist and that `/var/run/docker.sock` remains group-accessible.
 - `run_terminal` keeps host-admin commands blocked in host mode, but now allow-lists common agent setup/exploration tools including Git, package managers, C/C++ build tools (`gcc`, `g++`, `cc`, `c++`, `cmake`, `ctest`, `cpack`, `make`, `ninja`), file tools (`cd`, `cp`, `mv`, `rm`, `chmod`, `grep`, `rg`, `find`, `diff`, `patch`), Python venv/pip tools, archive helpers, `7z`, `7za`, `7zr`, and `vfa`.
 - When `TERMINAL_RUNTIME=docker`, additional container-only commands are allowed, including `sh`, `bash`, `dash`, `apt`, `apt-get`, `dpkg`, `dpkg-query`, `curl`, `wget`, `jq`, `ctags`, `gdb`, `lldb`, `strace`, and `ldd`. Docker mode can inspect container paths such as `/usr/bin`.
 - In Docker mode, agents can pass `dockerImage` to `run_terminal`, `run_build`, or `POST /api/files/terminal` to request an allow-listed container image for that one command. Built-in choices include Node, Python, Go, Rust, Ubuntu, Debian, Alpine, Fedora, Arch, Kali, Parrot, BlackArch, Emscripten, WASI SDK, PyPA manylinux/musllinux, dockcross Linux/Windows/WebAssembly/Android cross-build images, Rust musl cross builds, LLVM/Clang, .NET SDK, `osxcross`, and `valgrind` images.

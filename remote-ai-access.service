@@ -1,6 +1,7 @@
 [Unit]
 Description=Remote AI Access Node Service
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -9,8 +10,25 @@ EnvironmentFile=/opt/remote-ai-access/.env
 ExecStart=/usr/bin/node /opt/remote-ai-access/src/server.js
 Restart=always
 RestartSec=3
-User=root
-Group=root
+User=remote-ai-access
+Group=remote-ai-access
+SupplementaryGroups=docker
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/remote-ai-access/sandbox
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

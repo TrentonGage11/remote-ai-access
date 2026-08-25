@@ -16,6 +16,7 @@ import { fileURLToPath } from "url";
 import { AsyncLocalStorage } from "async_hooks";
 import { createCipheriv, createDecipheriv, createHash, randomBytes, scrypt, timingSafeEqual } from "crypto";
 import { pipeline } from "stream/promises";
+import { resolveProviderMessageContext } from "./chat-context.js";
 
 const app = express();
 
@@ -2474,155 +2475,12 @@ function isHttpUrl(value) {
   }
 }
 
-function middleTruncate(value, maxChars) {
-  const text = String(value || "");
-  if (text.length <= maxChars) {
-    return text;
-  }
-  const marker = `\n\n[... ${text.length - maxChars} characters compacted ...]\n\n`;
-  const remaining = Math.max(0, maxChars - marker.length);
-  const head = Math.ceil(remaining * 0.55);
-  const tail = Math.max(0, remaining - head);
-  return `${text.slice(0, head)}${marker}${tail > 0 ? text.slice(-tail) : ""}`;
-}
-
-function sanitizeChatMessages(body) {
-  const rawMessages = Array.isArray(body?.messages)
-    ? body.messages
-    : [{ role: "user", content: body?.message }];
-
-  const messages = [];
-
-  for (const item of rawMessages) {
-    const role = item?.role;
-    const content = typeof item?.content === "string" ? item.content.trim() : "";
-
-    if ((role !== "user" && role !== "assistant") || !content) {
-      continue;
-    }
-
-    messages.push({ role, content });
-  }
-
-  return messages;
-}
-
-function validateProviderMessages(messages) {
-  if (!Array.isArray(messages) || messages.length === 0) {
-    return false;
-  }
-
-  let totalChars = 0;
-  for (const item of messages) {
-    const role = item?.role;
-    const content = typeof item?.content === "string" ? item.content.trim() : "";
-    if ((role !== "user" && role !== "assistant") || !content) {
-      return false;
-    }
-    totalChars += content.length;
-    if (content.length > chatMessageMaxChars || totalChars > chatContextMaxChars) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function normalizeMessages(body) {
-  const messages = sanitizeChatMessages(body);
-  return validateProviderMessages(messages) ? messages : null;
-}
-
-function summarizeCompactedMessages(messages, maxChars) {
-  const lines = [
-    "Conversation context was automatically compacted to fit provider message limits.",
-    "Full original chat history remains saved in the browser archive/history; this summary is only provider context.",
-    ""
-  ];
-
-  for (const [index, msg] of messages.entries()) {
-    const label = msg.role === "user" ? "User" : "Assistant";
-    const snippet = middleTruncate(msg.content.replace(/\s+/g, " ").trim(), 700);
-    lines.push(`${index + 1}. ${label}: ${snippet}`);
-    const joined = lines.join("\n");
-    if (joined.length >= maxChars) {
-      return middleTruncate(joined, maxChars);
-    }
-  }
-
-  return middleTruncate(lines.join("\n"), maxChars);
-}
-
-function compactMessagesForProvider(body) {
-  const original = sanitizeChatMessages(body);
-  if (original.length === 0) {
-    return null;
-  }
-
-  const recent = [];
-  let recentChars = 0;
-  const recentBudget = Math.max(chatMessageMaxChars, chatContextMaxChars - chatCompactionSummaryMaxChars - 1000);
-
-  for (let index = original.length - 1; index >= 0; index -= 1) {
-    const item = original[index];
-    const compactContent = middleTruncate(item.content, Math.max(1000, chatMessageMaxChars - 500));
-    const projected = recentChars + compactContent.length;
-    if (recent.length > 0 && projected > recentBudget) {
-      break;
-    }
-    recent.unshift({ role: item.role, content: compactContent });
-    recentChars += compactContent.length;
-  }
-
-  if (recent.length === 0) {
-    const latest = original[original.length - 1];
-    recent.push({
-      role: latest.role,
-      content: middleTruncate(latest.content, Math.max(1000, chatMessageMaxChars - 500))
-    });
-  }
-
-  const compactedCount = Math.max(0, original.length - recent.length);
-  const compacted = [];
-  if (compactedCount > 0) {
-    const summary = summarizeCompactedMessages(original.slice(0, compactedCount), chatCompactionSummaryMaxChars);
-    compacted.push({
-      role: "assistant",
-      content: summary
-    });
-  }
-  compacted.push(...recent);
-
-  if (!validateProviderMessages(compacted)) {
-    return null;
-  }
-
-  return {
-    messages: compacted,
-    metadata: {
-      applied: true,
-      originalMessageCount: original.length,
-      sentMessageCount: compacted.length,
-      compactedMessageCount: compactedCount,
-      originalChars: original.reduce((total, msg) => total + msg.content.length, 0),
-      sentChars: compacted.reduce((total, msg) => total + msg.content.length, 0)
-    }
-  };
-}
-
 function resolveMessageContext(body) {
-  const normalized = normalizeMessages(body);
-  if (normalized) {
-    return { messages: normalized, compaction: { applied: false } };
-  }
-
-  if (body?.autoCompact === true) {
-    const compacted = compactMessagesForProvider(body);
-    if (compacted?.messages) {
-      return { messages: compacted.messages, compaction: compacted.metadata };
-    }
-  }
-
-  return null;
+  return resolveProviderMessageContext(body, {
+    messageMaxChars: chatMessageMaxChars,
+    contextMaxChars: chatContextMaxChars,
+    summaryMaxChars: chatCompactionSummaryMaxChars
+  });
 }
 
 async function summarizeDirectoryContents(rootPath) {
