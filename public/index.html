@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="styles.css?v=20260824c" />
+    <link rel="stylesheet" href="styles.css?v=20260824d" />
   </head>
   <body>
     <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
@@ -96,7 +96,7 @@
         </section>
 
         <section class="card context-panel">
-          <details id="contextManagerDetails" class="context-disclosure">
+          <details id="contextManagerDetails" class="context-disclosure" data-disclosure-storage-key="remote-ai-access-context-manager-open-v1">
             <summary>
               <span role="heading" aria-level="2">Context Manager</span>
               <span id="contextManagerSummary" class="tab-meta">0 this chat · 0 all chats</span>
@@ -119,68 +119,72 @@
           </details>
         </section>
 
-        <section class="card tool-status-panel">
-          <div class="tool-status-head">
-            <h2>Last Tool Runs</h2>
-            <div class="top-actions">
-              <label class="model-field" for="toolRunsFilterSelect">
-                <span>Filter</span>
-                <select id="toolRunsFilterSelect" aria-label="Tool runs filter">
-                  <option value="all">All</option>
-                  <option value="agent">Agent tools only</option>
-                  <option value="file">File ops only</option>
-                </select>
-              </label>
-              <button id="refreshToolRunsBtn" class="btn btn-soft" type="button">Refresh</button>
+        <section class="card disclosure-panel">
+          <details class="context-disclosure" data-disclosure-storage-key="remote-ai-access-tool-runs-open-v1">
+            <summary><span role="heading" aria-level="2">Last Tool Runs</span></summary>
+            <div class="context-disclosure-body">
+              <div class="top-actions">
+                <label class="model-field" for="toolRunsFilterSelect">
+                  <span>Filter</span>
+                  <select id="toolRunsFilterSelect" aria-label="Tool runs filter">
+                    <option value="all">All</option>
+                    <option value="agent">Agent tools only</option>
+                    <option value="file">File ops only</option>
+                  </select>
+                </label>
+                <button id="refreshToolRunsBtn" class="btn btn-soft" type="button">Refresh</button>
+              </div>
+              <ul id="toolRunsList" class="tool-runs-list"></ul>
             </div>
-          </div>
-          <ul id="toolRunsList" class="tool-runs-list"></ul>
+          </details>
         </section>
 
-        <section class="card tool-status-panel">
-          <div class="tool-status-head">
-            <h2>Notification Settings</h2>
-          </div>
-          <div class="top-actions">
-            <label class="model-field model-check" for="notifyInfoToggle">
-              <span>Info</span>
-              <input id="notifyInfoToggle" type="checkbox" aria-label="Enable info notifications" />
-            </label>
-            <label class="model-field model-check" for="notifySuccessToggle">
-              <span>Success</span>
-              <input id="notifySuccessToggle" type="checkbox" aria-label="Enable success notifications" />
-            </label>
-            <label class="model-field model-check" for="notifyWarningToggle">
-              <span>Warning</span>
-              <input id="notifyWarningToggle" type="checkbox" aria-label="Enable warning notifications" />
-            </label>
-            <label class="model-field model-check" for="notifyErrorToggle">
-              <span>Error</span>
-              <input id="notifyErrorToggle" type="checkbox" aria-label="Enable error notifications" />
-            </label>
-            <label class="model-field" for="notifyDebounceInput">
-              <span>Debounce ms</span>
-              <input id="notifyDebounceInput" type="number" min="500" max="30000" step="100" value="1200" />
-            </label>
-          </div>
+        <section class="card disclosure-panel">
+          <details class="context-disclosure" data-disclosure-storage-key="remote-ai-access-notification-settings-open-v1">
+            <summary><span role="heading" aria-level="2">Notification Settings</span></summary>
+            <div class="context-disclosure-body">
+              <div class="top-actions">
+                <label class="model-field model-check" for="notifyInfoToggle">
+                  <span>Info</span>
+                  <input id="notifyInfoToggle" type="checkbox" aria-label="Enable info notifications" />
+                </label>
+                <label class="model-field model-check" for="notifySuccessToggle">
+                  <span>Success</span>
+                  <input id="notifySuccessToggle" type="checkbox" aria-label="Enable success notifications" />
+                </label>
+                <label class="model-field model-check" for="notifyWarningToggle">
+                  <span>Warning</span>
+                  <input id="notifyWarningToggle" type="checkbox" aria-label="Enable warning notifications" />
+                </label>
+                <label class="model-field model-check" for="notifyErrorToggle">
+                  <span>Error</span>
+                  <input id="notifyErrorToggle" type="checkbox" aria-label="Enable error notifications" />
+                </label>
+                <label class="model-field" for="notifyDebounceInput">
+                  <span>Debounce ms</span>
+                  <input id="notifyDebounceInput" type="number" min="500" max="30000" step="100" value="1200" />
+                </label>
+              </div>
+            </div>
+          </details>
         </section>
 
-        <section class="card tool-status-panel">
-          <div class="tool-status-head">
-            <h2>Run Trace</h2>
-            <div class="top-actions">
-              <a id="openTraceAuditBtn" class="btn btn-soft" href="audit.html" target="_blank" rel="noreferrer">Open Filtered Audit</a>
-              <button id="copyTraceAuditUrlBtn" class="btn btn-soft" type="button">Copy Audit Link</button>
+        <section class="card disclosure-panel">
+          <details class="context-disclosure" data-disclosure-storage-key="remote-ai-access-run-trace-open-v1">
+            <summary><span role="heading" aria-level="2">Run Trace</span></summary>
+            <div class="context-disclosure-body">
+              <div class="top-actions">
+                <a id="openTraceAuditBtn" class="btn btn-soft" href="audit.html" target="_blank" rel="noreferrer">Open Filtered Audit</a>
+                <button id="copyTraceAuditUrlBtn" class="btn btn-soft" type="button">Copy Audit Link</button>
+                <span id="traceStatusChip" class="tool-chip">No trace yet</span>
+                <button id="copyTraceBtn" class="btn btn-soft" type="button">Copy Trace ID</button>
+                <label class="model-field model-check" for="autoOpenTraceAuditToggle" style="margin: 0;">
+                  <span>Auto-open Audit</span>
+                  <input id="autoOpenTraceAuditToggle" type="checkbox" aria-label="Auto-open filtered audit when run completes" />
+                </label>
+              </div>
             </div>
-          </div>
-          <div class="top-actions" style="align-items: center; gap: 8px;">
-            <span id="traceStatusChip" class="tool-chip">No trace yet</span>
-            <button id="copyTraceBtn" class="btn btn-soft" type="button">Copy Trace ID</button>
-            <label class="model-field model-check" for="autoOpenTraceAuditToggle" style="margin: 0;">
-              <span>Auto-open Audit</span>
-              <input id="autoOpenTraceAuditToggle" type="checkbox" aria-label="Auto-open filtered audit when run completes" />
-            </label>
-          </div>
+          </details>
         </section>
 
         <section class="card composer">
@@ -202,6 +206,6 @@
     </main>
 
     <script src="api-auth.js?v=20260822a"></script>
-    <script type="module" src="app.js?v=20260824c"></script>
+    <script type="module" src="app.js?v=20260824d"></script>
   </body>
 </html>

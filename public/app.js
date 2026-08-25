@@ -17,8 +17,8 @@ const chatPanelEl = document.getElementById("chatPanel");
 const contextScopeSelectEl = document.getElementById("contextScopeSelect");
 const contextListEl = document.getElementById("contextList");
 const contextStatusEl = document.getElementById("contextStatus");
-const contextManagerDetailsEl = document.getElementById("contextManagerDetails");
 const contextManagerSummaryEl = document.getElementById("contextManagerSummary");
+const persistedDisclosureEls = document.querySelectorAll("[data-disclosure-storage-key]");
 const addContextEntryBtnEl = document.getElementById("addContextEntryBtn");
 const copyContextPreambleBtnEl = document.getElementById("copyContextPreambleBtn");
 const copyAllAssistantBtnEl = document.getElementById("copyAllAssistantBtn");
@@ -49,7 +49,6 @@ const CHAT_STATE_KEY = "remote-ai-access-chat-state-v1";
 const HISTORY_EXPORT_KEY = "remote-ai-access-history-v1";
 const CHAT_BACKUPS_KEY = "remote-ai-access-chat-backups-v1";
 const CONTEXT_GLOBAL_KEY = "remote-ai-access-context-global-v1";
-const CONTEXT_MANAGER_OPEN_KEY = "remote-ai-access-context-manager-open-v1";
 const CONTEXT_PREAMBLE_MAX_CHARS = 8000;
 const CONTEXT_MAX_ENTRIES = 60;
 const LEGACY_CHAT_STATE_KEYS = [
@@ -2796,10 +2795,11 @@ if (contextScopeSelectEl) {
   });
 }
 
-if (contextManagerDetailsEl) {
-  contextManagerDetailsEl.open = storageGet(CONTEXT_MANAGER_OPEN_KEY) === "1";
-  contextManagerDetailsEl.addEventListener("toggle", () => {
-    storageSet(CONTEXT_MANAGER_OPEN_KEY, contextManagerDetailsEl.open ? "1" : "0");
+for (const disclosureEl of persistedDisclosureEls) {
+  const storageKey = disclosureEl.dataset.disclosureStorageKey;
+  disclosureEl.open = storageGet(storageKey) === "1";
+  disclosureEl.addEventListener("toggle", () => {
+    storageSet(storageKey, disclosureEl.open ? "1" : "0");
   });
 }
 

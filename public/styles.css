@@ -700,18 +700,20 @@ textarea:focus {
   font-size: 1rem;
 }
 
-.context-panel {
+.context-panel,
+.disclosure-panel {
   padding-block: 12px;
 }
 
 .context-disclosure > summary {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
   cursor: pointer;
   font-size: 1rem;
   font-weight: 700;
+  list-style: none;
 }
 
 .context-disclosure,
@@ -722,8 +724,22 @@ textarea:focus {
   max-width: 100%;
 }
 
-.context-disclosure > summary::marker {
-  color: var(--accent);
+.context-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.context-disclosure > summary::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--accent);
+  border-bottom: 2px solid var(--accent);
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+
+.context-disclosure[open] > summary::before {
+  transform: rotate(45deg);
 }
 
 .context-disclosure > summary .tab-meta {
@@ -1652,6 +1668,8 @@ textarea:focus {
 .docs-shell {
   position: relative;
   z-index: 1;
+  width: 100%;
+  min-width: 0;
   max-width: 1120px;
   margin: 0 auto;
   padding: 20px 16px 28px;
@@ -1659,7 +1677,25 @@ textarea:focus {
   gap: 14px;
 }
 
+.docs-shell > *,
+.docs-shell .card,
+.docs-shell .topbar,
+.docs-shell .topbar > *,
+.docs-shell .top-actions {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.docs-shell input,
+.docs-shell textarea,
+.docs-shell select {
+  max-width: 100%;
+}
+
 .table-wrap {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   overflow-x: auto;
 }
 
@@ -1689,6 +1725,9 @@ textarea:focus {
 
 .doc-json {
   margin: 0;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   max-height: 52vh;
   overflow: auto;
   background: rgba(16, 34, 24, 0.08);
