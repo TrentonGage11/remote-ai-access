@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=20260824c" />
   </head>
   <body>
     <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
@@ -95,10 +95,14 @@
           <ol id="messageList" class="message-list"></ol>
         </section>
 
-        <section class="card tool-status-panel">
-          <div class="tool-status-head">
-            <h2>Context Manager</h2>
-            <div class="top-actions">
+        <section class="card context-panel">
+          <details id="contextManagerDetails" class="context-disclosure">
+            <summary>
+              <span role="heading" aria-level="2">Context Manager</span>
+              <span id="contextManagerSummary" class="tab-meta">0 this chat · 0 all chats</span>
+            </summary>
+            <div class="context-disclosure-body">
+              <div class="top-actions">
               <label class="model-field" for="contextScopeSelect">
                 <span>Scope</span>
                 <select id="contextScopeSelect" aria-label="Context scope">
@@ -108,10 +112,11 @@
               </label>
               <button id="addContextEntryBtn" class="btn btn-soft" type="button">Add Entry</button>
               <button id="copyContextPreambleBtn" class="btn btn-soft" type="button">Copy Preamble</button>
+              </div>
+              <p id="contextStatus" class="muted-inline">Stored in this browser only.</p>
+              <ul id="contextList" class="context-list"></ul>
             </div>
-          </div>
-          <p id="contextStatus" class="muted-inline">Stored in this browser only.</p>
-          <ul id="contextList" class="context-list"></ul>
+          </details>
         </section>
 
         <section class="card tool-status-panel">
@@ -197,6 +202,6 @@
     </main>
 
     <script src="api-auth.js?v=20260822a"></script>
-    <script type="module" src="app.js?v=20260824b"></script>
+    <script type="module" src="app.js?v=20260824c"></script>
   </body>
 </html>

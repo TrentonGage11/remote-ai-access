@@ -700,6 +700,47 @@ textarea:focus {
   font-size: 1rem;
 }
 
+.context-panel {
+  padding-block: 12px;
+}
+
+.context-disclosure > summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.context-disclosure,
+.context-disclosure-body,
+.context-list,
+.context-item {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.context-disclosure > summary::marker {
+  color: var(--accent);
+}
+
+.context-disclosure > summary .tab-meta {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.context-disclosure-body {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+}
+
+.context-disclosure-body > .top-actions {
+  justify-content: flex-end;
+}
+
 .tool-runs-list {
   list-style: none;
   margin: 0;
@@ -2051,6 +2092,18 @@ textarea:focus {
   .model-field,
   .model-field select {
     width: 100%;
+  }
+
+  .context-item-head {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+  }
+
+  .context-item-head .context-scope-chip,
+  .context-item-head .btn {
+    grid-column: 2;
+    justify-self: start;
   }
 
   .filelab-shell {

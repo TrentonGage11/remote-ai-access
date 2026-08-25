@@ -17,6 +17,8 @@ const chatPanelEl = document.getElementById("chatPanel");
 const contextScopeSelectEl = document.getElementById("contextScopeSelect");
 const contextListEl = document.getElementById("contextList");
 const contextStatusEl = document.getElementById("contextStatus");
+const contextManagerDetailsEl = document.getElementById("contextManagerDetails");
+const contextManagerSummaryEl = document.getElementById("contextManagerSummary");
 const addContextEntryBtnEl = document.getElementById("addContextEntryBtn");
 const copyContextPreambleBtnEl = document.getElementById("copyContextPreambleBtn");
 const copyAllAssistantBtnEl = document.getElementById("copyAllAssistantBtn");
@@ -47,6 +49,7 @@ const CHAT_STATE_KEY = "remote-ai-access-chat-state-v1";
 const HISTORY_EXPORT_KEY = "remote-ai-access-history-v1";
 const CHAT_BACKUPS_KEY = "remote-ai-access-chat-backups-v1";
 const CONTEXT_GLOBAL_KEY = "remote-ai-access-context-global-v1";
+const CONTEXT_MANAGER_OPEN_KEY = "remote-ai-access-context-manager-open-v1";
 const CONTEXT_PREAMBLE_MAX_CHARS = 8000;
 const CONTEXT_MAX_ENTRIES = 60;
 const LEGACY_CHAT_STATE_KEYS = [
@@ -1100,6 +1103,11 @@ function renderContextPanel() {
   }
 
   const scope = getContextScope();
+  if (contextManagerSummaryEl) {
+    const chatCount = getChatContextEntries(getActiveChat()).length;
+    const globalCount = loadGlobalContextEntries().length;
+    contextManagerSummaryEl.textContent = `${chatCount} this chat · ${globalCount} all chats`;
+  }
   if (contextScopeSelectEl) {
     contextScopeSelectEl.value = scope;
   }
@@ -2785,6 +2793,13 @@ if (contextScopeSelectEl) {
     setContextStatus(contextScope === "global"
       ? "Showing context sent with every chat in this browser."
       : "Showing context sent with the active chat only.");
+  });
+}
+
+if (contextManagerDetailsEl) {
+  contextManagerDetailsEl.open = storageGet(CONTEXT_MANAGER_OPEN_KEY) === "1";
+  contextManagerDetailsEl.addEventListener("toggle", () => {
+    storageSet(CONTEXT_MANAGER_OPEN_KEY, contextManagerDetailsEl.open ? "1" : "0");
   });
 }
 
