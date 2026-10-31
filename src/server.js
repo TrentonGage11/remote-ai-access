@@ -10995,15 +10995,24 @@ app.post("/api/files/snapshots", async (req, res) => {
 app.post("/api/files/bundles/export", async (req, res) => {
   try {
     const { files, totalBytes } = await collectWorkspaceBundleFiles(req.body?.paths);
+    const includeMetadata = Boolean(req.body?.includeMetadata);
+    const metadata = includeMetadata ? {
+      snapshots: await listGitSnapshots(100),
+      audit: await readAuditEntries(200),
+      recipes: [...agentRecipeScheduleStore.values()]
+        .filter((schedule) => schedule.workspaceCode === getWorkspaceContext().code)
+        .map(({ timer, ...schedule }) => schedule)
+    } : null;
     const bundle = {
       version: 1,
       workspaceCode: getWorkspaceContext().code,
       createdAt: new Date().toISOString(),
-      files: files.map((item) => ({ path: item.path, bytes: item.content.length, content: item.content.toString("base64") }))
+      files: files.map((item) => ({ path: item.path, bytes: item.content.length, content: item.content.toString("base64") })),
+      metadata
     };
     const bundleText = encryptWorkspaceBundle(bundle, req.body?.password);
     await appendAuditLog(req, "workspace-bundle-export", { count: files.length, bytes: totalBytes });
-    return res.json({ ok: true, filename: `workspace-${getWorkspaceContext().code}.raa-bundle`, count: files.length, bytes: totalBytes, bundle: bundleText });
+    return res.json({ ok: true, filename: `workspace-${getWorkspaceContext().code}.raa-bundle`, count: files.length, bytes: totalBytes, metadata: metadata ? { snapshots: metadata.snapshots.length, audit: metadata.audit.length, recipes: metadata.recipes.length } : null, bundle: bundleText });
   } catch (error) {
     return res.status(400).json({ error: String(error?.message || "Failed to export workspace bundle") });
   }
@@ -11013,7 +11022,7 @@ app.post("/api/files/bundles/preview", async (req, res) => {
   try {
     const bundle = decryptWorkspaceBundle(req.body?.bundle, req.body?.password);
     const files = bundle.files.map((item) => ({ path: item.path, bytes: Number(item.bytes || Buffer.from(item.content || "", "base64").length) }));
-    return res.json({ ok: true, version: bundle.version, workspaceCode: bundle.workspaceCode, createdAt: bundle.createdAt, files });
+    return res.json({ ok: true, version: bundle.version, workspaceCode: bundle.workspaceCode, createdAt: bundle.createdAt, files, metadata: bundle.metadata ? { snapshots: bundle.metadata.snapshots?.length || 0, audit: bundle.metadata.audit?.length || 0, recipes: bundle.metadata.recipes?.length || 0 } : null });
   } catch (error) {
     return res.status(400).json({ error: String(error?.message || "Failed to preview workspace bundle") });
   }

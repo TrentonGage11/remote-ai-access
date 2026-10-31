@@ -201,6 +201,7 @@ const codeMapSummaryEl = document.getElementById("codeMapSummary");
 const codeMapResultsEl = document.getElementById("codeMapResults");
 const bundlePathsInputEl = document.getElementById("bundlePathsInput");
 const bundlePasswordInputEl = document.getElementById("bundlePasswordInput");
+const bundleMetadataInputEl = document.getElementById("bundleMetadataInput");
 const bundleExportBtnEl = document.getElementById("bundleExportBtn");
 const bundleFileInputEl = document.getElementById("bundleFileInput");
 const bundlePreviewBtnEl = document.getElementById("bundlePreviewBtn");
@@ -1780,14 +1781,15 @@ bundleExportBtnEl?.addEventListener("click", async () => {
   try {
     const password = String(bundlePasswordInputEl.value || "");
     const paths = String(bundlePathsInputEl.value || "").split(/\r?\n/).map((item) => normalizeRelativePath(item)).filter(Boolean);
-    const data = await apiJson("/api/files/bundles/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paths, password }) });
+    const data = await apiJson("/api/files/bundles/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paths, password, includeMetadata: Boolean(bundleMetadataInputEl?.checked) }) });
     const blob = new Blob([data.bundle], { type: "application/octet-stream" });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
     link.download = data.filename || "workspace.raa-bundle";
     link.click();
     URL.revokeObjectURL(link.href);
-    bundleStatusEl.textContent = `Exported ${data.count} files (${formatByteSize(data.bytes)}). Keep the password safe.`;
+    const metadata = data.metadata ? ` plus ${data.metadata.snapshots} snapshots, ${data.metadata.recipes} recipes, and ${data.metadata.audit} audit entries` : "";
+    bundleStatusEl.textContent = `Exported ${data.count} files (${formatByteSize(data.bytes)})${metadata}. Keep the password safe.`;
   } catch (error) {
     bundleStatusEl.textContent = `Bundle export error: ${error.message}`;
   }
@@ -1797,7 +1799,8 @@ bundlePreviewBtnEl?.addEventListener("click", async () => {
   try {
     const data = await apiJson("/api/files/bundles/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bundle: selectedBundleText, password: String(bundlePasswordInputEl.value || "") }) });
     renderBundlePreview(data);
-    bundleStatusEl.textContent = `Preview ready: ${data.files.length} files from workspace ${data.workspaceCode}.`;
+    const metadata = data.metadata ? ` Metadata: ${data.metadata.snapshots} snapshots, ${data.metadata.recipes} recipes, ${data.metadata.audit} audit entries.` : "";
+    bundleStatusEl.textContent = `Preview ready: ${data.files.length} files from workspace ${data.workspaceCode}.${metadata}`;
   } catch (error) {
     bundleStatusEl.textContent = `Bundle preview error: ${error.message}`;
   }
