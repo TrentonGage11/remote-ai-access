@@ -21,7 +21,10 @@
       <aside class="card sidebar">
         <div class="side-top">
           <h2>Chats</h2>
-          <button id="newChatBtn" class="btn btn-soft" type="button">New</button>
+          <div class="top-actions">
+            <button id="commandPaletteBtn" class="btn btn-soft" type="button" aria-keyshortcuts="Control+K">⌘K</button>
+            <button id="newChatBtn" class="btn btn-soft" type="button">New</button>
+          </div>
         </div>
         <ul id="tabList" class="tab-list" aria-label="Chat tabs"></ul>
       </aside>
@@ -400,7 +403,20 @@
       </section>
     </main>
 
+    <div id="commandPalette" class="command-palette" hidden>
+      <div class="command-palette-backdrop" data-command-palette-close></div>
+      <section class="command-palette-dialog" role="dialog" aria-modal="true" aria-labelledby="commandPaletteTitle">
+        <div class="command-palette-heading">
+          <strong id="commandPaletteTitle">Command Palette</strong>
+          <kbd>Esc</kbd>
+        </div>
+        <input id="commandPaletteInput" type="search" placeholder="Search chats, files, tools, and pages…" autocomplete="off" />
+        <ul id="commandPaletteResults" class="command-palette-results" role="listbox"></ul>
+        <p class="muted-inline">↑↓ to navigate · Enter to run · Ctrl/Cmd+K to toggle</p>
+      </section>
+    </div>
+
     <script src="api-auth.js?v=20260822a"></script>
-    <script type="module" src="app.js?v=20261031c"></script>
+    <script type="module" src="app.js?v=20261031d"></script>
   </body>
 </html>

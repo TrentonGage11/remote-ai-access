@@ -189,6 +189,19 @@ body {
 .monitor-list > div { display: flex; justify-content: space-between; gap: 12px; padding-block: 7px; border-bottom: 1px solid var(--line); }
 .status-ok { color: var(--accent); }.status-error { color: #bd3d34; }.status-disabled { color: var(--muted); }
 
+.command-palette[hidden] { display: none; }
+body.command-palette-open { overflow: hidden; }
+.command-palette { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: start center; padding: 12vh 1rem 1rem; }
+.command-palette-backdrop { position: absolute; inset: 0; background: rgba(3, 12, 8, 0.68); backdrop-filter: blur(4px); }
+.command-palette-dialog { position: relative; width: min(640px, 100%); display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.32); }
+.command-palette-heading { display: flex; align-items: center; justify-content: space-between; color: var(--ink); }
+.command-palette-heading kbd { padding: 3px 7px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); font: 500 0.76rem "IBM Plex Mono", monospace; }
+.command-palette-dialog > input { width: 100%; }
+.command-palette-results { display: grid; gap: 4px; max-height: 52vh; overflow: auto; margin: 0; padding: 0; list-style: none; }
+.command-palette-result { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--ink); text-align: left; cursor: pointer; }
+.command-palette-result:hover, .command-palette-result[aria-selected="true"] { border-color: color-mix(in srgb, var(--accent) 48%, var(--line)); background: color-mix(in srgb, var(--accent) 13%, transparent); }
+.command-palette-result small { color: var(--muted); }
+
 .notification-questions { display: grid; gap: 10px; }
 .notification-question { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--surface) 82%, transparent); }
 .notification-question-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }

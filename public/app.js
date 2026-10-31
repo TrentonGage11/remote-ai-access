@@ -11,6 +11,10 @@ import {
 
 const tabListEl = document.getElementById("tabList");
 const newChatBtnEl = document.getElementById("newChatBtn");
+const commandPaletteBtnEl = document.getElementById("commandPaletteBtn");
+const commandPaletteEl = document.getElementById("commandPalette");
+const commandPaletteInputEl = document.getElementById("commandPaletteInput");
+const commandPaletteResultsEl = document.getElementById("commandPaletteResults");
 const messageListEl = document.getElementById("messageList");
 const promptEl = document.getElementById("prompt");
 const sendBtnEl = document.getElementById("sendBtn");
@@ -131,6 +135,24 @@ const AGENT_AUTO_CHECKPOINT_KEY = "remote-ai-access-agent-auto-checkpoint-v1";
 const AGENT_RECIPES_KEY = "remote-ai-access-agent-recipes-v1";
 const JOB_DISCLOSURES_KEY = "remote-ai-access-job-disclosures-v1";
 
+const COMMAND_PALETTE_COMMANDS = [
+  { title: "New chat", hint: "Chats", keywords: "new conversation reset", run: () => newChatBtnEl.click() },
+  { title: "Focus message composer", hint: "Chat", keywords: "write prompt message", run: () => promptEl.focus() },
+  { title: "Toggle Agent Tools", hint: "Chat", keywords: "agent tools mode", run: () => { agentModeToggleEl.click(); agentModeToggleEl.focus(); } },
+  { title: "Open File Lab", hint: "Workspace", keywords: "files editor bundles code map", href: "filelab.html" },
+  { title: "Open Git Changes", hint: "Workspace", keywords: "git diff commit branch", href: "git-change-center.html" },
+  { title: "Open Agent Operations", hint: "Workspace", keywords: "queue subagents resources recipes", href: "operations.html" },
+  { title: "Open Notifications", hint: "Workspace", keywords: "questions approvals alerts", href: "notifications.html" },
+  { title: "Open Snapshots", hint: "Workspace", keywords: "backup restore git", href: "snapshots.html" },
+  { title: "Open Search", hint: "Workspace", keywords: "find replace regex", href: "search.html" },
+  { title: "Open Usage", hint: "Insights", keywords: "tokens cost latency", href: "usage.html" },
+  { title: "Open Activity", hint: "Insights", keywords: "audit timeline events", href: "activity.html" },
+  { title: "Open Provider API Tools", hint: "Tools", keywords: "api web image tools", href: "api-tools.html" },
+  { title: "Open Design Lab", hint: "Tools", keywords: "elephant goldfish design", href: "design.html" },
+  { title: "Open Security Admin", hint: "Admin", keywords: "keys policy security", href: "security-admin.html" },
+  { title: "Open Chat Archive", hint: "History", keywords: "saved chats history", href: "archive.html" }
+];
+
 const FALLBACK_MODELS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.3-codex", "gpt-5", "gpt-4.1"];
 const CHAT_CAPABLE_TYPES = new Set(["text", "code", "chatgpt", "research", "open-weight", "search", "tool"]);
 const SUPPORTED_CODE_THEMES = new Set(["verdant", "cyberpunk-hc", "ember", "oceanic", "mono", "preparing"]);
@@ -185,6 +207,86 @@ let agentQueuePaused = false;
 let agentQueuePollTimer = null;
 let recipeSchedulePollTimer = null;
 const openJobDisclosureKeys = new Set(loadOpenJobDisclosureKeys());
+
+let commandPaletteMatches = [];
+let commandPaletteIndex = 0;
+let commandPalettePreviousFocus = null;
+
+function closeCommandPalette() {
+  if (commandPaletteEl.hidden) return;
+  commandPaletteEl.hidden = true;
+  document.body.classList.remove("command-palette-open");
+  commandPalettePreviousFocus?.focus?.();
+}
+
+function runCommandPaletteCommand(command) {
+  closeCommandPalette();
+  if (command.href) {
+    window.location.href = command.href;
+    return;
+  }
+  command.run?.();
+}
+
+function renderCommandPaletteResults() {
+  commandPaletteResultsEl.replaceChildren();
+  if (commandPaletteMatches.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "muted-inline";
+    empty.textContent = "No matching commands.";
+    commandPaletteResultsEl.appendChild(empty);
+    return;
+  }
+  commandPaletteMatches.forEach((command, index) => {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "command-palette-result";
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(index === commandPaletteIndex));
+    const title = document.createElement("span");
+    title.textContent = command.title;
+    const hint = document.createElement("small");
+    hint.textContent = command.hint;
+    button.append(title, hint);
+    button.addEventListener("mouseenter", () => { commandPaletteIndex = index; renderCommandPaletteResults(); });
+    button.addEventListener("click", () => runCommandPaletteCommand(command));
+    item.appendChild(button);
+    commandPaletteResultsEl.appendChild(item);
+  });
+}
+
+function updateCommandPaletteMatches() {
+  const query = String(commandPaletteInputEl.value || "").trim().toLowerCase();
+  commandPaletteMatches = COMMAND_PALETTE_COMMANDS.filter((command) => !query || `${command.title} ${command.hint} ${command.keywords}`.toLowerCase().includes(query));
+  commandPaletteIndex = Math.min(commandPaletteIndex, Math.max(0, commandPaletteMatches.length - 1));
+  renderCommandPaletteResults();
+}
+
+function openCommandPalette() {
+  commandPalettePreviousFocus = document.activeElement;
+  commandPaletteEl.hidden = false;
+  document.body.classList.add("command-palette-open");
+  commandPaletteInputEl.value = "";
+  commandPaletteIndex = 0;
+  updateCommandPaletteMatches();
+  requestAnimationFrame(() => commandPaletteInputEl.focus());
+}
+
+commandPaletteBtnEl?.addEventListener("click", () => commandPaletteEl.hidden ? openCommandPalette() : closeCommandPalette());
+commandPaletteEl?.addEventListener("click", (event) => {
+  if (event.target.matches("[data-command-palette-close]")) closeCommandPalette();
+});
+commandPaletteInputEl?.addEventListener("input", () => { commandPaletteIndex = 0; updateCommandPaletteMatches(); });
+commandPaletteInputEl?.addEventListener("keydown", (event) => {
+  if (event.key === "ArrowDown") { event.preventDefault(); commandPaletteIndex = Math.min(commandPaletteIndex + 1, commandPaletteMatches.length - 1); renderCommandPaletteResults(); }
+  if (event.key === "ArrowUp") { event.preventDefault(); commandPaletteIndex = Math.max(commandPaletteIndex - 1, 0); renderCommandPaletteResults(); }
+  if (event.key === "Enter" && commandPaletteMatches[commandPaletteIndex]) { event.preventDefault(); runCommandPaletteCommand(commandPaletteMatches[commandPaletteIndex]); }
+});
+document.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") { event.preventDefault(); commandPaletteEl.hidden ? openCommandPalette() : closeCommandPalette(); }
+  if (event.key === "Escape" && !commandPaletteEl.hidden) { event.preventDefault(); closeCommandPalette(); }
+});
 
 function loadOpenJobDisclosureKeys() {
   try {
