@@ -107,7 +107,7 @@ Status: in progress
   stdout/stderr, and a commit-ready state only after a passing test result.
 - Optimizer/reviewer graph: an implementation pass followed by independent
   edge-case and security review, with explicit artifact acceptance.
-- Workspace code map v1: deployed as a workspace-scoped cached `/api/files/code-map`
+- Workspace code map v1: implemented as a workspace-scoped cached `/api/files/code-map`
   index of symbols/imports with bounded regex fallback when a language parser is
   unavailable. It skips dependency/build folders and large files.
 - No automatic commit or deployment: the existing write and Git approval gates
