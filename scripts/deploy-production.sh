@@ -87,7 +87,11 @@ while IFS= read -r -d '' file; do
     cp -a "\$root/\$rel" "\$backup/\$rel"
   fi
 done < <(find "\$stage" -type f -print0)
-cp -a "\$stage/." "\$root/"
+# Copy the staged children, not the staging directory itself. The latter can
+# carry mktemp's 0700 mode and accidentally tighten the production root so
+# systemd cannot enter it on the next restart.
+shopt -s dotglob nullglob
+cp -a "\$stage"/* "\$root/"
 if [[ -f "\$stage/package-lock.json" ]]; then
   cd "\$root"
   npm ci --omit=dev --ignore-scripts
