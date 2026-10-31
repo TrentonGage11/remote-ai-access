@@ -2,6 +2,19 @@
 
 This roadmap tracks the requested operational features. Work should preserve workspace isolation, existing authorization checks, bounded resource use, auditability, and mobile width containment.
 
+Status labels below mean: **deployed** is implemented and verified in production,
+**partial** is a working foundation with an explicit integration or UI gap,
+and **planned** has not been implemented yet.
+
+## Next recommended slice
+
+Wire the tested TDD workflow into the live coding-job runner. The next pass should
+create a durable tests-first run, execute the configured test command inside the
+workspace, capture stdout/stderr, permit only bounded repair attempts, and pause
+for explicit human approval before any commit. Once that path is live, feed the
+workspace code-map results into agent context so edits can target relevant
+symbols without loading the whole tree.
+
 ## Current Delivery Batch
 
 1. Scheduled Agent Recipes: deployed and verified
@@ -79,15 +92,19 @@ Status: deployed
 
 ### 8. Portable Workspace Bundles
 
+Status: partial
+
 - Export selected files, context, recipes, settings, snapshots, and audit history
 - Password-encrypted bundles
 - Import preview, conflict policy, and selective restore
+- The agent-level `export_import_workspace` foundation exists; the user-facing
+  bundle export/import flow and selective restore UI remain TODO.
 
 ## Follow-up Features
 
 ### Interactive Human-in-the-Loop Flows
 
-Status: planned (design contract defined)
+Status: implemented foundation; expansion remains
 
 Agent workflows may pause in a durable `needs_input` state when they need a
 choice, clarification, or explicit approval. The server will create a
@@ -99,18 +116,24 @@ handled idempotently and every transition is audit logged. This is also the
 mechanism for TDD commit approval, chaos-review findings, deployment gates, and
 long-running scheduled recipes.
 
+The durable question state, workspace notifications, inline chat answers, and
+resume path are implemented and deployed. Remaining expansion includes richer
+choice/approval surfaces and additional expiry/notification polish.
+
 ### Phase 1: Agent Verification Workflows
 
 Status: in progress
 
 - TDD state machine: tests-first, bounded execution/repair attempts, captured
   stdout/stderr, and a commit-ready state only after a passing test result.
-- Optimizer/reviewer graph: an implementation pass followed by independent
-  edge-case and security review, with explicit artifact acceptance.
-- Workspace code map v1: implemented as a workspace-scoped cached `/api/files/code-map`
+  **Partial:** the pure state machine and tests exist, but the workflow is not yet
+  wired into live coding-job execution.
+- Optimizer/reviewer graph: **deployed** implementation pass followed by
+  independent edge-case and security review, with explicit artifact acceptance.
+- Workspace code map v1: **deployed** as a workspace-scoped cached `/api/files/code-map`
   index of symbols/imports with bounded regex fallback when a language parser is
   unavailable. It skips dependency/build folders and large files.
-- No automatic commit or deployment: the existing write and Git approval gates
+- No automatic commit or deployment: **done guardrail**; the existing write and Git approval gates
   remain authoritative.
 
 ### Image Search and Generation
@@ -121,13 +144,19 @@ Wikimedia Commons search returns source/license metadata. Configured OpenAI, xAI
 
 ### Command Palette
 
+Status: planned
+
 Search and launch chats, files, tools, pages, snapshots, recipes, and queue actions from one keyboard-first surface.
 
 ### Provider Comparison Mode
 
+Status: planned
+
 Run one prompt against selected providers and compare output, latency, token use, estimated cost, and tool evidence.
 
 ### PWA and Offline Shell
+
+Status: planned
 
 Installable UI, cached local history, reconnect recovery, and safe deferred uploads or queue submissions.
 
@@ -143,3 +172,13 @@ Views, downloads, last access, expiration warnings, revocation, and one-click ex
 - Declarative deployment preview, action-bound one-time approvals, and root-owned static activation/rollback are deployed and verified in production. Activation uses immutable releases, fixed Apache templates, a root-owned registry, SPKI-pinned health checks, and automatic failure restoration. Next add similarly bounded Node services; do not grant agents unrestricted SSH or Cloudflare credentials. See [AGENT_DEPLOYMENT_PROFILE.md](AGENT_DEPLOYMENT_PROFILE.md).
 - Queue state and Saved Recipe schedules are durable across service restarts.
 - Add retention controls for metrics, activity, queue results, and exported evidence.
+
+## Recommended follow-on order
+
+1. Complete live TDD runner integration and human commit approval.
+2. Inject relevant code-map symbols/imports into agent prompts.
+3. Finish the Portable Workspace Bundles UI with encrypted export, import preview,
+   conflict handling, and selective restore.
+4. Expand human-in-the-loop questions into richer approval, clarification, and
+   scheduled-recipe interactions.
+5. Add the Command Palette, Provider Comparison Mode, and PWA/offline shell.
