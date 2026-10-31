@@ -18,7 +18,9 @@ fi
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-if [[ -n "$(git status --porcelain)" ]]; then
+# The checkout is shared with Windows, whose Git uses CRLF normalization. Keep
+# the safety check from treating WSL's LF view as a mass of real edits.
+if [[ -n "$(git -c core.autocrlf=true status --porcelain)" ]]; then
   echo "Refusing deployment: working tree is not clean." >&2
   exit 1
 fi
