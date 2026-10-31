@@ -2081,9 +2081,46 @@ async function runAutomaticReviewWorkflow(req, job, result) {
   const securityFindings = /(password|api[_-]?key|secret|token)\s*[:=]\s*["'][^"']{8,}/i.test(diff)
     ? ["possible credential-like literal detected; verify it is not a secret"]
     : [];
-  let reviewed = recordReviewStage(workflow, "optimizer", { passed: optimizerFindings.length === 0, findings: optimizerFindings });
-  reviewed = recordReviewStage(reviewed, "chaos", { passed: chaosFindings.length === 0, findings: chaosFindings });
-  reviewed = recordReviewStage(reviewed, "security", { passed: securityFindings.length === 0, findings: securityFindings });
+  const reviewDiff = diff.slice(-30_000);
+  async function modelStage(stage, deterministicFindings) {
+    if (req.body?.reviewWorkflow === false) return { passed: deterministicFindings.length === 0, findings: deterministicFindings };
+    const reviewerReq = {
+      body: {
+        provider: req.body?.provider,
+        model: req.body?.model,
+        agentMode: false,
+        messages: [{ role: "user", content: [
+          `You are the ${stage} reviewer in a bounded code-review pipeline.`,
+          "Review only the supplied diff. Do not propose tool calls or claim to have run tests.",
+          "Return strict JSON only: {\"passed\":true|false,\"findings\":[\"short actionable finding\"]}.",
+          "An empty findings array means passed.",
+          `Deterministic findings already detected: ${JSON.stringify(deterministicFindings)}`,
+          `DIFF:\n${reviewDiff}`
+        ].join("\n\n")}]
+      },
+      headers: req.headers,
+      ip: "internal-review",
+      workspace: req.workspace,
+      traceId: `${job.traceId}-${stage}`,
+      abortSignal: req.abortSignal
+    };
+    try {
+      const response = await generateChatResponse(reviewerReq);
+      const raw = String(response?.reply || "").trim().replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
+      const parsed = JSON.parse(raw);
+      const findings = [...deterministicFindings, ...(Array.isArray(parsed?.findings) ? parsed.findings : [])]
+        .map((finding) => String(finding || "").trim().slice(0, 2000)).filter(Boolean).slice(0, 20);
+      return { passed: findings.length === 0 && parsed?.passed !== false, findings };
+    } catch (error) {
+      return { passed: false, findings: [...deterministicFindings, `${stage} reviewer unavailable: ${String(error?.message || error).slice(0, 500)}`] };
+    }
+  }
+  const optimizer = await modelStage("optimizer", optimizerFindings);
+  const chaos = await modelStage("chaos and edge-case", chaosFindings);
+  const security = await modelStage("security", securityFindings);
+  let reviewed = recordReviewStage(workflow, "optimizer", optimizer);
+  reviewed = recordReviewStage(reviewed, "chaos", chaos);
+  reviewed = recordReviewStage(reviewed, "security", security);
   reviewed.statusText = status.trim().slice(0, 4000);
   reviewed.reviewedJobId = job.id;
   await appendAuditLog(req, "agent-review-workflow", {
