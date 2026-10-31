@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { promises as fsp } from "node:fs";
-import { buildCodeMap, codeMapSummary } from "../src/code-map.js";
+import { buildCodeMap, codeMapSummary, selectRelevantCodeMapEntries } from "../src/code-map.js";
 
 test("buildCodeMap indexes symbols and imports while ignoring dependency folders", async () => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "raa-code-map-"));
@@ -26,4 +26,16 @@ test("buildCodeMap uses a bounded extension-aware scan", async () => {
   assert.equal(map.fileCount, 1);
   assert.equal(map.files[0].path, "main.py");
   assert.equal(map.files[0].symbols[0].name, "run");
+});
+
+test("selectRelevantCodeMapEntries ranks task-matching symbols and paths", () => {
+  const map = {
+    files: [
+      { path: "src/auth.js", symbols: [{ kind: "function", name: "login", line: 1 }], imports: [{ source: "./session.js", line: 2 }] },
+      { path: "src/queue.js", symbols: [{ kind: "function", name: "enqueue", line: 1 }], imports: [] }
+    ]
+  };
+  const result = selectRelevantCodeMapEntries(map, "fix auth login", 1);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].path, "src/auth.js");
 });

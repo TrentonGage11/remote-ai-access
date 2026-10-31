@@ -104,4 +104,30 @@ export function codeMapSummary(map) {
   };
 }
 
+export function selectRelevantCodeMapEntries(map, query, limit = 12) {
+  const terms = [...new Set(String(query || "").toLowerCase().match(/[a-z0-9_$.-]{3,}/g) || [])].slice(0, 40);
+  const files = Array.isArray(map?.files) ? map.files : [];
+  const ranked = files.map((file) => {
+    const pathValue = String(file?.path || "").toLowerCase();
+    const symbols = Array.isArray(file?.symbols) ? file.symbols : [];
+    const imports = Array.isArray(file?.imports) ? file.imports : [];
+    const symbolText = symbols.map((item) => `${item.kind} ${item.name}`).join(" ").toLowerCase();
+    const importText = imports.map((item) => item.source).join(" ").toLowerCase();
+    let score = 0;
+    for (const term of terms) {
+      if (pathValue.includes(term)) score += 5;
+      if (symbolText.includes(term)) score += 4;
+      if (importText.includes(term)) score += 2;
+    }
+    return { file, score };
+  }).filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score || String(left.file.path).localeCompare(String(right.file.path)))
+    .slice(0, Math.max(1, Math.min(30, Number(limit || 12))));
+  return ranked.map(({ file }) => ({
+    path: file.path,
+    symbols: (file.symbols || []).slice(0, 40),
+    imports: (file.imports || []).slice(0, 40)
+  }));
+}
+
 export const CODE_MAP_DEFAULT_EXTENSIONS = DEFAULT_EXTENSIONS;

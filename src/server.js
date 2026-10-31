@@ -100,7 +100,7 @@ import {
 import { matchesUnlockCode, parseWorkspaceUnlockCodes } from "./workspace-unlock-codes.js";
 import { extractGeneratedImage, normalizeImageRequest, parseWikimediaImageResults } from "./image-tools.js";
 import { buildWorkspaceActivityTimeline } from "./workspace-activity.js";
-import { buildCodeMap, codeMapSummary } from "./code-map.js";
+import { buildCodeMap, codeMapSummary, selectRelevantCodeMapEntries } from "./code-map.js";
 import { collectSubagentArtifacts, extractSubagentContextProposals, mergeSubagentAcceptance } from "./subagent-results.js";
 import { createReviewWorkflow, recordReviewStage } from "./review-workflow.js";
 import { runTddRepairLoop } from "./tdd-runner.js";
@@ -6743,7 +6743,7 @@ function startSubagentJob(job) {
     const profile = ["image", "coding"].includes(job.role) ? "standard" : "read-only";
     const action = job.role === "review" ? "Review" : job.role === "image" ? "Find or create imagery for" : job.role === "coding" ? "Implement" : "Research";
     const pathRule = job.role === "coding" ? ` You may write only these exact approved paths: ${job.allowedPaths.join(", ")}. Leave all changes uncommitted for human review in Git Change Center.` : "";
-    const basePrompt = `${action} this focused task and return a concise evidence-based result with sources, files, and tool evidence.${pathRule} Do not mutate persistent context. If useful, propose context separately using an exact fenced block such as \`\`\`raa-context add with scope and label header lines; proposals require parent acceptance.\n\n${job.task}`;
+    const basePrompt = `${action} this focused task and return a concise evidence-based result with sources, files, and tool evidence.${pathRule} Do not mutate persistent context. If useful, propose context separately using an exact fenced block such as \`\`\`raa-context add with scope and label header lines; proposals require parent acceptance.\n\n${job.task}${job.codeMapContext || ""}`;
     const childReq = {
       body: {
         provider: job.provider,
@@ -6909,6 +6909,23 @@ async function spawnResearchSubagent(req, args) {
   const id = `subagent-${Date.now()}-${subagentJobCounter++}`;
   const abortController = new AbortController();
   const workspaceCode = getWorkspaceContext().code;
+  let codeMapContext = "";
+  if (role === "coding") {
+    try {
+      const codeMapKey = `${workspaceCode}:.`;
+      let map = codeMapCache.get(codeMapKey);
+      if (!map) {
+        map = await buildCodeMap(getWorkspaceContext().sandboxRoot);
+        codeMapCache.set(codeMapKey, map);
+      }
+      const relevant = selectRelevantCodeMapEntries(map, task, 12);
+      if (relevant.length > 0) {
+        codeMapContext = `\n\nRelevant workspace code map context (index only; inspect files before editing):\n${JSON.stringify(relevant)}`;
+      }
+    } catch (error) {
+      console.warn("Unable to build coding subagent code map:", error?.message || error);
+    }
+  }
   const requestedAutoApproveCode = String(args?.autoApproveCode || "").trim();
   const configuredAutoApproveCode = security.workspaceCodingAutoApproveCodes.get(workspaceCode) || "";
   const autoApproved = role === "coding"
@@ -6919,7 +6936,7 @@ async function spawnResearchSubagent(req, args) {
     id, parentId, idempotencyKey, task, role, provider, model, workspaceCode, allowedTools, allowedPaths,
     status: role === "coding" && !autoApproved ? "awaiting_approval" : "queued", createdAt: new Date().toISOString(), startedAt: null, completedAt: null,
     approvedAt: autoApproved ? new Date().toISOString() : null, autoApproved, tdd, events: [], result: null, error: null, acceptance: { artifacts: {}, context: {}, updatedAt: null }, abortController, timeout: null,
-    limits, apiKeyFingerprint: createHash("sha256").update(providedKey).digest("hex"), workspaceContext: getWorkspaceContext(), workspaceContextStore
+    limits, apiKeyFingerprint: createHash("sha256").update(providedKey).digest("hex"), workspaceContext: getWorkspaceContext(), workspaceContextStore, codeMapContext
   };
   if (role === "coding" && !autoApproved) recordSubagentEvent(job, "awaiting-approval", { allowedTools, allowedPaths });
   if (autoApproved) recordSubagentEvent(job, "auto-approved", { workspaceCode });
