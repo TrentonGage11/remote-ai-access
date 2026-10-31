@@ -3189,12 +3189,6 @@ async function deliverNotificationEvent(item) {
     return;
   }
 
-  const handledByRules = await applyNotificationRules(item, level, message);
-  if (handledByRules) {
-    statusEl.textContent = `Notification rule matched: ${message}`;
-    return;
-  }
-
   const question = item?.metadata?.kind === "user-question" ? item.metadata : null;
   if (question?.jobId && question?.questionId) {
     const choices = Array.isArray(question.choices) && question.choices.length > 0
@@ -3215,6 +3209,12 @@ async function deliverNotificationEvent(item) {
         statusEl.textContent = `Question answer failed: ${error.message}`;
       }
     }
+  }
+
+  const handledByRules = await applyNotificationRules(item, level, message);
+  if (handledByRules) {
+    statusEl.textContent = `Notification rule matched: ${message}`;
+    return;
   }
 
   showNotificationToast(level, message);
