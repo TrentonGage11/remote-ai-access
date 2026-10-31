@@ -8,8 +8,8 @@ and **planned** has not been implemented yet.
 
 ## Next recommended slice
 
-Finish the opt-in TDD workflow in the live coding-job runner by adding a richer
-approval surface and then feed workspace code-map results into agent context so
+Finish the opt-in TDD workflow in the live coding-job runner by preserving its
+explicit commit gate, then feed workspace code-map results into agent context so
 edits can target relevant symbols without loading the whole tree.
 
 ## Current Delivery Batch
@@ -123,10 +123,9 @@ Status: in progress
 
 - TDD state machine: tests-first, bounded execution/repair attempts, captured
   stdout/stderr, and a commit-ready state only after a passing test result.
-  **Partial:** an opt-in coding-child loop now executes the configured test
-  profile, captures output, feeds failures back for bounded repair attempts, and
-  exposes `commitReady` only after a pass; a richer explicit commit-approval UI
-  remains.
+  **Deployed:** an opt-in coding-child loop executes the configured test profile,
+  captures output, feeds failures back for bounded repair attempts, exposes
+  `commitReady` only after a pass, and provides an explicit commit-approval UI.
 - Optimizer/reviewer graph: **deployed** implementation pass followed by
   independent edge-case and security review, with explicit artifact acceptance.
 - Workspace code map v1: **deployed** as a workspace-scoped cached `/api/files/code-map`
@@ -174,10 +173,8 @@ Views, downloads, last access, expiration warnings, revocation, and one-click ex
 
 ## Recommended follow-on order
 
-1. Add the richer TDD commit-approval UI and persistence.
-2. Inject relevant code-map symbols/imports into agent prompts.
-3. Finish the Portable Workspace Bundles UI with encrypted export, import preview,
+1. Finish the Portable Workspace Bundles UI with encrypted export, import preview,
    conflict handling, and selective restore.
-4. Expand human-in-the-loop questions into richer approval, clarification, and
+2. Expand human-in-the-loop questions into richer approval, clarification, and
    scheduled-recipe interactions.
-5. Add the Command Palette, Provider Comparison Mode, and PWA/offline shell.
+3. Add the Command Palette, Provider Comparison Mode, and PWA/offline shell.
