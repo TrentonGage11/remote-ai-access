@@ -1,0 +1,25 @@
+[Unit]
+Description=Queuecast playlist publisher
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/playlist-app
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=8790
+Environment=PUBLIC_BASE_URL=https://playlist.tg11.org
+Environment=PLAYLIST_DATA_DIR=/var/lib/playlist-app
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/playlist-app
+
+[Install]
+WantedBy=multi-user.target

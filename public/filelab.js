@@ -176,6 +176,23 @@ const previewMetaLabelEl = document.getElementById("previewMetaLabel");
 const previewToggleBtnEl = document.getElementById("previewToggleBtn");
 const refreshPreviewBtnEl = document.getElementById("refreshPreviewBtn");
 const openPreviewNewTabBtnEl = document.getElementById("openPreviewNewTabBtn");
+const publicSharesDetailsEl = document.getElementById("publicSharesDetails");
+const fileLabDisclosureEls = document.querySelectorAll("[data-filelab-disclosure-key]");
+const workspaceSearchQueryInputEl = document.getElementById("workspaceSearchQueryInput");
+const workspaceSearchModeSelectEl = document.getElementById("workspaceSearchModeSelect");
+const workspaceSearchPathInputEl = document.getElementById("workspaceSearchPathInput");
+const workspaceSearchLimitInputEl = document.getElementById("workspaceSearchLimitInput");
+const workspaceSearchCaseInputEl = document.getElementById("workspaceSearchCaseInput");
+const workspaceSearchBtnEl = document.getElementById("workspaceSearchBtn");
+const workspaceSearchStatusEl = document.getElementById("workspaceSearchStatus");
+const workspaceSearchSummaryEl = document.getElementById("workspaceSearchSummary");
+const workspaceSearchResultsEl = document.getElementById("workspaceSearchResults");
+const workspaceReplaceInputEl = document.getElementById("workspaceReplaceInput");
+const workspaceReplacePreviewBtnEl = document.getElementById("workspaceReplacePreviewBtn");
+const workspaceReplaceApplyBtnEl = document.getElementById("workspaceReplaceApplyBtn");
+const workspaceReplaceStatusEl = document.getElementById("workspaceReplaceStatus");
+const workspaceReplaceSummaryEl = document.getElementById("workspaceReplaceSummary");
+const workspaceReplaceResultsEl = document.getElementById("workspaceReplaceResults");
 
 const refreshBtnEl = document.getElementById("refreshBtn");
 const goDirBtnEl = document.getElementById("goDirBtn");
@@ -203,6 +220,7 @@ const shareDirectUrlInputEl = document.getElementById("shareDirectUrlInput");
 const copyShareViewBtnEl = document.getElementById("copyShareViewBtn");
 const copyShareDirectBtnEl = document.getElementById("copyShareDirectBtn");
 const shareListEl = document.getElementById("shareList");
+const shareListSummaryEl = document.getElementById("shareListSummary");
 const saveBtnEl = document.getElementById("saveBtn");
 const formatBtnEl = document.getElementById("formatBtn");
 const lintBtnEl = document.getElementById("lintBtn");
@@ -219,6 +237,7 @@ const FILELAB_CHUNK_SIZE_KEY = "filelab-chunk-size-v1";
 const languageCompartment = new Compartment();
 const editorThemeCompartment = new Compartment();
 const DEFAULT_MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+const DIRECT_UPLOAD_BATCH_MAX_BYTES = 48 * 1024 * 1024;
 
 const FONT_SIZE_MIN = 12;
 const FONT_SIZE_MAX = 22;
@@ -266,7 +285,8 @@ let uploadPolicy = {
   chunked: {
     enabled: true,
     thresholdBytes: 64 * 1024 * 1024,
-    chunkSizeBytes: 4 * 1024 * 1024
+    chunkSizeBytes: 4 * 1024 * 1024,
+    maxChunkSizeBytes: 64 * 1024 * 1024
   }
 };
 let uploadInFlight = false;
@@ -278,6 +298,7 @@ let minimapBoundScroller = null;
 let previewObjectUrl = "";
 let previewKind = "none";
 let previewPath = "";
+let replacementPreview = null;
 
 const syntaxThemePalette = {
   verdant: {
@@ -1369,13 +1390,15 @@ async function loadUploadPolicy() {
     const maxBytes = Number(data?.uploadPolicy?.defaultMaxBytes);
     const thresholdBytes = Number(data?.uploadPolicy?.chunked?.thresholdBytes);
     const chunkSizeBytes = Number(data?.uploadPolicy?.chunked?.chunkSizeBytes);
+    const maxChunkSizeBytes = Number(data?.uploadPolicy?.chunked?.maxChunkSizeBytes);
     uploadPolicy = {
       defaultMaxBytes: Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : DEFAULT_MAX_UPLOAD_BYTES,
       bypassConfiguredForWorkspace: Boolean(data?.uploadPolicy?.bypassConfiguredForWorkspace),
       chunked: {
         enabled: data?.uploadPolicy?.chunked?.enabled !== false,
         thresholdBytes: Number.isFinite(thresholdBytes) && thresholdBytes > 0 ? thresholdBytes : 64 * 1024 * 1024,
-        chunkSizeBytes: Number.isFinite(chunkSizeBytes) && chunkSizeBytes > 0 ? chunkSizeBytes : 4 * 1024 * 1024
+        chunkSizeBytes: Number.isFinite(chunkSizeBytes) && chunkSizeBytes > 0 ? chunkSizeBytes : 4 * 1024 * 1024,
+        maxChunkSizeBytes: Number.isFinite(maxChunkSizeBytes) && maxChunkSizeBytes > 0 ? maxChunkSizeBytes : 64 * 1024 * 1024
       }
     };
   } catch {
@@ -1385,7 +1408,8 @@ async function loadUploadPolicy() {
       chunked: {
         enabled: true,
         thresholdBytes: 64 * 1024 * 1024,
-        chunkSizeBytes: 4 * 1024 * 1024
+        chunkSizeBytes: 4 * 1024 * 1024,
+        maxChunkSizeBytes: 64 * 1024 * 1024
       }
     };
   }
@@ -1611,6 +1635,13 @@ function clearLintDiagnostics() {
   scheduleMinimapRender();
 }
 
+function posFromLineCol(doc, lineValue, columnValue) {
+  const lineNumber = Math.max(1, Math.min(doc.lines, Number(lineValue || 1)));
+  const line = doc.line(lineNumber);
+  const columnOffset = Math.max(0, Math.min(line.length, Number(columnValue || 1) - 1));
+  return line.from + columnOffset;
+}
+
 function setCursorPosition(line, col) {
   const editorView = requireEditorView();
   const pos = posFromLineCol(editorView.state.doc, Number(line || 1), Number(col || 1));
@@ -1636,6 +1667,179 @@ async function apiJson(url, options = {}) {
   return data;
 }
 
+function workspaceSearchRequest() {
+  return {
+    query: String(workspaceSearchQueryInputEl?.value || "").trim(),
+    mode: String(workspaceSearchModeSelectEl?.value || "hybrid"),
+    path: normalizeRelativePath(workspaceSearchPathInputEl?.value || ""),
+    limit: Math.max(1, Math.min(100, Number(workspaceSearchLimitInputEl?.value || 30))),
+    caseSensitive: Boolean(workspaceSearchCaseInputEl?.checked)
+  };
+}
+
+function renderWorkspaceSearchResults(results) {
+  workspaceSearchResultsEl.replaceChildren();
+  for (const result of results) {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "workspace-search-result";
+    const heading = document.createElement("span");
+    heading.className = "workspace-search-result-heading";
+    const path = document.createElement("strong");
+    path.textContent = result.path;
+    const location = document.createElement("span");
+    location.textContent = `L${Number(result.line || 1)}:${Number(result.column || 1)}`;
+    heading.append(path, location);
+    const snippet = document.createElement("span");
+    snippet.className = "workspace-search-snippet";
+    snippet.textContent = result.snippet || "Filename match";
+    button.append(heading, snippet);
+    button.addEventListener("click", async () => {
+      try {
+        await openFileByPath(result.path, result.line, result.column);
+        document.querySelector(".editor-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      } catch (error) {
+        setStatus(`Could not open ${result.path}: ${error.message}`);
+      }
+    });
+    item.append(button);
+    workspaceSearchResultsEl.append(item);
+  }
+}
+
+async function runWorkspaceSearch() {
+  const request = workspaceSearchRequest();
+  if (!request.query) {
+    workspaceSearchStatusEl.textContent = "Enter a query first.";
+    return;
+  }
+  workspaceSearchBtnEl.disabled = true;
+  workspaceSearchStatusEl.textContent = "Searching...";
+  try {
+    const params = new URLSearchParams({
+      q: request.query,
+      mode: request.mode,
+      path: request.path,
+      limit: String(request.limit),
+      caseSensitive: String(request.caseSensitive)
+    });
+    const data = await apiJson(`/api/files/search?${params.toString()}`);
+    const results = Array.isArray(data.results) ? data.results : [];
+    renderWorkspaceSearchResults(results);
+    workspaceSearchStatusEl.textContent = `Scanned ${data.filesScanned} files. Found ${data.resultCount} matches.`;
+    workspaceSearchSummaryEl.textContent = `${data.resultCount} matches in ${data.filesScanned} files`;
+  } catch (error) {
+    workspaceSearchStatusEl.textContent = `Error: ${error.message}`;
+  } finally {
+    workspaceSearchBtnEl.disabled = false;
+  }
+}
+
+function acceptedReplacementPaths() {
+  return [...workspaceReplaceResultsEl.querySelectorAll('input[type="checkbox"]:checked')]
+    .map((input) => input.value);
+}
+
+function updateReplacementApplyState() {
+  workspaceReplaceApplyBtnEl.disabled = acceptedReplacementPaths().length === 0;
+}
+
+function renderReplacementPreview(files) {
+  workspaceReplaceResultsEl.replaceChildren();
+  for (const file of files) {
+    const item = document.createElement("article");
+    item.className = "workspace-replace-item";
+    const acceptance = document.createElement("label");
+    acceptance.className = "workspace-replace-acceptance";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = file.path;
+    checkbox.addEventListener("change", updateReplacementApplyState);
+    const label = document.createElement("span");
+    label.textContent = `${file.path} | ${file.replacementCount} replacement(s)`;
+    acceptance.append(checkbox, label);
+    const comparison = document.createElement("div");
+    comparison.className = "workspace-replace-comparison";
+    const before = document.createElement("pre");
+    before.textContent = file.before;
+    const after = document.createElement("pre");
+    after.textContent = file.after;
+    comparison.append(before, after);
+    item.append(acceptance, comparison);
+    workspaceReplaceResultsEl.append(item);
+  }
+  updateReplacementApplyState();
+}
+
+async function previewWorkspaceReplace() {
+  const search = workspaceSearchRequest();
+  if (!search.query) {
+    workspaceReplaceStatusEl.textContent = "Enter a search query first.";
+    return;
+  }
+  workspaceReplacePreviewBtnEl.disabled = true;
+  workspaceReplaceStatusEl.textContent = "Building preview...";
+  try {
+    const data = await apiJson("/api/files/search/replace-preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        path: search.path,
+        query: search.query,
+        replacement: workspaceReplaceInputEl.value,
+        regex: search.mode === "regex",
+        caseSensitive: search.caseSensitive
+      })
+    });
+    replacementPreview = { search, replacement: workspaceReplaceInputEl.value };
+    renderReplacementPreview(Array.isArray(data.files) ? data.files : []);
+    workspaceReplaceStatusEl.textContent = `${data.replacementCount} replacements across ${data.filesMatched} files. Accept files individually to apply.`;
+    workspaceReplaceSummaryEl.textContent = `${data.filesMatched} files awaiting review`;
+  } catch (error) {
+    replacementPreview = null;
+    renderReplacementPreview([]);
+    workspaceReplaceStatusEl.textContent = `Error: ${error.message}`;
+  } finally {
+    workspaceReplacePreviewBtnEl.disabled = false;
+  }
+}
+
+async function applyWorkspaceReplace() {
+  const acceptedPaths = acceptedReplacementPaths();
+  if (!replacementPreview || acceptedPaths.length === 0) return;
+  if (acceptedPaths.includes(activeFilePath) && !confirmDiscardUnsavedChanges("apply the reviewed replacement")) {
+    return;
+  }
+  workspaceReplaceApplyBtnEl.disabled = true;
+  workspaceReplaceStatusEl.textContent = "Applying accepted files...";
+  try {
+    const { search, replacement } = replacementPreview;
+    const data = await apiJson("/api/files/search/replace", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        path: search.path,
+        query: search.query,
+        replacement,
+        regex: search.mode === "regex",
+        caseSensitive: search.caseSensitive,
+        acceptedPaths
+      })
+    });
+    replacementPreview = null;
+    renderReplacementPreview([]);
+    await loadDirectory(currentDir);
+    if (activeFilePath && data.changedFiles.includes(activeFilePath)) await openFileByPath(activeFilePath);
+    workspaceReplaceStatusEl.textContent = `Changed ${data.filesChanged} accepted files with ${data.replacementCount} replacements.`;
+    workspaceReplaceSummaryEl.textContent = `${data.filesChanged} files changed`;
+    await runWorkspaceSearch();
+  } catch (error) {
+    workspaceReplaceStatusEl.textContent = `Error: ${error.message}`;
+    updateReplacementApplyState();
+  }
+}
+
 async function uploadControlJson(url, options = {}) {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), 10 * 60 * 1000);
@@ -1658,27 +1862,41 @@ function formatShareDate(value) {
   return Number.isNaN(date.getTime()) ? "Unknown" : date.toLocaleString();
 }
 
+function shareExpiryLabel(share) {
+  const remainingMs = Number(share.expiresInMs || 0);
+  if (remainingMs <= 0) return "expired";
+  const hours = Math.ceil(remainingMs / (60 * 60 * 1000));
+  return hours < 48 ? `${hours}h left` : `${Math.ceil(hours / 24)}d left`;
+}
+
 function renderFileShares(shares) {
   if (!shareListEl) return;
   shareListEl.replaceChildren();
+  if (shareListSummaryEl) {
+    const attentionCount = shares.filter((share) => ["urgent", "expired"].includes(share.expiryStatus)).length;
+    shareListSummaryEl.textContent = `${shares.length} retained${attentionCount ? ` · ${attentionCount} attention` : ""}`;
+  }
   if (!shares.length) {
     const empty = document.createElement("p");
     empty.className = "share-empty";
-    empty.textContent = "No active shares in this workspace.";
+    empty.textContent = "No retained shares in this workspace.";
     shareListEl.append(empty);
     return;
   }
 
   for (const share of shares) {
     const row = document.createElement("article");
-    row.className = "share-item";
+    row.className = `share-item share-expiry-${share.expiryStatus || "active"}`;
     const details = document.createElement("div");
     const title = document.createElement("strong");
     title.textContent = share.fileName || share.path;
     const meta = document.createElement("span");
     const flags = [share.passwordProtected ? "password" : "public", share.encrypted ? "encrypted" : "range-ready"];
-    meta.textContent = `${flags.join(" · ")} · expires ${formatShareDate(share.expiresAt)} · ${Number(share.accessCount || 0)} access(es)`;
-    details.append(title, meta);
+    meta.textContent = `${flags.join(" · ")} · ${shareExpiryLabel(share)} (${formatShareDate(share.expiresAt)})`;
+    const analytics = document.createElement("span");
+    analytics.className = "share-analytics";
+    analytics.textContent = `${Number(share.viewCount || 0)} views · ${Number(share.downloadCount || 0)} downloads · last access ${share.lastAccessedAt ? formatShareDate(share.lastAccessedAt) : "never"}`;
+    details.append(title, meta, analytics);
     const links = document.createElement("div");
     links.className = "share-item-links";
     if (share.viewUrl && share.directUrl) {
@@ -1736,6 +1954,25 @@ function renderFileShares(shares) {
       }
     }
     details.append(links);
+    const extend = document.createElement("button");
+    extend.className = "btn btn-soft";
+    extend.type = "button";
+    extend.textContent = "+7 days";
+    extend.addEventListener("click", async () => {
+      extend.disabled = true;
+      try {
+        await apiJson(`/api/files/shares/${encodeURIComponent(share.id)}/expiration`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ extendByHours: 168 })
+        });
+        await loadFileShares();
+        setStatus(`Extended ${share.fileName} by 7 days.`);
+      } catch (error) {
+        setStatus(`Error: ${error.message}`);
+        extend.disabled = false;
+      }
+    });
     const revoke = document.createElement("button");
     revoke.className = "btn btn-soft danger";
     revoke.type = "button";
@@ -1750,7 +1987,10 @@ function renderFileShares(shares) {
         setStatus(`Error: ${error.message}`);
       }
     });
-    row.append(details, revoke);
+    const actions = document.createElement("div");
+    actions.className = "share-item-actions";
+    actions.append(extend, revoke);
+    row.append(details, actions);
     shareListEl.append(row);
   }
 }
@@ -2021,18 +2261,19 @@ function startUploadTelemetry(files, totalBytes, chunkSize, chunked) {
 }
 
 function selectedUploadChunkSize() {
-  const configuredMax = Math.max(256 * 1024, Number(uploadPolicy?.chunked?.chunkSizeBytes || (4 * 1024 * 1024)));
+  const configuredMax = Math.max(256 * 1024, Number(uploadPolicy?.chunked?.maxChunkSizeBytes || (64 * 1024 * 1024)));
   const selected = Number(uploadChunkSizeSelectEl?.value || configuredMax);
   return Math.max(256 * 1024, Math.min(configuredMax, selected));
 }
 
 function populateUploadChunkSizes() {
   if (!uploadChunkSizeSelectEl) return;
-  const maxSize = Math.max(256 * 1024, Number(uploadPolicy?.chunked?.chunkSizeBytes || (4 * 1024 * 1024)));
-  const sizes = [256, 512, 1024, 2048, 4096, 8192, 16384].map((value) => value * 1024)
+  const preferredSize = Math.max(256 * 1024, Number(uploadPolicy?.chunked?.chunkSizeBytes || (4 * 1024 * 1024)));
+  const maxSize = Math.max(preferredSize, Number(uploadPolicy?.chunked?.maxChunkSizeBytes || (64 * 1024 * 1024)));
+  const sizes = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536].map((value) => value * 1024)
     .filter((value) => value <= maxSize);
   if (!sizes.includes(maxSize)) sizes.push(maxSize);
-  const stored = Number(localStorage.getItem(FILELAB_CHUNK_SIZE_KEY) || maxSize);
+  const stored = Number(localStorage.getItem(FILELAB_CHUNK_SIZE_KEY) || preferredSize);
   const selected = sizes.reduce((best, value) => (value <= stored ? value : best), sizes[0]);
   uploadChunkSizeSelectEl.replaceChildren(...sizes.map((value) => {
     const option = document.createElement("option");
@@ -2185,6 +2426,46 @@ function makeChunkResumeKey(file, relativePath) {
   ].join("|");
 }
 
+function partitionUploadsByThreshold(files, thresholdBytes) {
+  const threshold = Math.max(1, Number(thresholdBytes || 0));
+  const chunkedFiles = [];
+  const directFiles = [];
+
+  for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
+    const entry = { file: files[fileIndex], fileIndex };
+    if (Number(entry.file?.size || 0) >= threshold) {
+      chunkedFiles.push(entry);
+    } else {
+      directFiles.push(entry);
+    }
+  }
+
+  return { chunkedFiles, directFiles };
+}
+
+function createDirectUploadBatches(entries, maxBatchBytes) {
+  const limit = Math.max(1, Number(maxBatchBytes || 0));
+  const batches = [];
+  let current = [];
+  let currentBytes = 0;
+
+  for (const entry of entries) {
+    const size = Math.max(0, Number(entry?.file?.size || 0));
+    if (current.length > 0 && currentBytes + size > limit) {
+      batches.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(entry);
+    currentBytes += size;
+  }
+
+  if (current.length > 0) {
+    batches.push(current);
+  }
+  return batches;
+}
+
 async function uploadFilesChunked(files, bypassCode, totalBytes, requestedChunkSize) {
   const requestHeaders = {};
   if (bypassCode) {
@@ -2198,9 +2479,40 @@ async function uploadFilesChunked(files, bypassCode, totalBytes, requestedChunkS
   let uploadedOverall = 0;
   let completedChunksOverall = 0;
   const saved = [];
+  const chunkThreshold = Number(uploadPolicy?.chunked?.thresholdBytes || (64 * 1024 * 1024));
+  const { chunkedFiles, directFiles } = partitionUploadsByThreshold(files, chunkThreshold);
 
-  for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
-    const file = files[fileIndex];
+  const directBatches = createDirectUploadBatches(directFiles, DIRECT_UPLOAD_BATCH_MAX_BYTES);
+  for (const directBatch of directBatches) {
+    const form = new FormData();
+    form.append("path", currentDir);
+    for (const { file } of directBatch) {
+      form.append("files", file);
+      form.append("relativePaths", normalizeRelativePath(file.webkitRelativePath || file.name));
+    }
+
+    const directBytes = directBatch.reduce((sum, { file }) => sum + Number(file?.size || 0), 0);
+    const batchStartBytes = uploadedOverall;
+    const result = await uploadWithProgress(
+      "/api/files/upload",
+      requestHeaders,
+      form,
+      (loaded) => updateUploadTelemetry({
+        fileIndex: directBatch[0].fileIndex,
+        fileSize: directBytes,
+        fileLoaded: loaded,
+        overallLoaded: batchStartBytes + loaded,
+        fileChunksComplete: loaded >= directBytes ? 1 : 0,
+        fileChunksTotal: 1,
+        allChunksComplete: completedChunksOverall + (loaded >= directBytes ? directBatch.length : 0)
+      }, true)
+    );
+    saved.push(...(Array.isArray(result.data?.files) ? result.data.files : []));
+    uploadedOverall += directBytes;
+    completedChunksOverall += directBatch.length;
+  }
+
+  for (const { file, fileIndex } of chunkedFiles) {
     const relativePath = normalizeRelativePath(file.webkitRelativePath || file.name);
     const resumeKey = makeChunkResumeKey(file, relativePath);
     const sessions = getSavedChunkSessions();
@@ -2631,7 +2943,8 @@ async function uploadFiles(files) {
   let data;
   try {
     const shouldUseChunked = Boolean(uploadPolicy?.chunked?.enabled)
-      && files.some((file) => Number(file?.size || 0) >= Number(uploadPolicy?.chunked?.thresholdBytes || (64 * 1024 * 1024)));
+      && (totalBytes > DIRECT_UPLOAD_BATCH_MAX_BYTES
+        || files.some((file) => Number(file?.size || 0) >= Number(uploadPolicy?.chunked?.thresholdBytes || (64 * 1024 * 1024))));
 
     if (shouldUseChunked) {
       const chunkSize = selectedUploadChunkSize();
@@ -2726,6 +3039,16 @@ async function deleteSelected() {
 refreshBtnEl.addEventListener("click", () => {
   loadDirectory(currentDir).catch((error) => setStatus(`Error: ${error.message}`));
 });
+
+workspaceSearchBtnEl?.addEventListener("click", runWorkspaceSearch);
+workspaceSearchQueryInputEl?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    runWorkspaceSearch();
+  }
+});
+workspaceReplacePreviewBtnEl?.addEventListener("click", previewWorkspaceReplace);
+workspaceReplaceApplyBtnEl?.addEventListener("click", applyWorkspaceReplace);
 
 goDirBtnEl.addEventListener("click", () => {
   loadDirectory(dirPathInputEl.value).catch((error) => setStatus(`Error: ${error.message}`));
@@ -3001,6 +3324,10 @@ if (shareFileBtnEl) {
     shareSelectionLabelEl.textContent = pathTarget && selectedPathType !== "directory"
       ? `Ready to share: ${pathTarget}`
       : "Select a file to create an expiring public link.";
+    if (publicSharesDetailsEl) {
+      publicSharesDetailsEl.open = true;
+      localStorage.setItem(publicSharesDetailsEl.dataset.filelabDisclosureKey, "1");
+    }
     sharePanelEl.scrollIntoView({ behavior: "smooth", block: "start" });
   });
 }
@@ -3221,6 +3548,14 @@ window.addEventListener("pagehide", () => {
 if (uploadChunkSizeSelectEl) {
   uploadChunkSizeSelectEl.addEventListener("change", () => {
     localStorage.setItem(FILELAB_CHUNK_SIZE_KEY, uploadChunkSizeSelectEl.value);
+  });
+}
+
+for (const disclosureEl of fileLabDisclosureEls) {
+  const storageKey = disclosureEl.dataset.filelabDisclosureKey;
+  disclosureEl.open = localStorage.getItem(storageKey) === "1";
+  disclosureEl.addEventListener("toggle", () => {
+    localStorage.setItem(storageKey, disclosureEl.open ? "1" : "0");
   });
 }
 

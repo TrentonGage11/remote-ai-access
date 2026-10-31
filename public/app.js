@@ -1,3 +1,14 @@
+import katex from "/vendor/katex/katex.mjs";
+import { disclosureKey, getJobRecoveryMessage, hasRecoveredJob } from "./chat-job-recovery.js";
+import {
+  isValidCatalogModelTag,
+  providerAgentModelOptions,
+  providerDefaultModel,
+  providerLabel,
+  providerModelOptions,
+  providerSupportsAgentModel
+} from "./provider-selection.js";
+
 const tabListEl = document.getElementById("tabList");
 const newChatBtnEl = document.getElementById("newChatBtn");
 const messageListEl = document.getElementById("messageList");
@@ -42,6 +53,55 @@ const openTraceAuditBtnEl = document.getElementById("openTraceAuditBtn");
 const copyTraceBtnEl = document.getElementById("copyTraceBtn");
 const copyTraceAuditUrlBtnEl = document.getElementById("copyTraceAuditUrlBtn");
 const autoOpenTraceAuditToggleEl = document.getElementById("autoOpenTraceAuditToggle");
+const agentOperationsSummaryEl = document.getElementById("agentOperationsSummary");
+const toolProfileSelectEl = document.getElementById("toolProfileSelect");
+const autoCheckpointToggleEl = document.getElementById("autoCheckpointToggle");
+const lastCheckpointLinkEl = document.getElementById("lastCheckpointLink");
+const contextBudgetMeterEl = document.getElementById("contextBudgetMeter");
+const contextBudgetLabelEl = document.getElementById("contextBudgetLabel");
+const refreshOperationsHealthBtnEl = document.getElementById("refreshOperationsHealthBtn");
+const operationsHealthStatusEl = document.getElementById("operationsHealthStatus");
+const operationsHealthListEl = document.getElementById("operationsHealthList");
+const refreshToolContainersBtnEl = document.getElementById("refreshToolContainersBtn");
+const removeToolContainersBtnEl = document.getElementById("removeToolContainersBtn");
+const toolContainersStatusEl = document.getElementById("toolContainersStatus");
+const toolContainersListEl = document.getElementById("toolContainersList");
+const recipeSelectEl = document.getElementById("recipeSelect");
+const recipeNameInputEl = document.getElementById("recipeNameInput");
+const saveRecipeBtnEl = document.getElementById("saveRecipeBtn");
+const loadRecipeBtnEl = document.getElementById("loadRecipeBtn");
+const deleteRecipeBtnEl = document.getElementById("deleteRecipeBtn");
+const recipesStatusEl = document.getElementById("recipesStatus");
+const recipeScheduleKindSelectEl = document.getElementById("recipeScheduleKindSelect");
+const recipeRunAtFieldEl = document.getElementById("recipeRunAtField");
+const recipeRunAtInputEl = document.getElementById("recipeRunAtInput");
+const recipeIntervalFieldEl = document.getElementById("recipeIntervalField");
+const recipeIntervalMinutesInputEl = document.getElementById("recipeIntervalMinutesInput");
+const recipeDailyTimeFieldEl = document.getElementById("recipeDailyTimeField");
+const recipeDailyTimeInputEl = document.getElementById("recipeDailyTimeInput");
+const recipeTimeZoneFieldEl = document.getElementById("recipeTimeZoneField");
+const recipeTimeZoneInputEl = document.getElementById("recipeTimeZoneInput");
+const scheduleRecipeBtnEl = document.getElementById("scheduleRecipeBtn");
+const refreshRecipeSchedulesBtnEl = document.getElementById("refreshRecipeSchedulesBtn");
+const recipeSchedulesStatusEl = document.getElementById("recipeSchedulesStatus");
+const recipeSchedulesListEl = document.getElementById("recipeSchedulesList");
+const refreshEvidenceBtnEl = document.getElementById("refreshEvidenceBtn");
+const evidenceStatusEl = document.getElementById("evidenceStatus");
+const evidenceListEl = document.getElementById("evidenceList");
+const agentQueuePromptInputEl = document.getElementById("agentQueuePromptInput");
+const agentQueueProviderSelectEl = document.getElementById("agentQueueProviderSelect");
+const agentQueueModelSelectEl = document.getElementById("agentQueueModelSelect");
+const agentQueuePrioritySelectEl = document.getElementById("agentQueuePrioritySelect");
+const enqueueAgentRunBtnEl = document.getElementById("enqueueAgentRunBtn");
+const toggleAgentQueueBtnEl = document.getElementById("toggleAgentQueueBtn");
+const refreshAgentQueueBtnEl = document.getElementById("refreshAgentQueueBtn");
+const agentQueueStatusEl = document.getElementById("agentQueueStatus");
+const agentQueueListEl = document.getElementById("agentQueueList");
+const subagentOperationsStatusEl = document.getElementById("subagentOperationsStatus");
+const subagentOperationsListEl = document.getElementById("subagentOperationsList");
+const subagentStatusFilterEl = document.getElementById("subagentStatusFilter");
+const subagentParentFilterEl = document.getElementById("subagentParentFilter");
+const refreshSubagentsBtnEl = document.getElementById("refreshSubagentsBtn");
 
 const THEME_STORAGE_KEY = "remote-ai-access-theme";
 const FILELAB_SYNTAX_THEME_KEY = "filelab-syntax-theme";
@@ -66,6 +126,10 @@ const NOTIFICATIONS_LEVELS_KEY = "remote-ai-access-notifications-levels-v1";
 const NOTIFICATIONS_DEBOUNCE_MS_KEY = "remote-ai-access-notifications-debounce-ms-v1";
 const NOTIFICATION_RULES_KEY = "remote-ai-access-notification-rules-v1";
 const AUTO_OPEN_TRACE_AUDIT_KEY = "remote-ai-access-auto-open-trace-audit-v1";
+const AGENT_TOOL_PROFILE_KEY = "remote-ai-access-agent-tool-profile-v1";
+const AGENT_AUTO_CHECKPOINT_KEY = "remote-ai-access-agent-auto-checkpoint-v1";
+const AGENT_RECIPES_KEY = "remote-ai-access-agent-recipes-v1";
+const JOB_DISCLOSURES_KEY = "remote-ai-access-job-disclosures-v1";
 
 const FALLBACK_MODELS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.3-codex", "gpt-5", "gpt-4.1"];
 const CHAT_CAPABLE_TYPES = new Set(["text", "code", "chatgpt", "research", "open-weight", "search", "tool"]);
@@ -84,8 +148,11 @@ let config = {
   xaiDefaultModel: "grok-4.6",
   allowedModels: [],
   xaiAllowedModels: [],
+  defaultModelsByProvider: {},
+  allowedModelsByProvider: {},
   supportedProviders: ["openai"],
   agentModeSupportedProviders: ["openai"],
+  agentModeModelsByProvider: {},
   agentStepOverride: {
     enabled: false,
     baseMaxSteps: 16,
@@ -112,6 +179,42 @@ let currentTraceId = "";
 let failedRetryTarget = { chatId: "", messageId: "" };
 let contextScope = "chat";
 let lastContextDirectiveCount = 0;
+let operationsHealthState = "not checked";
+let agentQueuePaused = false;
+let agentQueuePollTimer = null;
+let recipeSchedulePollTimer = null;
+const openJobDisclosureKeys = new Set(loadOpenJobDisclosureKeys());
+
+function loadOpenJobDisclosureKeys() {
+  try {
+    const parsed = JSON.parse(storageGet(JOB_DISCLOSURES_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.map(String).slice(-100) : [];
+  } catch {
+    return [];
+  }
+}
+
+function configureJobDisclosure(details, key) {
+  details.dataset.disclosureKey = key;
+  details.open = openJobDisclosureKeys.has(key);
+  details.addEventListener("toggle", () => {
+    if (details.open) openJobDisclosureKeys.add(key);
+    else openJobDisclosureKeys.delete(key);
+    storageSet(JOB_DISCLOSURES_KEY, JSON.stringify([...openJobDisclosureKeys].slice(-100)));
+  });
+}
+
+function hasActiveOperationsInteraction(container) {
+  if (!container) return false;
+  if (document.activeElement && container.contains(document.activeElement)) return true;
+  const selection = window.getSelection?.();
+  return Boolean(
+    selection
+    && !selection.isCollapsed
+    && ((selection.anchorNode && container.contains(selection.anchorNode))
+      || (selection.focusNode && container.contains(selection.focusNode)))
+  );
+}
 
 function autoOpenTraceAuditEnabled() {
   return localStorage.getItem(AUTO_OPEN_TRACE_AUDIT_KEY) === "true";
@@ -151,6 +254,27 @@ function updateTracePanel(traceId, status = "") {
   if (openTraceAuditBtnEl) {
     openTraceAuditBtnEl.href = getFilteredAuditUrl(currentTraceId);
   }
+  renderAgentOperationsSummary();
+}
+
+function getAgentToolProfile() {
+  const value = storageGet(AGENT_TOOL_PROFILE_KEY);
+  return ["read-only", "standard", "full"].includes(value) ? value : "full";
+}
+
+function agentToolProfileLabel(profile = getAgentToolProfile()) {
+  return profile === "read-only" ? "Read only" : profile === "standard" ? "Standard" : "Full access";
+}
+
+function autoCheckpointEnabled() {
+  return storageGet(AGENT_AUTO_CHECKPOINT_KEY) === "true";
+}
+
+function renderAgentOperationsSummary() {
+  if (!agentOperationsSummaryEl) {
+    return;
+  }
+  agentOperationsSummaryEl.textContent = `${agentToolProfileLabel()} · health ${operationsHealthState}`;
 }
 
 function uid() {
@@ -162,7 +286,7 @@ function createChat(overrides = {}) {
     id: uid(),
     title: "New chat",
     provider: config.defaultProvider,
-    model: config.defaultModel,
+    model: queueProviderDefaultModel(config.defaultProvider),
     reasoningEffort: "",
     createdAt: new Date().toISOString(),
     messages: [],
@@ -232,7 +356,8 @@ function normalizeMessageRecord(msg) {
       : [],
     contextCompaction: msg.contextCompaction && typeof msg.contextCompaction === "object"
       ? msg.contextCompaction
-      : null
+      : null,
+    checkpoint: msg.checkpoint && typeof msg.checkpoint === "object" ? msg.checkpoint : null
   };
 }
 
@@ -244,7 +369,7 @@ function normalizeChatRecord(chat) {
   const provider = normalizeProvider(chat.provider) || config.defaultProvider || "openai";
   const model = typeof chat.model === "string" && chat.model
     ? chat.model
-    : (provider === "xai" ? (config.xaiDefaultModel || "grok-4.6") : (config.defaultModel || "gpt-4.1"));
+    : queueProviderDefaultModel(provider);
 
   const messages = Array.isArray(chat.messages)
     ? chat.messages
@@ -611,6 +736,964 @@ function buildPayloadMessages(messages) {
   return selected;
 }
 
+function renderContextBudget() {
+  if (!contextBudgetMeterEl || !contextBudgetLabelEl) {
+    return;
+  }
+  const chat = getActiveChat();
+  const messageChars = buildPayloadMessages(chat.messages)
+    .reduce((sum, message) => sum + String(message.content || "").length, 0);
+  const draftChars = String(promptEl?.value || "").trim().length;
+  const persistentChars = buildContextPreamble(chat).length;
+  const used = messageChars + draftChars + persistentChars;
+  const limit = Math.max(1, Number(config.chatCompaction?.contextMaxChars || 32000));
+  const percent = Math.min(100, Math.round((used / limit) * 100));
+  contextBudgetMeterEl.value = percent;
+  contextBudgetLabelEl.textContent = `${used.toLocaleString()} / ${limit.toLocaleString()} characters (${percent}%)`;
+  contextBudgetMeterEl.title = `${messageChars.toLocaleString()} chat + ${persistentChars.toLocaleString()} persistent + ${draftChars.toLocaleString()} draft characters`;
+}
+
+function getSavedAgentRecipes() {
+  try {
+    const parsed = JSON.parse(storageGet(AGENT_RECIPES_KEY) || "[]");
+    return Array.isArray(parsed)
+      ? parsed.filter((recipe) => recipe && typeof recipe.id === "string" && typeof recipe.name === "string").slice(0, 40)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveAgentRecipes(recipes) {
+  storageSet(AGENT_RECIPES_KEY, JSON.stringify(recipes.slice(0, 40)));
+  renderRecipeSelect();
+}
+
+function renderRecipeSelect(preferredId = "") {
+  if (!recipeSelectEl) {
+    return;
+  }
+  const selectedId = preferredId || recipeSelectEl.value;
+  const recipes = getSavedAgentRecipes();
+  recipeSelectEl.innerHTML = "";
+  if (recipes.length === 0) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No saved recipes";
+    recipeSelectEl.appendChild(option);
+  } else {
+    for (const recipe of recipes) {
+      const option = document.createElement("option");
+      option.value = recipe.id;
+      option.textContent = recipe.name;
+      recipeSelectEl.appendChild(option);
+    }
+    recipeSelectEl.value = recipes.some((recipe) => recipe.id === selectedId) ? selectedId : recipes[0].id;
+  }
+  if (recipesStatusEl) {
+    recipesStatusEl.textContent = `${recipes.length} saved in this browser`;
+  }
+}
+
+function syncRecipeScheduleFields() {
+  const kind = recipeScheduleKindSelectEl?.value || "once";
+  if (recipeRunAtFieldEl) recipeRunAtFieldEl.hidden = kind !== "once";
+  if (recipeIntervalFieldEl) recipeIntervalFieldEl.hidden = kind !== "interval";
+  if (recipeDailyTimeFieldEl) recipeDailyTimeFieldEl.hidden = kind !== "daily";
+  if (recipeTimeZoneFieldEl) recipeTimeZoneFieldEl.hidden = kind !== "daily";
+}
+
+function formatScheduleDate(value) {
+  if (!value) return "not scheduled";
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString() : String(value);
+}
+
+function renderRecipeSchedules(schedules) {
+  if (!recipeSchedulesListEl) return;
+  recipeSchedulesListEl.innerHTML = "";
+  if (!Array.isArray(schedules) || schedules.length === 0) {
+    const item = document.createElement("li");
+    item.textContent = "No scheduled recipes.";
+    recipeSchedulesListEl.appendChild(item);
+    return;
+  }
+  for (const schedule of schedules) {
+    const item = document.createElement("li");
+    item.dataset.status = schedule.lastJobStatus === "failed" ? "error" : schedule.enabled ? "ok" : "pending";
+    const title = document.createElement("strong");
+    title.textContent = schedule.name;
+    const meta = document.createElement("div");
+    meta.className = "tab-meta";
+    meta.textContent = `${schedule.kind} · ${schedule.provider}:${schedule.model} · ${schedule.enabled ? `next ${formatScheduleDate(schedule.nextRunAt)}` : "disabled"}${schedule.lastJobStatus ? ` · last ${schedule.lastJobStatus}` : ""}`;
+    const controls = document.createElement("div");
+    controls.className = "queue-job-controls";
+    const toggle = document.createElement("button");
+    toggle.className = "btn btn-soft";
+    toggle.type = "button";
+    toggle.textContent = schedule.enabled ? "Disable" : "Enable";
+    toggle.addEventListener("click", () => updateRecipeSchedule(schedule.id, !schedule.enabled));
+    const remove = document.createElement("button");
+    remove.className = "btn btn-soft danger";
+    remove.type = "button";
+    remove.textContent = "Delete";
+    remove.addEventListener("click", () => deleteRecipeSchedule(schedule.id));
+    controls.append(toggle, remove);
+    item.append(title, meta, controls);
+    recipeSchedulesListEl.appendChild(item);
+  }
+}
+
+async function loadRecipeSchedules() {
+  if (!recipeSchedulesStatusEl || !recipeSchedulesListEl) return;
+  try {
+    const response = await fetch("/api/chat/recipe-schedules", { cache: "no-store" });
+    const data = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "Failed to load schedules");
+    renderRecipeSchedules(data.schedules || []);
+    recipeSchedulesStatusEl.textContent = `${data.schedules?.length || 0} schedule(s) · durable server timers`;
+  } catch (error) {
+    recipeSchedulesStatusEl.textContent = `Error: ${error.message}`;
+  }
+}
+
+async function scheduleSelectedRecipe() {
+  const recipe = getSavedAgentRecipes().find((item) => item.id === recipeSelectEl?.value);
+  if (!recipe) {
+    recipeSchedulesStatusEl.textContent = "Select a saved recipe first.";
+    return;
+  }
+  const kind = recipeScheduleKindSelectEl?.value || "once";
+  const runAtValue = recipeRunAtInputEl?.value;
+  const payload = {
+    name: recipe.name,
+    prompt: recipe.prompt,
+    provider: recipe.provider,
+    model: recipe.model,
+    priority: agentQueuePrioritySelectEl?.value || "normal",
+    toolProfile: recipe.toolProfile || "full",
+    autoCheckpoint: Boolean(recipe.autoCheckpoint),
+    kind,
+    runAt: runAtValue ? new Date(runAtValue).toISOString() : new Date(Date.now() + 5 * 60_000).toISOString(),
+    intervalMinutes: Number(recipeIntervalMinutesInputEl?.value || 60),
+    dailyTime: recipeDailyTimeInputEl?.value || "09:00",
+    timeZone: recipeTimeZoneInputEl?.value || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+  };
+  scheduleRecipeBtnEl.disabled = true;
+  try {
+    const response = await fetch("/api/chat/recipe-schedules", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const data = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "Failed to schedule recipe");
+    recipeSchedulesStatusEl.textContent = `${recipe.name} scheduled.`;
+    await loadRecipeSchedules();
+  } catch (error) {
+    recipeSchedulesStatusEl.textContent = `Error: ${error.message}`;
+  } finally {
+    scheduleRecipeBtnEl.disabled = false;
+  }
+}
+
+async function updateRecipeSchedule(scheduleId, enabled) {
+  const response = await fetch(`/api/chat/recipe-schedules/${encodeURIComponent(scheduleId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled })
+  });
+  const data = await parseJsonResponse(response);
+  if (!response.ok) recipeSchedulesStatusEl.textContent = `Error: ${data.error || "Schedule update failed"}`;
+  await loadRecipeSchedules();
+}
+
+async function deleteRecipeSchedule(scheduleId) {
+  const response = await fetch(`/api/chat/recipe-schedules/${encodeURIComponent(scheduleId)}`, { method: "DELETE" });
+  const data = await parseJsonResponse(response);
+  if (!response.ok) recipeSchedulesStatusEl.textContent = `Error: ${data.error || "Schedule delete failed"}`;
+  await loadRecipeSchedules();
+}
+
+function startRecipeSchedulePolling() {
+  if (recipeSchedulePollTimer) clearInterval(recipeSchedulePollTimer);
+  loadRecipeSchedules();
+  recipeSchedulePollTimer = setInterval(loadRecipeSchedules, 15_000);
+}
+
+function getLatestCheckpoint() {
+  const messages = getActiveChat()?.messages || [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.checkpoint?.hash) {
+      return messages[index].checkpoint;
+    }
+  }
+  return null;
+}
+
+function renderAgentOperations() {
+  if (toolProfileSelectEl) toolProfileSelectEl.value = getAgentToolProfile();
+  if (autoCheckpointToggleEl) autoCheckpointToggleEl.checked = autoCheckpointEnabled();
+  const checkpoint = getLatestCheckpoint();
+  if (lastCheckpointLinkEl) {
+    lastCheckpointLinkEl.hidden = !checkpoint;
+    lastCheckpointLinkEl.textContent = checkpoint ? `Checkpoint ${checkpoint.shortHash || "created"}` : "Open checkpoint";
+  }
+  renderContextBudget();
+  renderAgentOperationsSummary();
+  renderRecipeSelect();
+}
+
+async function loadOperationsHealth() {
+  if (!operationsHealthStatusEl || !operationsHealthListEl) {
+    return;
+  }
+  operationsHealthStatusEl.textContent = "Checking environment...";
+  if (refreshOperationsHealthBtnEl) refreshOperationsHealthBtnEl.disabled = true;
+  try {
+    const response = await fetch("/api/operations/health", { cache: "no-store" });
+    const data = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "Health check failed");
+    operationsHealthState = data.status || (data.ok ? "ok" : "degraded");
+    operationsHealthListEl.innerHTML = "";
+    for (const [name, check] of Object.entries(data.checks || {})) {
+      const item = document.createElement("li");
+      item.dataset.status = check.status;
+      const details = name === "providers"
+        ? Object.entries(check.configured || {}).filter(([, configured]) => configured).map(([provider]) => provider).join(", ") || "none configured"
+        : name === "docker"
+          ? `${check.runtime}${check.version ? ` ${check.version}` : ""}`
+          : name === "git"
+            ? `${check.branch || "unknown branch"}${check.clean === false ? ", changes present" : check.clean === true ? ", clean" : ""}`
+            : check.writable ? "workspace readable and writable" : "workspace access unavailable";
+      item.textContent = `${name}: ${check.status} · ${check.message || details}`;
+      operationsHealthListEl.appendChild(item);
+    }
+    operationsHealthStatusEl.textContent = `${operationsHealthState} · checked ${new Date(data.checkedAt).toLocaleTimeString()}`;
+  } catch (error) {
+    operationsHealthState = "unavailable";
+    operationsHealthStatusEl.textContent = `Error: ${error.message}`;
+  } finally {
+    if (refreshOperationsHealthBtnEl) refreshOperationsHealthBtnEl.disabled = false;
+    renderAgentOperationsSummary();
+  }
+}
+
+async function loadManagedToolContainers() {
+  if (!toolContainersStatusEl || !toolContainersListEl || !removeToolContainersBtnEl) return;
+  toolContainersStatusEl.textContent = "Checking managed containers...";
+  toolContainersListEl.innerHTML = "";
+  removeToolContainersBtnEl.disabled = true;
+  if (refreshToolContainersBtnEl) refreshToolContainersBtnEl.disabled = true;
+  try {
+    const response = await fetch("/api/operations/tool-containers", { cache: "no-store" });
+    const data = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "Container check failed");
+    for (const container of data.containers || []) {
+      const item = document.createElement("li");
+      item.dataset.status = container.state === "running" ? "error" : "ok";
+      item.textContent = `${container.name} · ${container.image} · ${container.status}${container.size ? ` · ${container.size}` : ""}`;
+      toolContainersListEl.appendChild(item);
+    }
+    const count = Number(data.count || 0);
+    toolContainersStatusEl.textContent = data.enabled
+      ? count === 0 ? "No managed tool containers." : `${count} managed tool container${count === 1 ? "" : "s"}.`
+      : "Docker tool runtime is disabled.";
+    removeToolContainersBtnEl.disabled = count === 0;
+  } catch (error) {
+    toolContainersStatusEl.textContent = `Error: ${error.message}`;
+  } finally {
+    if (refreshToolContainersBtnEl) refreshToolContainersBtnEl.disabled = false;
+  }
+}
+
+async function removeManagedToolContainers() {
+  if (!window.confirm("Stop and remove every managed agent tool container? Running tool commands will be interrupted.")) return;
+  removeToolContainersBtnEl.disabled = true;
+  toolContainersStatusEl.textContent = "Removing managed containers...";
+  try {
+    const response = await fetch("/api/operations/tool-containers", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmation: "REMOVE_MANAGED_TOOL_CONTAINERS" })
+    });
+    const data = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "Container cleanup failed");
+    toolContainersStatusEl.textContent = `Removed ${Number(data.removed || 0)} managed tool container${Number(data.removed || 0) === 1 ? "" : "s"}.`;
+    await loadManagedToolContainers();
+    await loadOperationsHealth();
+  } catch (error) {
+    toolContainersStatusEl.textContent = `Error: ${error.message}`;
+    await loadManagedToolContainers();
+  }
+}
+
+function summarizeEvidenceValue(value) {
+  if (value === null || value === undefined) return "";
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return String(text || "").replace(/\s+/g, " ").trim().slice(0, 180);
+}
+
+async function loadRunEvidence() {
+  if (!evidenceStatusEl || !evidenceListEl) {
+    return;
+  }
+  evidenceListEl.innerHTML = "";
+  if (!currentTraceId) {
+    evidenceStatusEl.textContent = "Run an agent task to collect trace evidence.";
+    return;
+  }
+  evidenceStatusEl.textContent = "Loading trace evidence...";
+  try {
+    const params = new URLSearchParams({ operation: "agent-tool-record", traceId: currentTraceId, limit: "100" });
+    const response = await fetch(`/api/files/audit?${params.toString()}`, { cache: "no-store" });
+    const data = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "Failed to load evidence");
+    const entries = Array.isArray(data.entries) ? [...data.entries].reverse() : [];
+    for (const entry of entries) {
+      const details = entry.details || {};
+      const item = document.createElement("li");
+      item.dataset.status = details.ok === false ? "error" : "ok";
+      const output = summarizeEvidenceValue(details.output);
+      item.textContent = `${details.name || "tool"} · ${Number(details.durationMs || 0)}ms · ${details.ok === false ? "failed" : "ok"}${output ? ` · ${output}` : ""}`;
+      evidenceListEl.appendChild(item);
+    }
+    evidenceStatusEl.textContent = entries.length > 0
+      ? `${entries.length} tool record(s) for ${currentTraceId}`
+      : `No tool records yet for ${currentTraceId}`;
+  } catch (error) {
+    evidenceStatusEl.textContent = `Error: ${error.message}`;
+  }
+}
+
+function queueJobLabel(job) {
+  const position = job.status === "queued" && job.queuePosition ? ` #${job.queuePosition}` : "";
+  return `${job.priority || "normal"} · ${job.status || "unknown"}${position}`;
+}
+
+function queueProviderDefaultModel(provider) {
+  return providerDefaultModel(config, modelCatalog, provider, CHAT_CAPABLE_TYPES);
+}
+
+function renderAgentQueueModelOptions(preferredModel = "") {
+  if (!agentQueueProviderSelectEl || !agentQueueModelSelectEl) return;
+  const provider = normalizeProvider(agentQueueProviderSelectEl.value) || config.defaultProvider;
+  const fallback = queueProviderDefaultModel(provider);
+  const uniqueModels = providerAgentModelOptions({
+    config,
+    modelCatalog,
+    provider,
+    chatCapableTypes: CHAT_CAPABLE_TYPES,
+    fallbackModels: FALLBACK_MODELS
+  });
+  const selected = uniqueModels.includes(preferredModel) ? preferredModel : fallback;
+  agentQueueModelSelectEl.innerHTML = "";
+  for (const model of uniqueModels) {
+    const option = document.createElement("option");
+    option.value = model;
+    option.textContent = model;
+    option.selected = model === selected;
+    agentQueueModelSelectEl.appendChild(option);
+  }
+}
+
+function renderAgentQueueProviderOptions() {
+  if (!agentQueueProviderSelectEl) return;
+  const previous = normalizeProvider(agentQueueProviderSelectEl.value);
+  const activeProvider = normalizeProvider(getActiveChat()?.provider);
+  const providers = (config.agentModeSupportedProviders || []).map(normalizeProvider).filter(Boolean);
+  const selected = providers.includes(previous)
+    ? previous
+    : providers.includes(activeProvider) ? activeProvider : providers[0] || "openai";
+  agentQueueProviderSelectEl.innerHTML = "";
+  for (const provider of providers) {
+    const option = document.createElement("option");
+    option.value = provider;
+    option.textContent = providerLabel(provider);
+    option.selected = provider === selected;
+    agentQueueProviderSelectEl.appendChild(option);
+  }
+  renderAgentQueueModelOptions(getActiveChat()?.model || "");
+}
+
+function renderAgentQueueJobs(jobs) {
+  if (!agentQueueListEl) return;
+  agentQueueListEl.innerHTML = "";
+  const visible = Array.isArray(jobs) ? jobs.slice(0, 30) : [];
+  if (visible.length === 0) {
+    const item = document.createElement("li");
+    item.textContent = "No agent runs queued yet.";
+    agentQueueListEl.appendChild(item);
+    return;
+  }
+
+  for (const job of visible) {
+    const item = document.createElement("li");
+    item.dataset.status = job.status === "failed" ? "error" : job.status === "completed" ? "ok" : "pending";
+
+    const heading = document.createElement("div");
+    heading.className = "queue-job-heading";
+    const title = document.createElement("strong");
+    title.textContent = `${job.provider || "provider"} · ${job.id}`;
+    const meta = document.createElement("span");
+    meta.className = "tab-meta";
+    meta.textContent = queueJobLabel(job);
+    heading.append(title, meta);
+    item.appendChild(heading);
+
+    const controls = document.createElement("div");
+    controls.className = "queue-job-controls";
+    if (job.status === "queued") {
+      const priority = document.createElement("select");
+      priority.setAttribute("aria-label", `Priority for ${job.id}`);
+      for (const value of ["low", "normal", "high", "urgent"]) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value[0].toUpperCase() + value.slice(1);
+        option.selected = value === job.priority;
+        priority.appendChild(option);
+      }
+      priority.addEventListener("change", async () => {
+        await updateQueuedJobPriority(job.id, priority.value);
+      });
+      controls.appendChild(priority);
+    }
+    if (!["completed", "failed", "cancelled"].includes(job.status)) {
+      const cancel = document.createElement("button");
+      cancel.className = "btn btn-soft danger";
+      cancel.type = "button";
+      cancel.textContent = "Cancel";
+      cancel.addEventListener("click", async () => {
+        await cancelQueuedJob(job.id);
+      });
+      controls.appendChild(cancel);
+    }
+    if (controls.childElementCount > 0) item.appendChild(controls);
+
+    const output = job.result?.reply || job.error?.message;
+    if (output) {
+      const details = document.createElement("details");
+      details.className = "queue-job-output";
+      configureJobDisclosure(details, disclosureKey("queue", job.id, job.result?.reply ? "result" : "error"));
+      const summary = document.createElement("summary");
+      summary.textContent = job.result?.reply ? "Result" : "Error";
+      const pre = document.createElement("pre");
+      pre.className = "doc-json";
+      pre.textContent = String(output);
+      details.append(summary, pre);
+      item.appendChild(details);
+    }
+    if (job.result?.reply) {
+      const recovered = getJobRecoveryMessage(job);
+      const originalChat = getChatById(job.recovery?.clientChatId);
+      const addToChat = document.createElement("button");
+      addToChat.className = "btn btn-soft";
+      addToChat.type = "button";
+      addToChat.textContent = originalChat && hasRecoveredJob(originalChat, job.id) ? "In chat" : "Add to chat";
+      addToChat.disabled = !recovered || (originalChat && hasRecoveredJob(originalChat, job.id));
+      addToChat.addEventListener("click", () => importCompletedJobIntoChat(job));
+      item.appendChild(addToChat);
+    }
+    agentQueueListEl.appendChild(item);
+  }
+}
+
+function subagentElapsed(job) {
+  const startedAt = Date.parse(job?.startedAt || job?.createdAt || "");
+  const endedAt = Date.parse(job?.completedAt || "") || Date.now();
+  if (!Number.isFinite(startedAt)) return "not started";
+  const seconds = Math.max(0, Math.round((endedAt - startedAt) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${seconds % 60}s`;
+}
+
+function createSubagentDecisionButton(job, section, key, decision, label) {
+  const button = document.createElement("button");
+  button.className = `btn btn-soft${decision === "rejected" ? " danger" : ""}`;
+  button.type = "button";
+  button.textContent = label;
+  button.disabled = job.acceptance?.[section]?.[String(key)] === decision;
+  button.addEventListener("click", () => updateSubagentAcceptance(job, section, key, decision));
+  return button;
+}
+
+function appendSubagentReviewControls(item, job) {
+  const artifacts = Array.isArray(job.result?.artifacts) ? job.result.artifacts : [];
+  if (artifacts.length > 0) {
+    const details = document.createElement("details");
+    details.className = "queue-job-output subagent-review";
+    configureJobDisclosure(details, disclosureKey("subagent", job.id, "artifacts"));
+    const summary = document.createElement("summary");
+    summary.textContent = `Artifacts (${artifacts.length})`;
+    const list = document.createElement("div");
+    list.className = "subagent-review-list";
+    for (const artifact of artifacts) {
+      const row = document.createElement("div");
+      row.className = "subagent-review-row";
+      const pathLabel = document.createElement("code");
+      pathLabel.textContent = artifact.path;
+      const state = document.createElement("span");
+      state.className = "tab-meta";
+      state.textContent = job.acceptance?.artifacts?.[artifact.path] || "pending";
+      const controls = document.createElement("div");
+      controls.className = "queue-job-controls";
+      const open = document.createElement("a");
+      open.className = "btn btn-soft";
+      open.href = `filelab.html?path=${encodeURIComponent(artifact.path)}`;
+      open.textContent = "Open";
+      controls.append(
+        open,
+        createSubagentDecisionButton(job, "artifacts", artifact.path, "accepted", "Accept"),
+        createSubagentDecisionButton(job, "artifacts", artifact.path, "rejected", "Reject")
+      );
+      row.append(pathLabel, state, controls);
+      list.appendChild(row);
+    }
+    details.append(summary, list);
+    item.appendChild(details);
+
+    const acceptedPaths = artifacts
+      .map((artifact) => artifact.path)
+      .filter((artifactPath) => job.acceptance?.artifacts?.[artifactPath] === "accepted");
+    if (job.role === "coding" && acceptedPaths.length > 0) {
+      const reviewUrl = new URL("git-change-center.html", window.location.href);
+      for (const artifactPath of acceptedPaths) reviewUrl.searchParams.append("path", artifactPath);
+      const reviewChanges = document.createElement("a");
+      reviewChanges.className = "btn";
+      reviewChanges.href = `${reviewUrl.pathname}${reviewUrl.search}`;
+      reviewChanges.textContent = `Review accepted changes (${acceptedPaths.length})`;
+      item.appendChild(reviewChanges);
+    }
+  }
+
+  const proposals = Array.isArray(job.result?.proposedContextMutations) ? job.result.proposedContextMutations : [];
+  if (proposals.length > 0) {
+    const details = document.createElement("details");
+    details.className = "queue-job-output subagent-review";
+    configureJobDisclosure(details, disclosureKey("subagent", job.id, "context"));
+    const summary = document.createElement("summary");
+    summary.textContent = `Context proposals (${proposals.length})`;
+    const list = document.createElement("div");
+    list.className = "subagent-review-list";
+    proposals.forEach((proposal, index) => {
+      const row = document.createElement("div");
+      row.className = "subagent-review-row";
+      const description = document.createElement("div");
+      const heading = document.createElement("strong");
+      heading.textContent = `${proposal.action} · ${proposal.scope} · ${proposal.label || proposal.id || "context"}`;
+      const content = document.createElement("pre");
+      content.className = "subagent-proposal-content";
+      content.textContent = proposal.content || "No replacement content";
+      description.append(heading, content);
+      const state = document.createElement("span");
+      state.className = "tab-meta";
+      state.textContent = job.acceptance?.context?.[String(index)] || "pending";
+      const controls = document.createElement("div");
+      controls.className = "queue-job-controls";
+      controls.append(
+        createSubagentDecisionButton(job, "context", index, "accepted", "Apply"),
+        createSubagentDecisionButton(job, "context", index, "rejected", "Reject")
+      );
+      row.append(description, state, controls);
+      list.appendChild(row);
+    });
+    details.append(summary, list);
+    item.appendChild(details);
+  }
+}
+
+function renderSubagentOperations(jobs) {
+  if (!subagentOperationsListEl) return;
+  subagentOperationsListEl.innerHTML = "";
+  const visible = Array.isArray(jobs) ? jobs : [];
+  if (visible.length === 0) {
+    const item = document.createElement("li");
+    item.textContent = "No subagents match this view.";
+    subagentOperationsListEl.appendChild(item);
+    return;
+  }
+
+  for (const job of visible) {
+    const item = document.createElement("li");
+    item.dataset.status = job.status === "completed" ? "ok" : ["failed", "cancelled"].includes(job.status) ? "error" : "pending";
+
+    const heading = document.createElement("div");
+    heading.className = "queue-job-heading";
+    const title = document.createElement("strong");
+    title.textContent = job.id || `${job.role || "unknown"} subagent`;
+    const meta = document.createElement("span");
+    meta.className = "tab-meta";
+    meta.textContent = `${job.status || "unknown"} · ${subagentElapsed(job)}`;
+    heading.append(title, meta);
+    item.appendChild(heading);
+
+    const task = document.createElement("p");
+    task.className = "subagent-task";
+    task.textContent = job.task || "Task unavailable";
+    item.appendChild(task);
+
+    const metadata = document.createElement("div");
+    metadata.className = "subagent-metadata";
+    const stepBudget = Number(job.limits?.maxSteps || 0);
+    for (const value of [job.role || "research", job.provider, job.model, stepBudget > 0 ? `${stepBudget} steps` : "", `parent ${job.parentId || "unknown"}`].filter(Boolean)) {
+      const chip = document.createElement("span");
+      chip.className = "tool-chip";
+      chip.textContent = value;
+      metadata.appendChild(chip);
+    }
+    item.appendChild(metadata);
+
+    const permissions = Array.isArray(job.allowedTools) ? job.allowedTools : [];
+    if (permissions.length > 0) {
+      const details = document.createElement("details");
+      details.className = "queue-job-output";
+      configureJobDisclosure(details, disclosureKey("subagent", job.id, "permissions"));
+      const summary = document.createElement("summary");
+      summary.textContent = `Permissions (${permissions.length})`;
+      const chips = document.createElement("div");
+      chips.className = "subagent-metadata";
+      for (const tool of permissions) {
+        const chip = document.createElement("span");
+        chip.className = "tool-chip";
+        chip.textContent = tool;
+        chips.appendChild(chip);
+      }
+      details.append(summary, chips);
+      item.appendChild(details);
+    }
+
+    const allowedPaths = Array.isArray(job.allowedPaths) ? job.allowedPaths : [];
+    if (allowedPaths.length > 0) {
+      const details = document.createElement("details");
+      details.className = "queue-job-output";
+      configureJobDisclosure(details, disclosureKey("subagent", job.id, "paths"));
+      const summary = document.createElement("summary");
+      summary.textContent = `Approved write scopes (${allowedPaths.length})`;
+      const list = document.createElement("div");
+      list.className = "subagent-metadata";
+      for (const path of allowedPaths) {
+        const chip = document.createElement("code");
+        chip.className = "tool-chip";
+        chip.textContent = path;
+        list.appendChild(chip);
+      }
+      details.append(summary, list);
+      item.appendChild(details);
+    }
+
+    const resultText = job.result?.summary || job.error?.message;
+    if (resultText) {
+      const details = document.createElement("details");
+      details.className = "queue-job-output";
+      configureJobDisclosure(details, disclosureKey("subagent", job.id, job.result?.summary ? "result" : "error"));
+      const summary = document.createElement("summary");
+      summary.textContent = job.result?.summary ? "Result" : "Error";
+      const pre = document.createElement("pre");
+      pre.className = "doc-json";
+      pre.textContent = String(resultText);
+      details.append(summary, pre);
+      item.appendChild(details);
+      if (job.result?.summary) {
+        const addToChat = document.createElement("button");
+        addToChat.className = "btn btn-soft";
+        addToChat.type = "button";
+        addToChat.textContent = hasRecoveredJob(getActiveChat(), `subagent:${job.id}`) ? "In chat" : "Add to chat";
+        addToChat.disabled = hasRecoveredJob(getActiveChat(), `subagent:${job.id}`);
+        addToChat.addEventListener("click", () => importSubagentIntoChat(job));
+        item.appendChild(addToChat);
+      }
+    }
+
+    if (job.status === "completed" && job.result) {
+      appendSubagentReviewControls(item, job);
+    }
+
+    const events = Array.isArray(job.events) ? job.events.slice(-10).reverse() : [];
+    if (events.length > 0) {
+      const details = document.createElement("details");
+      details.className = "queue-job-output";
+      configureJobDisclosure(details, disclosureKey("subagent", job.id, "events"));
+      const summary = document.createElement("summary");
+      summary.textContent = `Events (${job.events.length})`;
+      const list = document.createElement("ol");
+      list.className = "subagent-events";
+      for (const event of events) {
+        const row = document.createElement("li");
+        const payload = event?.payload && Object.keys(event.payload).length > 0 ? ` · ${JSON.stringify(event.payload)}` : "";
+        row.textContent = `${timeAgo(event.timestamp)} · ${event.type || "event"}${payload}`;
+        list.appendChild(row);
+      }
+      details.append(summary, list);
+      item.appendChild(details);
+    }
+
+    if (job.status === "awaiting_approval") {
+      const controls = document.createElement("div");
+      controls.className = "queue-job-controls";
+      const approve = document.createElement("button");
+      approve.className = "btn";
+      approve.type = "button";
+      approve.textContent = "Approve coding child";
+      approve.addEventListener("click", () => approveCodingSubagent(job.id));
+      const reject = document.createElement("button");
+      reject.className = "btn btn-soft danger";
+      reject.type = "button";
+      reject.textContent = "Reject";
+      reject.addEventListener("click", () => cancelSubagent(job.id));
+      controls.append(approve, reject);
+      item.appendChild(controls);
+    } else if (["queued", "running"].includes(job.status)) {
+      const controls = document.createElement("div");
+      controls.className = "queue-job-controls";
+      const cancel = document.createElement("button");
+      cancel.className = "btn btn-soft danger";
+      cancel.type = "button";
+      cancel.textContent = "Cancel";
+      cancel.addEventListener("click", () => cancelSubagent(job.id));
+      controls.appendChild(cancel);
+      item.appendChild(controls);
+    }
+    subagentOperationsListEl.appendChild(item);
+  }
+}
+
+async function loadSubagentOperations() {
+  if (!subagentOperationsListEl || !subagentOperationsStatusEl) return;
+  try {
+    const params = new URLSearchParams();
+    const status = String(subagentStatusFilterEl?.value || "").trim();
+    const parentId = String(subagentParentFilterEl?.value || "").trim();
+    if (status) params.set("status", status);
+    if (parentId) params.set("parentId", parentId);
+    const query = params.size > 0 ? `?${params.toString()}` : "";
+    const response = await fetch(`/api/chat/subagents${query}`, { cache: "no-store" });
+    const data = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "Failed to load subagents");
+    const summary = data.summary || {};
+    subagentOperationsStatusEl.textContent = `${summary.active || 0} active · ${summary.completed || 0} completed · ${summary.failed || 0} failed`;
+    if (!hasActiveOperationsInteraction(subagentOperationsListEl)) {
+      renderSubagentOperations(data.jobs || []);
+    }
+  } catch (error) {
+    subagentOperationsStatusEl.textContent = `Error: ${error.message}`;
+  }
+}
+
+async function cancelSubagent(subagentId) {
+  const response = await fetch(`/api/chat/subagents/${encodeURIComponent(subagentId)}`, { method: "DELETE" });
+  const data = await parseJsonResponse(response);
+  if (!response.ok) subagentOperationsStatusEl.textContent = `Error: ${data.error || "Cancel failed"}`;
+  await loadSubagentOperations();
+}
+
+async function approveCodingSubagent(subagentId) {
+  const response = await fetch(`/api/chat/subagents/${encodeURIComponent(subagentId)}/approve`, { method: "POST" });
+  const data = await parseJsonResponse(response);
+  if (!response.ok) subagentOperationsStatusEl.textContent = `Error: ${data.error || "Approval failed"}`;
+  await loadSubagentOperations();
+}
+
+async function updateSubagentAcceptance(job, section, key, decision) {
+  const body = { [section]: { [String(key)]: decision } };
+  try {
+    const response = await fetch(`/api/chat/subagents/${encodeURIComponent(job.id)}/acceptance`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const data = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "Failed to update child output review");
+    if (section === "context" && decision === "accepted") {
+      const proposal = job.result?.proposedContextMutations?.[Number(key)];
+      const applied = proposal ? applyAgentContextMutations(getActiveChat().id, [proposal]) : 0;
+      saveState();
+      renderContextPanel();
+      statusEl.textContent = applied > 0 ? "Subagent context proposal applied." : "Proposal accepted; no matching context entry changed.";
+    }
+    await loadSubagentOperations();
+  } catch (error) {
+    subagentOperationsStatusEl.textContent = `Error: ${error.message}`;
+  }
+}
+
+async function loadAgentQueue() {
+  if (!agentQueueListEl || !agentQueueStatusEl) return;
+  try {
+    const response = await fetch("/api/chat/jobs", { cache: "no-store" });
+    const data = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "Failed to load queue");
+    const queue = data.queue || {};
+    agentQueuePaused = Boolean(queue.paused);
+    agentQueueStatusEl.textContent = `${agentQueuePaused ? "paused" : "active"} · ${queue.active || 0}/${queue.workspaceMaxConcurrent || queue.maxConcurrent || 1} running here · ${queue.globalActive || 0}/${queue.maxConcurrent || 1} global · ${queue.queued || 0} queued`;
+    if (toggleAgentQueueBtnEl) toggleAgentQueueBtnEl.textContent = agentQueuePaused ? "Resume" : "Pause";
+    const jobs = data.jobs || [];
+    recoverCompletedChatJobs(jobs);
+    if (!hasActiveOperationsInteraction(agentQueueListEl)) {
+      renderAgentQueueJobs(jobs);
+    }
+  } catch (error) {
+    agentQueueStatusEl.textContent = `Error: ${error.message}`;
+  }
+}
+
+function appendRecoveredAssistantMessage(chat, recovered) {
+  if (!chat || !recovered || hasRecoveredJob(chat, recovered.jobId)) return false;
+  chat.messages.push({
+    id: uid(),
+    jobId: recovered.jobId,
+    role: "assistant",
+    content: recovered.reply,
+    createdAt: new Date().toISOString(),
+    traceId: recovered.traceId,
+    executedTools: recovered.executedTools,
+    contextCompaction: recovered.contextCompaction,
+    checkpoint: recovered.checkpoint
+  });
+  if (recovered.model) chat.model = recovered.model;
+  applyAgentContextMutations(chat.id, recovered.contextMutations);
+  applyAssistantContextDirectives(chat.id, recovered.reply);
+  return true;
+}
+
+function recoverCompletedChatJobs(jobs) {
+  let changed = false;
+  for (const job of Array.isArray(jobs) ? jobs : []) {
+    const recovered = getJobRecoveryMessage(job);
+    const chat = getChatById(job?.recovery?.clientChatId);
+    const originalMessageExists = chat?.messages?.some((message) => (
+      message.role === "user"
+      && String(message.id || "") === String(job?.recovery?.clientUserMessageId || "")
+    ));
+    if (recovered && originalMessageExists) {
+      changed = appendRecoveredAssistantMessage(chat, recovered) || changed;
+    }
+  }
+  if (changed) {
+    saveState();
+    renderAll();
+    statusEl.textContent = "Recovered a completed agent response after refresh.";
+  }
+}
+
+function importCompletedJobIntoChat(job) {
+  const recovered = getJobRecoveryMessage(job);
+  const chat = getActiveChat();
+  if (!recovered || !chat || hasRecoveredJob(chat, recovered.jobId)) return;
+  if (recovered.prompt) {
+    chat.messages.push({
+      id: uid(),
+      role: "user",
+      content: recovered.prompt,
+      createdAt: new Date(job.createdAt || Date.now()).toISOString()
+    });
+  }
+  appendRecoveredAssistantMessage(chat, recovered);
+  saveState();
+  renderAll();
+  statusEl.textContent = "Agent result added to this chat. You can continue from it now.";
+}
+
+function importSubagentIntoChat(job) {
+  const summary = String(job?.result?.summary || "").trim();
+  const chat = getActiveChat();
+  const jobId = `subagent:${job?.id || ""}`;
+  if (!summary || !chat || hasRecoveredJob(chat, jobId)) return;
+  chat.messages.push({
+    id: uid(),
+    role: "user",
+    content: `Research task: ${job.task || "Subagent research"}`,
+    createdAt: new Date(job.createdAt || Date.now()).toISOString()
+  });
+  chat.messages.push({
+    id: uid(),
+    jobId,
+    role: "assistant",
+    content: summary,
+    createdAt: new Date(job.completedAt || Date.now()).toISOString(),
+    traceId: String(job.id || ""),
+    executedTools: Array.isArray(job.result?.executedTools) ? job.result.executedTools : []
+  });
+  saveState();
+  renderAll();
+  statusEl.textContent = "Research result added to this chat. You can continue from it now.";
+}
+
+async function enqueueAgentRun() {
+  const prompt = String(agentQueuePromptInputEl?.value || "").trim();
+  if (!prompt) {
+    if (agentQueueStatusEl) agentQueueStatusEl.textContent = "Enter a task first.";
+    return;
+  }
+  if (enqueueAgentRunBtnEl) enqueueAgentRunBtnEl.disabled = true;
+  try {
+    const chat = getActiveChat();
+    const queuedMessage = { id: uid(), role: "user", content: prompt, createdAt: new Date().toISOString() };
+    const requestChat = { ...chat, messages: [...chat.messages, queuedMessage] };
+    const body = buildRequestBodyForUserMessage(requestChat, queuedMessage.id);
+    body.provider = normalizeProvider(agentQueueProviderSelectEl?.value) || chat.provider;
+    body.model = String(agentQueueModelSelectEl?.value || queueProviderDefaultModel(body.provider));
+    body.reasoningEffort = undefined;
+    body.agentMode = true;
+    body.priority = agentQueuePrioritySelectEl?.value || "normal";
+    const response = await fetch("/api/chat/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const data = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "Failed to enqueue task");
+    agentQueuePromptInputEl.value = "";
+    agentQueueStatusEl.textContent = `Queued ${data.job?.id || "agent run"}.`;
+    await loadAgentQueue();
+  } catch (error) {
+    agentQueueStatusEl.textContent = `Error: ${error.message}`;
+  } finally {
+    if (enqueueAgentRunBtnEl) enqueueAgentRunBtnEl.disabled = false;
+  }
+}
+
+async function updateQueuedJobPriority(jobId, priority) {
+  const response = await fetch(`/api/chat/jobs/${encodeURIComponent(jobId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ priority })
+  });
+  const data = await parseJsonResponse(response);
+  if (!response.ok) {
+    agentQueueStatusEl.textContent = `Error: ${data.error || "Priority update failed"}`;
+  }
+  await loadAgentQueue();
+}
+
+async function cancelQueuedJob(jobId) {
+  const response = await fetch(`/api/chat/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+  const data = await parseJsonResponse(response);
+  if (!response.ok) agentQueueStatusEl.textContent = `Error: ${data.error || "Cancel failed"}`;
+  await loadAgentQueue();
+}
+
+async function toggleAgentQueue() {
+  const response = await fetch("/api/chat/jobs/queue-control", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: agentQueuePaused ? "resume" : "pause" })
+  });
+  const data = await parseJsonResponse(response);
+  if (!response.ok) agentQueueStatusEl.textContent = `Error: ${data.error || "Queue control failed"}`;
+  await loadAgentQueue();
+}
+
+function startAgentQueuePolling() {
+  if (agentQueuePollTimer) clearInterval(agentQueuePollTimer);
+  loadAgentQueue();
+  loadSubagentOperations();
+  agentQueuePollTimer = setInterval(() => {
+    loadAgentQueue();
+    loadSubagentOperations();
+  }, 4000);
+}
+
 function applyTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
   themeToggleEl.textContent = theme === "dark" ? "Light mode" : "Dark mode";
@@ -743,6 +1826,8 @@ function renderCodeFence(rawCode, language) {
 function renderMarkdown(markdown) {
   let source = String(markdown || "");
   const fences = [];
+  const inlineCodes = [];
+  const mathBlocks = [];
 
   const isTableDivider = (line) => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line || "");
   const splitTableCells = (line) => {
@@ -763,9 +1848,36 @@ function renderMarkdown(markdown) {
     return token;
   });
 
+  source = source.replace(/`([^`]+)`/g, (_match, code) => {
+    const token = `@@INLINE_CODE_${inlineCodes.length}@@`;
+    inlineCodes.push(`<code>${escapeHtml(code)}</code>`);
+    return token;
+  });
+
+  const renderMath = (expression, displayMode, fallback) => {
+    try {
+      const token = `@@MATH_${mathBlocks.length}@@`;
+      mathBlocks.push(katex.renderToString(String(expression || "").trim(), {
+        displayMode,
+        output: "htmlAndMathml",
+        strict: false,
+        throwOnError: true,
+        trust: false
+      }));
+      return token;
+    } catch {
+      return fallback;
+    }
+  };
+
+  source = source
+    .replace(/\$\$([\s\S]+?)\$\$/g, (match, expression) => renderMath(expression, true, match))
+    .replace(/\\\[([\s\S]+?)\\\]/g, (match, expression) => renderMath(expression, true, match))
+    .replace(/\\\(([^\n]+?)\\\)/g, (match, expression) => renderMath(expression, false, match))
+    .replace(/(^|[^\\$])\$([^\n$]+?)\$/gm, (match, prefix, expression) => `${prefix}${renderMath(expression, false, match.slice(prefix.length))}`);
+
   let text = escapeHtml(source);
 
-  text = text.replace(/`([^`]+)`/g, "<code>$1</code>");
   text = text.replace(/^### (.*)$/gm, "<h3>$1</h3>");
   text = text.replace(/^## (.*)$/gm, "<h2>$1</h2>");
   text = text.replace(/^# (.*)$/gm, "<h1>$1</h1>");
@@ -882,6 +1994,12 @@ function renderMarkdown(markdown) {
   let html = out.join("\n");
   fences.forEach((block, index) => {
     html = html.replace(`@@FENCE_${index}@@`, block);
+  });
+  inlineCodes.forEach((block, index) => {
+    html = html.replace(`@@INLINE_CODE_${index}@@`, block);
+  });
+  mathBlocks.forEach((block, index) => {
+    html = html.replace(`@@MATH_${index}@@`, block);
   });
   return html;
 }
@@ -1399,7 +2517,10 @@ function renderMessages() {
       </div>
       <div class="md">${renderMarkdown(msg.content)}</div>
       ${Array.isArray(msg.executedTools) && msg.executedTools.length > 0
-        ? `<div class="msg-tools">Tools used: ${msg.executedTools.map((tool) => `<span class="tool-chip">${escapeHtml(tool)}</span>`).join(" ")}</div>`
+        ? `<details class="msg-tools-disclosure">
+            <summary>Tool calls <span class="tool-chip">${msg.executedTools.length}</span></summary>
+            <div class="msg-tools">${msg.executedTools.map((tool) => `<span class="tool-chip">${escapeHtml(tool)}</span>`).join(" ")}</div>
+          </details>`
         : ""}
       ${msg.contextCompaction?.applied
         ? `<div class="msg-tools">Context compacted for provider: <span class="tool-chip">${escapeHtml(String(msg.contextCompaction.originalMessageCount || "?"))}</span> -> <span class="tool-chip">${escapeHtml(String(msg.contextCompaction.sentMessageCount || "?"))}</span> messages. Full chat remains in archive/history.</div>`
@@ -1421,12 +2542,16 @@ function buildRequestBodyForUserMessage(chat, userMessageId) {
   const payloadMessages = buildPayloadMessages(contextMessages);
   const contextPreamble = buildContextPreamble(chat);
   return {
+    clientChatId: chat.id,
+    clientUserMessageId: userMessageId,
     provider: chat.provider,
     model: chat.model,
     reasoningEffort: getReasoningEffortOptions(chat.provider, chat.model).includes(chat.reasoningEffort)
       ? chat.reasoningEffort
       : undefined,
     agentMode: agentModeToggleEl.checked,
+    toolProfile: getAgentToolProfile(),
+    autoCheckpoint: autoCheckpointEnabled(),
     agentMaxStepsOverride: Number.isInteger(Number(chat.agentMaxStepsOverride)) && Number(chat.agentMaxStepsOverride) > 0
       ? Number(chat.agentMaxStepsOverride)
       : undefined,
@@ -1446,12 +2571,13 @@ function applyChatResponseStatus(data) {
   const contextNote = lastContextDirectiveCount > 0
     ? ` Context updated (${lastContextDirectiveCount} change(s)).`
     : "";
+  const checkpointNote = data.checkpoint?.shortHash ? ` Checkpoint ${data.checkpoint.shortHash} created.` : "";
   if (data.contextCompaction?.applied) {
-    statusEl.textContent = `Done. Provider context was compacted (${data.contextCompaction.originalMessageCount || "?"} -> ${data.contextCompaction.sentMessageCount || "?"} messages); full chat remains archived.${contextNote}`;
+    statusEl.textContent = `Done. Provider context was compacted (${data.contextCompaction.originalMessageCount || "?"} -> ${data.contextCompaction.sentMessageCount || "?"} messages); full chat remains archived.${contextNote}${checkpointNote}`;
   } else if (agentModeToggleEl.checked && usedTools.length === 0) {
-    statusEl.textContent = `Done, but no tools were executed for this reply.${contextNote}`;
+    statusEl.textContent = `Done, but no tools were executed for this reply.${contextNote}${checkpointNote}`;
   } else {
-    statusEl.textContent = `Done.${contextNote}`;
+    statusEl.textContent = `Done.${contextNote}${checkpointNote}`;
   }
 }
 
@@ -1479,26 +2605,34 @@ async function submitUserMessageRequest(chatId, userMessageId) {
     throw new Error("Original user message is missing.");
   }
 
-  writeChat.messages.push({
-    id: uid(),
-    role: "assistant",
-    content: data.reply || "(No output returned)",
-    createdAt: new Date().toISOString(),
-    traceId: String(data.traceId || ""),
-    executedTools: Array.isArray(data.executedTools) ? data.executedTools : [],
-    contextCompaction: data.contextCompaction || null
-  });
+  const alreadyRecovered = data.jobId && hasRecoveredJob(writeChat, data.jobId);
+  if (!alreadyRecovered) {
+    writeChat.messages.push({
+      id: uid(),
+      jobId: String(data.jobId || ""),
+      role: "assistant",
+      content: data.reply || "(No output returned)",
+      createdAt: new Date().toISOString(),
+      traceId: String(data.traceId || ""),
+      executedTools: Array.isArray(data.executedTools) ? data.executedTools : [],
+      contextCompaction: data.contextCompaction || null,
+      checkpoint: data.checkpoint || null
+    });
+  }
   updateTracePanel(data.traceId || "", "done");
 
   if (data.model) {
     writeChat.model = data.model;
   }
 
-  lastContextDirectiveCount = applyAgentContextMutations(chatId, data.contextMutations)
-    + applyAssistantContextDirectives(chatId, data.reply || "");
+  lastContextDirectiveCount = alreadyRecovered
+    ? 0
+    : applyAgentContextMutations(chatId, data.contextMutations)
+      + applyAssistantContextDirectives(chatId, data.reply || "");
   saveState();
   renderAll();
   loadToolRuns();
+  loadRunEvidence();
   clearFailedRetryTarget();
   return data;
 }
@@ -1536,28 +2670,13 @@ async function retryFailedUserMessage(chatId, userMessageId) {
 function updateModelSelect() {
   const chat = getActiveChat();
   const provider = normalizeProvider(chat.provider) || config.defaultProvider;
-
-  const providerModels = modelCatalog
-    .filter((entry) => entry.provider === provider && CHAT_CAPABLE_TYPES.has(entry.type))
-    .map((entry) => entry.tag);
-
-  let opts = providerModels.length > 0
-    ? [...new Set(providerModels)]
-    : [...new Set([
-      provider === "xai" ? config.xaiDefaultModel : config.defaultModel,
-      ...FALLBACK_MODELS
-    ])];
-
-  const providerAllowedModels = provider === "xai"
-    ? config.xaiAllowedModels
-    : config.allowedModels;
-
-  if (providerAllowedModels.length > 0) {
-    opts = opts.filter((item) => providerAllowedModels.includes(item));
-    if (opts.length === 0) {
-      opts = [...providerAllowedModels];
-    }
-  }
+  const opts = providerModelOptions({
+    config,
+    modelCatalog,
+    provider,
+    chatCapableTypes: CHAT_CAPABLE_TYPES,
+    fallbackModels: FALLBACK_MODELS
+  });
 
   modelSelectEl.innerHTML = "";
 
@@ -1594,7 +2713,7 @@ function updateProviderSelect() {
   for (const provider of providers) {
     const opt = document.createElement("option");
     opt.value = provider;
-    opt.textContent = provider;
+    opt.textContent = providerLabel(provider);
     providerSelectEl.appendChild(opt);
   }
 
@@ -1615,6 +2734,7 @@ function renderAll() {
   syncAgentModeToggle();
   renderContextPanel();
   renderMessages();
+  renderAgentOperations();
 }
 
 function countStoredLegacyCodeTokens() {
@@ -2211,7 +3331,7 @@ function isAgentModeEnabled() {
 function syncAgentModeToggle() {
   const chat = getActiveChat();
   const provider = normalizeProvider(chat.provider);
-  const supported = (config.agentModeSupportedProviders || []).includes(provider);
+  const supported = providerSupportsAgentModel(config, provider, chat.model);
   agentModeToggleEl.disabled = !supported;
   if (!supported) {
     agentModeToggleEl.checked = false;
@@ -2258,6 +3378,23 @@ async function loadConfig() {
     if (typeof data?.xaiDefaultModel === "string") {
       config.xaiDefaultModel = data.xaiDefaultModel;
     }
+    if (data?.defaultModelsByProvider && typeof data.defaultModelsByProvider === "object") {
+      config.defaultModelsByProvider = Object.fromEntries(
+        Object.entries(data.defaultModelsByProvider)
+          .map(([provider, model]) => [normalizeProvider(provider), typeof model === "string" ? model : ""])
+          .filter(([provider, model]) => provider && model)
+      );
+    }
+    if (data?.allowedModelsByProvider && typeof data.allowedModelsByProvider === "object") {
+      config.allowedModelsByProvider = Object.fromEntries(
+        Object.entries(data.allowedModelsByProvider)
+          .map(([provider, models]) => [
+            normalizeProvider(provider),
+            Array.isArray(models) ? models.filter((item) => typeof item === "string" && item) : []
+          ])
+          .filter(([provider]) => provider)
+      );
+    }
     if (Array.isArray(data?.allowedModels)) {
       config.allowedModels = data.allowedModels.filter((item) => typeof item === "string" && item);
     }
@@ -2273,6 +3410,16 @@ async function loadConfig() {
       config.agentModeSupportedProviders = data.agentModeSupportedProviders
         .map((item) => normalizeProvider(item))
         .filter(Boolean);
+    }
+    if (data?.agentModeModelsByProvider && typeof data.agentModeModelsByProvider === "object") {
+      config.agentModeModelsByProvider = Object.fromEntries(
+        Object.entries(data.agentModeModelsByProvider)
+          .map(([provider, models]) => [
+            normalizeProvider(provider),
+            Array.isArray(models) ? models.filter((item) => typeof item === "string" && item) : []
+          ])
+          .filter(([provider]) => provider)
+      );
     }
     if (data?.agentStepOverride && typeof data.agentStepOverride === "object") {
       config.agentStepOverride = {
@@ -2297,7 +3444,7 @@ async function loadConfig() {
       chat.provider = config.defaultProvider;
     }
     if (!chat.model) {
-      chat.model = config.defaultModel;
+      chat.model = queueProviderDefaultModel(chat.provider);
     }
   }
   saveState();
@@ -2408,6 +3555,7 @@ function startChatJobEventStream(jobId) {
       const name = parsed?.payload?.name || "tool";
       const durationMs = Number(parsed?.payload?.durationMs || 0);
       statusEl.textContent = `Finished tool: ${name} (${durationMs}ms)`;
+      loadRunEvidence();
     } catch {
       // Ignore malformed event payloads.
     }
@@ -2419,6 +3567,7 @@ function startChatJobEventStream(jobId) {
   });
   source.addEventListener("completed", () => {
     updateTracePanel(currentTraceId, "completed");
+    loadRunEvidence();
     stopActiveJobTracking();
   });
   source.addEventListener("cancelled", () => {
@@ -2466,7 +3615,7 @@ async function pollChatJob(jobId, timeoutMs = 18 * 60 * 1000) {
 
     const job = data?.job || {};
     if (job.status === "completed") {
-      return job.result || {};
+      return { ...(job.result || {}), jobId: job.id };
     }
     if (job.status === "failed") {
       throw new Error(job?.error?.message || "Chat job failed");
@@ -2595,10 +3744,10 @@ async function loadModelCatalog() {
             .filter(Boolean)
           : []
       }))
-      .filter((entry) => /^[a-zA-Z0-9._/-]{2,120}$/.test(entry.tag));
+      .filter((entry) => isValidCatalogModelTag(entry.tag));
   } catch {
     modelCatalog = [];
-  }    
+  }
 }
 
 async function sendPrompt() {
@@ -2985,6 +4134,126 @@ agentModeToggleEl.addEventListener("change", () => {
   statusEl.textContent = agentModeToggleEl.checked ? "Agent tools enabled." : "Agent tools disabled.";
 });
 
+if (toolProfileSelectEl) {
+  toolProfileSelectEl.value = getAgentToolProfile();
+  toolProfileSelectEl.addEventListener("change", () => {
+    const profile = ["read-only", "standard", "full"].includes(toolProfileSelectEl.value)
+      ? toolProfileSelectEl.value
+      : "full";
+    storageSet(AGENT_TOOL_PROFILE_KEY, profile);
+    renderAgentOperationsSummary();
+    statusEl.textContent = `Agent tool profile set to ${agentToolProfileLabel(profile)}.`;
+  });
+}
+
+if (autoCheckpointToggleEl) {
+  autoCheckpointToggleEl.checked = autoCheckpointEnabled();
+  autoCheckpointToggleEl.addEventListener("change", () => {
+    storageSet(AGENT_AUTO_CHECKPOINT_KEY, autoCheckpointToggleEl.checked ? "true" : "false");
+    statusEl.textContent = autoCheckpointToggleEl.checked
+      ? "Pre-run agent checkpoints enabled."
+      : "Pre-run agent checkpoints disabled.";
+  });
+}
+
+if (refreshOperationsHealthBtnEl) {
+  refreshOperationsHealthBtnEl.addEventListener("click", loadOperationsHealth);
+}
+
+if (refreshToolContainersBtnEl) refreshToolContainersBtnEl.addEventListener("click", loadManagedToolContainers);
+if (removeToolContainersBtnEl) removeToolContainersBtnEl.addEventListener("click", removeManagedToolContainers);
+
+if (refreshEvidenceBtnEl) {
+  refreshEvidenceBtnEl.addEventListener("click", loadRunEvidence);
+}
+
+if (enqueueAgentRunBtnEl) enqueueAgentRunBtnEl.addEventListener("click", enqueueAgentRun);
+if (toggleAgentQueueBtnEl) toggleAgentQueueBtnEl.addEventListener("click", toggleAgentQueue);
+if (refreshAgentQueueBtnEl) refreshAgentQueueBtnEl.addEventListener("click", loadAgentQueue);
+if (refreshSubagentsBtnEl) refreshSubagentsBtnEl.addEventListener("click", loadSubagentOperations);
+if (subagentStatusFilterEl) subagentStatusFilterEl.addEventListener("change", loadSubagentOperations);
+if (subagentParentFilterEl) subagentParentFilterEl.addEventListener("input", loadSubagentOperations);
+if (agentQueueProviderSelectEl) {
+  agentQueueProviderSelectEl.addEventListener("change", () => renderAgentQueueModelOptions());
+}
+
+if (saveRecipeBtnEl) {
+  saveRecipeBtnEl.addEventListener("click", () => {
+    const name = String(recipeNameInputEl?.value || "").trim();
+    const prompt = String(promptEl.value || "").trim();
+    if (!name || !prompt) {
+      if (recipesStatusEl) recipesStatusEl.textContent = "Enter a name and draft prompt first.";
+      return;
+    }
+    const chat = getActiveChat();
+    const recipes = getSavedAgentRecipes();
+    const existing = recipes.find((recipe) => recipe.name.toLowerCase() === name.toLowerCase());
+    const recipe = {
+      id: existing?.id || uid(),
+      name,
+      prompt,
+      provider: chat.provider,
+      model: chat.model,
+      reasoningEffort: chat.reasoningEffort || "",
+      agentMaxStepsOverride: chat.agentMaxStepsOverride || null,
+      agentMode: agentModeToggleEl.checked,
+      toolProfile: getAgentToolProfile(),
+      autoCheckpoint: autoCheckpointEnabled(),
+      updatedAt: new Date().toISOString()
+    };
+    const next = [recipe, ...recipes.filter((item) => item.id !== recipe.id)];
+    saveAgentRecipes(next);
+    renderRecipeSelect(recipe.id);
+    if (recipesStatusEl) recipesStatusEl.textContent = existing ? "Recipe updated." : "Recipe saved.";
+  });
+}
+
+if (loadRecipeBtnEl) {
+  loadRecipeBtnEl.addEventListener("click", () => {
+    const recipe = getSavedAgentRecipes().find((item) => item.id === recipeSelectEl?.value);
+    if (!recipe) {
+      if (recipesStatusEl) recipesStatusEl.textContent = "Select a saved recipe first.";
+      return;
+    }
+    const chat = getActiveChat();
+    promptEl.value = recipe.prompt || "";
+    chat.provider = normalizeProvider(recipe.provider) || chat.provider;
+    chat.model = String(recipe.model || chat.model);
+    chat.reasoningEffort = normalizeReasoningEffort(recipe.reasoningEffort);
+    chat.agentMaxStepsOverride = Number.isInteger(Number(recipe.agentMaxStepsOverride))
+      ? Number(recipe.agentMaxStepsOverride)
+      : null;
+    agentModeToggleEl.checked = recipe.agentMode !== false;
+    storageSet(AGENT_MODE_STORAGE_KEY, agentModeToggleEl.checked ? "true" : "false");
+    storageSet(AGENT_TOOL_PROFILE_KEY, ["read-only", "standard", "full"].includes(recipe.toolProfile) ? recipe.toolProfile : "full");
+    storageSet(AGENT_AUTO_CHECKPOINT_KEY, recipe.autoCheckpoint ? "true" : "false");
+    saveState();
+    renderAll();
+    promptEl.focus();
+    if (recipesStatusEl) recipesStatusEl.textContent = `Loaded ${recipe.name}.`;
+  });
+}
+
+if (deleteRecipeBtnEl) {
+  deleteRecipeBtnEl.addEventListener("click", () => {
+    const id = String(recipeSelectEl?.value || "");
+    const recipes = getSavedAgentRecipes();
+    const recipe = recipes.find((item) => item.id === id);
+    if (!recipe) {
+      if (recipesStatusEl) recipesStatusEl.textContent = "No recipe selected.";
+      return;
+    }
+    saveAgentRecipes(recipes.filter((item) => item.id !== id));
+    if (recipesStatusEl) recipesStatusEl.textContent = `${recipe.name} deleted.`;
+  });
+}
+
+if (recipeScheduleKindSelectEl) recipeScheduleKindSelectEl.addEventListener("change", syncRecipeScheduleFields);
+if (scheduleRecipeBtnEl) scheduleRecipeBtnEl.addEventListener("click", scheduleSelectedRecipe);
+if (refreshRecipeSchedulesBtnEl) refreshRecipeSchedulesBtnEl.addEventListener("click", loadRecipeSchedules);
+
+promptEl.addEventListener("input", renderContextBudget);
+
 if (notificationToggleEl) {
   notificationToggleEl.checked = notificationsEnabled();
   notificationToggleEl.addEventListener("change", async () => {
@@ -3111,6 +4380,14 @@ await loadModelCatalog();
 await loadWorkspaceInfo();
 saveState();
 renderAll();
+renderAgentQueueProviderOptions();
+if (recipeTimeZoneInputEl) recipeTimeZoneInputEl.value = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+if (recipeRunAtInputEl) recipeRunAtInputEl.value = new Date(Date.now() + 5 * 60_000).toISOString().slice(0, 16);
+syncRecipeScheduleFields();
 loadToolRuns();
 updateTracePanel("", "");
+loadOperationsHealth();
+loadManagedToolContainers();
+startAgentQueuePolling();
+startRecipeSchedulePolling();
 startNotificationPolling();

@@ -1,0 +1,25 @@
+[Unit]
+Description=Remote AI Access privileged static deployment helper
+Requires=raa-deploy-helper.socket
+After=raa-deploy-helper.socket apache2.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+SupplementaryGroups=remote-ai-access
+WorkingDirectory=/opt/remote-ai-access
+ExecStart=/usr/bin/node /opt/remote-ai-access/src/deployment-helper.js
+Environment=RAA_DEPLOY_ALLOWED_SUFFIXES=tg11.org
+Environment=RAA_DEPLOY_SANDBOX_ROOT=/opt/remote-ai-access/sandbox/workspaces
+Environment=RAA_DEPLOY_ROOT=/var/lib/raa-deploy
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/raa-deploy /etc/apache2/sites-available /etc/apache2/sites-enabled /run/raa-deploy
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native

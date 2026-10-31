@@ -29,6 +29,7 @@ function groupForPath(path) {
     tests: "Tests",
     tools: "Metadata",
     config: "Metadata",
+    activity: "Activity",
     chat: "Chat",
     session: "Session",
     notifications: "Notifications"
@@ -91,7 +92,7 @@ function renderEndpoints(data, filterText = "") {
     groups.get(group).push(endpoint);
   }
 
-  const groupOrder = ["Chat", "Session", "Files", "Tests", "Notifications", "Metadata", "Other"];
+  const groupOrder = ["Chat", "Activity", "Session", "Files", "Tests", "Notifications", "Metadata", "Other"];
   const ordered = [...groups.entries()].sort((a, b) => {
     const ai = groupOrder.indexOf(a[0]);
     const bi = groupOrder.indexOf(b[0]);
@@ -188,7 +189,19 @@ async function runToolStatus() {
   try {
     const configResponse = await fetch("/api/config");
     const config = await configResponse.json();
-    const model = config?.defaultModel || "gpt-4.1";
+    if (!configResponse.ok) {
+      throw new Error(config?.error || `Config request failed (${configResponse.status})`);
+    }
+    const agentProviders = Array.isArray(config?.agentModeSupportedProviders)
+      ? config.agentModeSupportedProviders.filter((provider) => typeof provider === "string" && provider)
+      : [];
+    const provider = agentProviders.includes(config?.defaultProvider)
+      ? config.defaultProvider
+      : agentProviders[0];
+    if (!provider) {
+      throw new Error("No configured provider supports Agent Tools mode");
+    }
+    const model = config?.defaultModelsByProvider?.[provider] || config?.defaultModel || "gpt-4.1";
     const toolName = String(toolStatusNameInputEl.value || "").trim();
     const prompt = toolName
       ? `Call tool_status with name=${toolName} and limit=10. Return concise JSON only.`
@@ -198,7 +211,7 @@ async function runToolStatus() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        provider: "openai",
+        provider,
         model,
         agentMode: true,
         messages: [{ role: "user", content: prompt }]

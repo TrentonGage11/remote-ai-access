@@ -84,6 +84,9 @@
         <label for="agentOverrideCodeInput">Agent Step Override Code</label>
         <input id="agentOverrideCodeInput" type="password" placeholder="secret unlock code for high step budgets" />
 
+        <label for="workspaceAgentOverrideCodesInput">Workspace Agent Step Override Codes (CSV workspace:code pairs)</label>
+        <textarea id="workspaceAgentOverrideCodesInput" rows="4" placeholder="default:step-secret,alice:another-step-secret"></textarea>
+
         <label for="uploadBypassCodesInput">Workspace Upload Bypass Codes (CSV workspace:code pairs)</label>
         <textarea id="uploadBypassCodesInput" rows="4" placeholder="default:secret123,alice:another-secret"></textarea>
 
@@ -101,6 +104,6 @@
     </main>
 
     <script src="api-auth.js"></script>
-    <script type="module" src="security-admin.js"></script>
+    <script type="module" src="security-admin.js?v=20260829a"></script>
   </body>
 </html>

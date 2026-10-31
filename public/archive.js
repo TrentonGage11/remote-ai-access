@@ -11,6 +11,8 @@ const LEGACY_CHAT_STATE_KEYS = [
 
 const themeToggleEl = document.getElementById("themeToggle");
 const downloadArchiveBtnEl = document.getElementById("downloadArchiveBtn");
+const saveServerArchiveBtnEl = document.getElementById("saveServerArchiveBtn");
+const loadServerArchiveBtnEl = document.getElementById("loadServerArchiveBtn");
 const copyArchiveBtnEl = document.getElementById("copyArchiveBtn");
 const repairArchiveStateBtnEl = document.getElementById("repairArchiveStateBtn");
 const importMergeBtnEl = document.getElementById("importMergeBtn");
@@ -18,9 +20,21 @@ const importReplaceBtnEl = document.getElementById("importReplaceBtn");
 const archiveFileInputEl = document.getElementById("archiveFileInput");
 const archiveStatusEl = document.getElementById("archiveStatus");
 const archiveJsonEl = document.getElementById("archiveJson");
+const archiveProfileEl = document.getElementById("archiveProfileInput");
 const chatSummaryListEl = document.getElementById("chatSummaryList");
+const ARCHIVE_PROFILE_KEY = "remote-ai-access-server-archive-profile-v1";
 
 let pendingImportMode = "merge";
+
+function archiveProfile() {
+  const profile = archiveProfileEl.value.trim() || "default";
+  if (!/^[A-Za-z0-9][A-Za-z0-9._ -]{0,63}$/.test(profile)) {
+    throw new Error("Archive profile must start with a letter or number and use only letters, numbers, spaces, dots, underscores, or hyphens.");
+  }
+  archiveProfileEl.value = profile;
+  localStorage.setItem(ARCHIVE_PROFILE_KEY, profile);
+  return profile;
+}
 
 function uid() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -293,6 +307,52 @@ async function handleImport(file) {
   render();
 }
 
+async function parseJsonResponse(response) {
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+  return data;
+}
+
+async function saveArchiveToServer() {
+  const profile = archiveProfile();
+  const password = window.prompt("Set an archive password. The server will store only the encrypted archive:", "");
+  if (!password) throw new Error("Archive password is required for server save");
+  const plainJson = JSON.stringify(readArchive());
+  const payload = await encryptArchiveJson(plainJson, password);
+  const response = await fetch("/api/chat/archive", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile, payload })
+  });
+  const data = await parseJsonResponse(response);
+  archiveStatusEl.textContent = `Saved profile “${profile}” (${data.bytes.toLocaleString()} bytes).`;
+}
+
+async function loadArchiveFromServer() {
+  const profile = archiveProfile();
+  const response = await fetch(`/api/chat/archive?profile=${encodeURIComponent(profile)}`, { cache: "no-store" });
+  const data = await parseJsonResponse(response);
+  if (!data.exists || !data.payload) {
+    archiveStatusEl.textContent = `No server archive exists yet for “${profile}”.`;
+    return;
+  }
+
+  if (!window.confirm("Replace this browser's current chats with the server archive? Download a local backup first if unsure.")) return;
+  let archiveJsonText;
+  if (data.payload.encrypted === true) {
+    const password = window.prompt("Enter the server archive password:", "");
+    if (!password) throw new Error("Archive password is required");
+    archiveJsonText = await decryptArchivePayload(data.payload, password);
+  } else {
+    archiveJsonText = JSON.stringify(data.payload.state || data.payload);
+  }
+  const parsed = normalizeArchive(JSON.parse(archiveJsonText));
+  writeArchive(parsed);
+  localStorage.setItem(HISTORY_EXPORT_KEY, JSON.stringify(parsed, null, 2));
+  archiveStatusEl.textContent = `Loaded ${parsed.chats.length} chat(s) from profile “${profile}”.`;
+  render();
+}
+
 themeToggleEl.addEventListener("click", () => {
   const current = document.documentElement.getAttribute("data-theme") || "light";
   const next = current === "dark" ? "light" : "dark";
@@ -324,6 +384,18 @@ downloadArchiveBtnEl.addEventListener("click", () => {
     archiveStatusEl.textContent = password ? "Encrypted archive downloaded." : "Archive downloaded.";
   })().catch((error) => {
     archiveStatusEl.textContent = `Archive download failed: ${error.message}`;
+  });
+});
+
+saveServerArchiveBtnEl?.addEventListener("click", () => {
+  saveArchiveToServer().catch((error) => {
+    archiveStatusEl.textContent = `Server save failed: ${error.message}`;
+  });
+});
+
+loadServerArchiveBtnEl?.addEventListener("click", () => {
+  loadArchiveFromServer().catch((error) => {
+    archiveStatusEl.textContent = `Server load failed: ${error.message}`;
   });
 });
 
@@ -371,4 +443,5 @@ archiveFileInputEl.addEventListener("change", async () => {
 });
 
 initTheme();
+archiveProfileEl.value = localStorage.getItem(ARCHIVE_PROFILE_KEY) || "default";
 render();

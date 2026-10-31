@@ -10,7 +10,8 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="styles.css?v=20260824d" />
+    <link rel="stylesheet" href="/vendor/katex/katex.min.css" />
+    <link rel="stylesheet" href="styles.css?v=20260902a" />
   </head>
   <body>
     <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
@@ -63,6 +64,10 @@
               <input id="agentStepOverrideCodeInput" type="password" placeholder="optional" aria-label="Per-chat agent step unlock code" />
             </label>
             <a class="btn btn-soft" href="filelab.html">File Lab</a>
+            <a class="btn btn-soft" href="git-change-center.html">Git Changes</a>
+            <a class="btn btn-soft" href="operations.html">Resources</a>
+            <a class="btn btn-soft" href="usage.html">Usage</a>
+            <a class="btn btn-soft" href="activity.html">Activity</a>
             <a class="btn btn-soft" href="api-tools.html">API Tools</a>
             <a class="btn btn-soft" href="security-admin.html">Security Admin</a>
             <a class="btn btn-soft" href="notifications.html">Notifications</a>
@@ -73,6 +78,7 @@
             <a class="btn btn-soft" href="search.html">Search</a>
             <a class="btn btn-soft" href="test-runner.html">Test Runner</a>
             <a class="btn btn-soft" href="archive.html">Chat Archive</a>
+            <a class="btn btn-soft" href="design.html">Design Lab</a>
             <a class="btn btn-soft" href="history.html">History JSON</a>
             <label class="model-field model-check" for="notificationToggle">
               <span>Notifications</span>
@@ -170,6 +176,195 @@
         </section>
 
         <section class="card disclosure-panel">
+          <details class="context-disclosure agent-operations-disclosure" data-disclosure-storage-key="remote-ai-access-agent-operations-open-v1">
+            <summary>
+              <span role="heading" aria-level="2">Agent Operations</span>
+              <span id="agentOperationsSummary" class="tab-meta">Full access · health not checked</span>
+            </summary>
+            <div class="context-disclosure-body agent-operations">
+              <div class="operations-toolbar">
+                <label class="model-field" for="toolProfileSelect">
+                  <span>Tool profile</span>
+                  <select id="toolProfileSelect" aria-label="Agent tool permission profile">
+                    <option value="read-only">Read only</option>
+                    <option value="standard">Standard</option>
+                    <option value="full">Full access</option>
+                  </select>
+                </label>
+                <label class="model-field model-check" for="autoCheckpointToggle">
+                  <span>Checkpoint before run</span>
+                  <input id="autoCheckpointToggle" type="checkbox" aria-label="Create a workspace checkpoint before each agent run" />
+                </label>
+                <a id="lastCheckpointLink" class="btn btn-soft" href="snapshots.html" hidden>Open checkpoint</a>
+              </div>
+
+              <details class="context-disclosure operations-block" data-disclosure-storage-key="remote-ai-access-operations-overview-open-v1">
+                <summary>
+                  <strong>Context budget / environment health</strong>
+                  <span id="contextBudgetLabel" class="tab-meta">0 / 0 characters</span>
+                </summary>
+                <div class="context-disclosure-body operations-grid">
+                  <section class="operations-subblock" aria-labelledby="contextBudgetHeading">
+                    <div class="operations-heading">
+                      <strong id="contextBudgetHeading">Context budget</strong>
+                    </div>
+                    <progress id="contextBudgetMeter" max="100" value="0">0%</progress>
+                  </section>
+                  <section class="operations-subblock" aria-labelledby="environmentHealthHeading">
+                    <div class="operations-heading">
+                      <strong id="environmentHealthHeading">Environment health</strong>
+                      <button id="refreshOperationsHealthBtn" class="btn btn-soft" type="button">Refresh</button>
+                    </div>
+                    <p id="operationsHealthStatus" class="muted-inline">Not checked.</p>
+                    <ul id="operationsHealthList" class="operations-list"></ul>
+                  </section>
+                  <section class="operations-subblock operations-subblock-wide" aria-labelledby="toolContainersHeading">
+                    <div class="operations-heading">
+                      <strong id="toolContainersHeading">Managed tool containers</strong>
+                      <div class="operations-toolbar">
+                        <button id="refreshToolContainersBtn" class="btn btn-soft" type="button">Refresh</button>
+                        <button id="removeToolContainersBtn" class="btn btn-soft danger" type="button" disabled>Remove managed containers</button>
+                      </div>
+                    </div>
+                    <p id="toolContainersStatus" class="muted-inline">Not checked.</p>
+                    <ul id="toolContainersList" class="operations-list"></ul>
+                  </section>
+                </div>
+              </details>
+
+              <details class="context-disclosure operations-block" data-disclosure-storage-key="remote-ai-access-agent-queue-open-v1">
+                <summary>
+                  <strong id="agentQueueHeading">Agent run queue</strong>
+                  <span id="agentQueueStatus" class="tab-meta">Loading queue...</span>
+                </summary>
+                <div class="context-disclosure-body queue-compose">
+                  <label class="model-field queue-prompt-field" for="agentQueuePromptInput">
+                    <span>Task</span>
+                    <textarea id="agentQueuePromptInput" rows="3" placeholder="Describe a background agent task"></textarea>
+                  </label>
+                  <label class="model-field" for="agentQueueProviderSelect">
+                    <span>Provider</span>
+                    <select id="agentQueueProviderSelect" aria-label="Queued agent provider"></select>
+                  </label>
+                  <label class="model-field" for="agentQueueModelSelect">
+                    <span>Model</span>
+                    <select id="agentQueueModelSelect" aria-label="Queued agent model"></select>
+                  </label>
+                  <label class="model-field" for="agentQueuePrioritySelect">
+                    <span>Priority</span>
+                    <select id="agentQueuePrioritySelect" aria-label="Queued agent task priority">
+                      <option value="low">Low</option>
+                      <option value="normal" selected>Normal</option>
+                      <option value="high">High</option>
+                      <option value="urgent">Urgent</option>
+                    </select>
+                  </label>
+                  <button id="enqueueAgentRunBtn" class="btn" type="button">Enqueue</button>
+                  <button id="toggleAgentQueueBtn" class="btn btn-soft" type="button">Pause</button>
+                  <button id="refreshAgentQueueBtn" class="btn btn-soft" type="button">Refresh</button>
+                  <ul id="agentQueueList" class="operations-list queue-list"></ul>
+                </div>
+              </details>
+
+              <details class="context-disclosure operations-block" data-disclosure-storage-key="remote-ai-access-subagents-open-v1">
+                <summary>
+                  <strong id="subagentOperationsHeading">Subagents</strong>
+                  <span id="subagentOperationsStatus" class="tab-meta">Loading children...</span>
+                </summary>
+                <div class="context-disclosure-body">
+                  <div class="subagent-toolbar">
+                  <label class="model-field" for="subagentStatusFilter">
+                    <span>Status</span>
+                    <select id="subagentStatusFilter" aria-label="Filter subagents by status">
+                      <option value="">All</option>
+                      <option value="awaiting_approval">Awaiting approval</option>
+                      <option value="running">Running</option>
+                      <option value="queued">Queued</option>
+                      <option value="completed">Completed</option>
+                      <option value="failed">Failed</option>
+                      <option value="cancelled">Cancelled</option>
+                    </select>
+                  </label>
+                  <label class="model-field subagent-parent-filter" for="subagentParentFilter">
+                    <span>Parent run</span>
+                    <input id="subagentParentFilter" type="search" placeholder="job ID" autocomplete="off" />
+                  </label>
+                  <button id="refreshSubagentsBtn" class="btn btn-soft" type="button">Refresh</button>
+                  </div>
+                  <ul id="subagentOperationsList" class="operations-list subagent-list"></ul>
+                </div>
+              </details>
+
+              <details class="context-disclosure operations-block" data-disclosure-storage-key="remote-ai-access-saved-recipes-open-v1">
+                <summary>
+                  <strong id="savedRecipesHeading">Saved recipes</strong>
+                  <span id="recipesStatus" class="tab-meta">Stored in this browser</span>
+                </summary>
+                <div class="context-disclosure-body">
+                  <div class="operations-toolbar">
+                  <label class="model-field" for="recipeSelect">
+                    <span>Recipe</span>
+                    <select id="recipeSelect" aria-label="Saved agent recipe"></select>
+                  </label>
+                  <label class="model-field" for="recipeNameInput">
+                    <span>Name</span>
+                    <input id="recipeNameInput" type="text" maxlength="80" placeholder="Review current changes" />
+                  </label>
+                  <button id="saveRecipeBtn" class="btn btn-soft" type="button">Save Current</button>
+                  <button id="loadRecipeBtn" class="btn btn-soft" type="button">Load</button>
+                  <button id="deleteRecipeBtn" class="btn btn-soft danger" type="button">Delete</button>
+                  </div>
+                  <div class="schedule-compose">
+                  <label class="model-field" for="recipeScheduleKindSelect">
+                    <span>Schedule</span>
+                    <select id="recipeScheduleKindSelect">
+                      <option value="once">Once</option>
+                      <option value="interval">Interval</option>
+                      <option value="daily">Daily</option>
+                    </select>
+                  </label>
+                  <label id="recipeRunAtField" class="model-field" for="recipeRunAtInput">
+                    <span>Run at</span>
+                    <input id="recipeRunAtInput" type="datetime-local" />
+                  </label>
+                  <label id="recipeIntervalField" class="model-field" for="recipeIntervalMinutesInput" hidden>
+                    <span>Every minutes</span>
+                    <input id="recipeIntervalMinutesInput" type="number" min="1" max="43200" value="60" />
+                  </label>
+                  <label id="recipeDailyTimeField" class="model-field" for="recipeDailyTimeInput" hidden>
+                    <span>Daily time</span>
+                    <input id="recipeDailyTimeInput" type="time" value="09:00" />
+                  </label>
+                  <label id="recipeTimeZoneField" class="model-field" for="recipeTimeZoneInput" hidden>
+                    <span>Time zone</span>
+                    <input id="recipeTimeZoneInput" type="text" placeholder="America/New_York" />
+                  </label>
+                  <button id="scheduleRecipeBtn" class="btn" type="button">Schedule Selected</button>
+                  <button id="refreshRecipeSchedulesBtn" class="btn btn-soft" type="button">Refresh Schedules</button>
+                  </div>
+                  <p id="recipeSchedulesStatus" class="muted-inline">No schedules loaded.</p>
+                  <ul id="recipeSchedulesList" class="operations-list queue-list"></ul>
+                </div>
+              </details>
+
+              <details class="context-disclosure operations-block" data-disclosure-storage-key="remote-ai-access-evidence-open-v1">
+                <summary>
+                  <strong id="runEvidenceHeading">Evidence and artifacts</strong>
+                  <span id="evidenceStatus" class="tab-meta">Run an agent task to collect trace evidence.</span>
+                </summary>
+                <div class="context-disclosure-body">
+                  <div class="operations-heading">
+                    <span class="muted-inline">Trace evidence from the current run</span>
+                    <button id="refreshEvidenceBtn" class="btn btn-soft" type="button">Refresh</button>
+                  </div>
+                  <ul id="evidenceList" class="operations-list"></ul>
+                </div>
+              </details>
+            </div>
+          </details>
+        </section>
+
+        <section class="card disclosure-panel">
           <details class="context-disclosure" data-disclosure-storage-key="remote-ai-access-run-trace-open-v1">
             <summary><span role="heading" aria-level="2">Run Trace</span></summary>
             <div class="context-disclosure-body">
@@ -206,6 +401,6 @@
     </main>
 
     <script src="api-auth.js?v=20260822a"></script>
-    <script type="module" src="app.js?v=20260824e"></script>
+    <script type="module" src="app.js?v=20260908b"></script>
   </body>
 </html>

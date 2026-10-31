@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design Lab | Remote AI Access</title>
+    <link rel="stylesheet" href="styles.css?v=20261030a" />
+  </head>
+  <body>
+    <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-b" aria-hidden="true"></div>
+    <main class="docs-shell">
+      <section class="card reveal" style="--d: 30ms">
+        <div class="topbar">
+          <div>
+            <h1>Design Lab</h1>
+            <p>Elephant/GOLDFISH-style design workflow using your configured AI provider.</p>
+          </div>
+          <div class="top-actions">
+            <a class="btn btn-soft" href="index.html">Back to Chat</a>
+            <button id="themeToggle" class="btn btn-soft" type="button">Dark mode</button>
+          </div>
+        </div>
+        <p class="muted-inline">Elephant keeps the project context and drafts. Goldfish receives only the draft and referenced context, so it can challenge assumptions without inheriting the brainstorming conversation.</p>
+      </section>
+
+      <section class="card reveal" style="--d: 70ms">
+        <div class="model-row">
+          <label class="model-field" for="providerSelect"><span>Provider</span><select id="providerSelect"></select></label>
+          <label class="model-field" for="modelSelect"><span>Model</span><select id="modelSelect"></select></label>
+        </div>
+        <label class="model-field" for="projectInput"><span>Feature / project idea</span><textarea id="projectInput" rows="4" placeholder="Describe the feature and what you want to build..."></textarea></label>
+        <label class="model-field" for="contextInput"><span>Relevant project context</span><textarea id="contextInput" rows="8" placeholder="Paste constraints, APIs, files, or decisions the design should respect..."></textarea></label>
+        <div class="top-actions">
+          <button id="brainstormBtn" class="btn" type="button">Elephant: Brainstorm</button>
+          <button id="draftBtn" class="btn btn-soft" type="button">Elephant: Draft spec</button>
+          <button id="reviewBtn" class="btn btn-soft" type="button">Goldfish: Review</button>
+          <button id="resolveBtn" class="btn btn-soft" type="button">Resolve: Plan</button>
+        </div>
+        <div class="top-actions">
+          <label class="model-field" for="workspaceNameInput"><span>New workspace name</span><input id="workspaceNameInput" maxlength="64" placeholder="for example: share-chat-design" autocomplete="off" /></label>
+          <button id="createWorkspaceBtn" class="btn btn-soft" type="button">Create Workspace from Design</button>
+        </div>
+        <p id="designStatus" class="muted-inline" aria-live="polite">Ready.</p>
+      </section>
+
+      <section class="card reveal" style="--d: 110ms">
+        <label class="model-field" for="artifactInput"><span>Working design artifact</span><textarea id="artifactInput" rows="24" placeholder="Brainstorm, draft, review findings, or the resolved plan will appear here..."></textarea></label>
+        <div class="top-actions">
+          <button id="copyArtifactBtn" class="btn btn-soft" type="button">Copy artifact</button>
+          <button id="downloadArtifactBtn" class="btn btn-soft" type="button">Download Markdown</button>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="design.js?v=20261031a"></script>
+  </body>
+</html>

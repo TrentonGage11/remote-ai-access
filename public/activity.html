@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Workspace Activity | Remote AI Access</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css?v=20260829c" />
+  </head>
+  <body>
+    <main class="docs-shell activity-shell">
+      <header class="activity-header reveal" style="--d: 30ms">
+        <div>
+          <p class="activity-kicker">Workspace operations</p>
+          <h1>Activity Timeline</h1>
+          <p id="activitySummary">Loading recent activity...</p>
+        </div>
+        <div class="top-actions">
+          <a class="btn btn-soft" href="index.html">Chat</a>
+          <a class="btn btn-soft" href="audit.html">Audit</a>
+          <button id="refreshActivityBtn" class="btn" type="button">Refresh</button>
+        </div>
+      </header>
+
+      <section class="activity-controls reveal" style="--d: 60ms" aria-label="Activity filters">
+        <label>Category
+          <select id="activityCategorySelect">
+            <option value="">All activity</option>
+            <option value="agent">Agent runs</option>
+            <option value="subagent">Subagents</option>
+            <option value="tool">Tool calls</option>
+            <option value="git">Git and snapshots</option>
+            <option value="file">Files and uploads</option>
+            <option value="share">Shares</option>
+            <option value="recipe">Recipes</option>
+            <option value="failure">Failures</option>
+            <option value="workspace">Other workspace events</option>
+          </select>
+        </label>
+        <label class="activity-query-field">Search
+          <input id="activityQueryInput" type="search" placeholder="tool, path, action, status" />
+        </label>
+        <label>Trace
+          <input id="activityTraceInput" type="search" placeholder="trace or job ID" />
+        </label>
+        <label>From
+          <input id="activityFromInput" type="datetime-local" />
+        </label>
+        <label>To
+          <input id="activityToInput" type="datetime-local" />
+        </label>
+        <label>Limit
+          <select id="activityLimitSelect">
+            <option value="100">100</option>
+            <option value="250" selected>250</option>
+            <option value="500">500</option>
+            <option value="1000">1,000</option>
+          </select>
+        </label>
+        <label class="activity-live-toggle"><input id="activityLiveToggle" type="checkbox" checked /> Live</label>
+        <button id="clearActivityFiltersBtn" class="btn btn-soft" type="button">Clear</button>
+      </section>
+
+      <section class="activity-overview reveal" style="--d: 90ms">
+        <div id="activityCategoryCounts" class="activity-counts" aria-live="polite"></div>
+        <span id="activityUpdatedAt" class="tab-meta"></span>
+      </section>
+
+      <section class="activity-stream reveal" style="--d: 120ms" aria-label="Chronological workspace activity">
+        <ol id="activityList" class="activity-list"></ol>
+        <p id="activityEmpty" class="activity-empty" hidden>No activity matches these filters.</p>
+      </section>
+    </main>
+
+    <script src="api-auth.js"></script>
+    <script type="module" src="activity.js?v=20260829a"></script>
+  </body>
+</html>

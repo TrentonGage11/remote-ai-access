@@ -41,6 +41,8 @@ test("chat job create and poll completes", async (t) => {
   }
 
   const payload = {
+    clientChatId: "test-chat-1",
+    clientUserMessageId: "test-message-1",
     provider: "openai",
     agentMode: false,
     messages: [{ role: "user", content: "Reply with exactly: ok" }]
@@ -55,6 +57,12 @@ test("chat job create and poll completes", async (t) => {
   assert.equal(started.response.status, 202);
   assert.equal(started.data?.ok, true);
   assert.match(String(started.data?.job?.id || ""), /^job-/);
+  assert.deepEqual(started.data?.job?.recovery, {
+    clientChatId: "test-chat-1",
+    clientUserMessageId: "test-message-1",
+    prompt: "Reply with exactly: ok",
+    model: ""
+  });
 
   const job = await pollJob(started.data.job.id, 60_000);
   assert.ok(["completed", "failed", "cancelled"].includes(job.status));

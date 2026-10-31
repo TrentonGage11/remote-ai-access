@@ -31,7 +31,7 @@ Initial child roles:
   "provider": "openai",
   "model": "gpt-5.5",
   "allowedTools": ["list_directory", "read_file", "search_internet"],
-  "maxSteps": 12,
+  "maxSteps": 24,
   "maxInputTokens": 60000,
   "maxOutputTokens": 12000,
   "maxCostUsd": 0.50,
@@ -87,13 +87,14 @@ The parent should be able to accept, reject, or selectively merge proposed artif
 Start conservatively:
 
 - Maximum depth: 1 (children cannot call `spawn_subagent`).
-- Maximum concurrent children per parent: 2.
-- Maximum children per parent request: 4.
-- Maximum steps per child: 20.
-- Maximum runtime per child: 10 minutes.
+- Maximum concurrent children per parent: 4.
+- Maximum children per parent request: 8.
+- Default steps per child: 64 research/image, 96 review, and 128 coding.
+- Maximum steps per child: 256.
+- Default runtime: 15 minutes research/image, 20 minutes review, and 30 minutes coding; maximum 60 minutes.
 - Maximum returned summary: 12,000 characters.
 - Maximum input/output tokens and estimated cost: required role-level defaults with per-request lower overrides.
-- Maximum event history: use the existing bounded chat-job event policy.
+- Maximum event history: 4,096 bounded child events.
 
 The parent cancellation path must abort every active child. Child failures should be returned independently and should not automatically fail sibling jobs.
 
@@ -114,10 +115,11 @@ Each child receives a snapshot of the parent's active chat/global context plus a
 
 1. Extract and test the reusable agent runner without changing current chat behavior.
 2. Implement in-memory child jobs, lifecycle tools, limits, cancellation, and audit logging.
-3. Add read-only `research` children and parent UI status.
-4. Add parallel `wait_subagents` and the `review` role.
-5. Add parent UI progress, usage, evidence, and selective result acceptance.
-6. Add explicitly approved `coding` children.
+3. Add read-only `research` children and parent UI status. (deployed)
+4. Add parallel `wait_subagents` and the `review` role. (deployed)
+5. Add parent UI progress, usage, evidence, and selective result acceptance. (deployed)
+5a. Add a bounded `image` role with licensed-source search and configured provider generation. (deployed)
+6. Add explicitly approved `coding` children. (deployed)
 7. Add durable job persistence only if child jobs must survive service restarts.
 
 ## Validation
@@ -132,4 +134,5 @@ Each child receives a snapshot of the parent's active chat/global context plus a
 - Parallel children cannot exceed the reserved parent token/cost budget.
 - Reusing a spawn idempotency key returns the original child rather than starting another.
 - Evidence references and artifacts are constrained to the inherited workspace.
+- Artifact and context decisions can reference only declared child output and are audit logged.
 - Existing direct and queued agent behavior remains unchanged.

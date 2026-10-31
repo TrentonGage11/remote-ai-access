@@ -25,7 +25,10 @@
           </div>
           <div class="top-actions">
             <a class="btn btn-soft" href="index.html">Back to Chat</a>
+            <a class="btn btn-soft" href="design.html">Design Lab</a>
             <button id="downloadArchiveBtn" class="btn">Download Archive</button>
+            <button id="saveServerArchiveBtn" class="btn" type="button">Save to Server</button>
+            <button id="loadServerArchiveBtn" class="btn btn-soft" type="button">Load from Server</button>
             <button id="copyArchiveBtn" class="btn btn-soft" type="button">Copy JSON</button>
             <button id="repairArchiveStateBtn" class="btn btn-soft" type="button">Repair Chat State</button>
             <button id="themeToggle" class="btn btn-soft" type="button">Dark mode</button>
@@ -35,6 +38,8 @@
 
       <section class="card reveal" style="--d: 70ms">
         <h2>Import Archive</h2>
+        <label class="model-field" for="archiveProfileInput"><span>Server archive profile</span><input id="archiveProfileInput" maxlength="64" placeholder="default, Gage, Work..." autocomplete="off" /></label>
+        <p class="muted-inline">Save and Load use this named profile. Different people should choose different profile names; the archive password still protects the contents.</p>
         <div class="top-actions">
           <button id="importMergeBtn" class="btn btn-soft" type="button">Import and Merge</button>
           <button id="importReplaceBtn" class="btn btn-soft danger" type="button">Import and Replace</button>
@@ -55,6 +60,6 @@
     </main>
 
     <script src="api-auth.js?v=20260805a"></script>
-    <script type="module" src="archive.js?v=20260805a"></script>
+    <script type="module" src="archive.js?v=20261030b"></script>
   </body>
 </html>

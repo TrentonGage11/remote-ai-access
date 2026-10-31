@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="styles.css?v=20260824b" />
+    <link rel="stylesheet" href="styles.css?v=20260827c" />
   </head>
   <body>
     <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
@@ -102,69 +102,135 @@
           </div>
         </header>
 
-        <section class="card git-panel reveal" style="--d: 95ms" aria-labelledby="workspaceGitTitle">
-          <div class="git-panel-head">
-            <div>
-              <h2 id="workspaceGitTitle">Workspace Git</h2>
-              <p id="gitMetaLabel">Remote: loading</p>
+        <section class="card disclosure-panel reveal" style="--d: 95ms">
+          <details id="workspaceGitDetails" class="context-disclosure" data-filelab-disclosure-key="filelab-workspace-git-open-v1">
+            <summary>
+              <span role="heading" aria-level="2">Workspace Git</span>
+              <span id="gitMetaLabel" class="tab-meta">Remote: loading</span>
+            </summary>
+            <div class="context-disclosure-body git-panel">
+              <div class="top-actions">
+                <button id="copyGitRemoteBtn" class="btn btn-soft" type="button">Copy URL</button>
+                <button id="gitPullBtn" class="btn btn-soft" type="button">Pull</button>
+                <button id="gitPushBtn" class="btn btn-soft" type="button">Push</button>
+              </div>
+              <div class="git-command-grid">
+                <label class="git-command-field" for="gitRemoteUrlInput">
+                  Clone URL
+                  <input id="gitRemoteUrlInput" type="text" readonly value="Loading..." />
+                </label>
+                <label class="git-command-field" for="gitCloneCommandInput">
+                  Clone
+                  <input id="gitCloneCommandInput" type="text" readonly value="Loading..." />
+                </label>
+                <label class="git-command-field" for="gitPullCommandInput">
+                  Pull
+                  <input id="gitPullCommandInput" type="text" readonly value="Loading..." />
+                </label>
+                <label class="git-command-field" for="gitPushCommandInput">
+                  Push
+                  <input id="gitPushCommandInput" type="text" readonly value="Loading..." />
+                </label>
+              </div>
             </div>
-            <div class="top-actions">
-              <button id="copyGitRemoteBtn" class="btn btn-soft" type="button">Copy URL</button>
-              <button id="gitPullBtn" class="btn btn-soft" type="button">Pull</button>
-              <button id="gitPushBtn" class="btn btn-soft" type="button">Push</button>
-            </div>
-          </div>
-          <div class="git-command-grid">
-            <label class="git-command-field" for="gitRemoteUrlInput">
-              Clone URL
-              <input id="gitRemoteUrlInput" type="text" readonly value="Loading..." />
-            </label>
-            <label class="git-command-field" for="gitCloneCommandInput">
-              Clone
-              <input id="gitCloneCommandInput" type="text" readonly value="Loading..." />
-            </label>
-            <label class="git-command-field" for="gitPullCommandInput">
-              Pull
-              <input id="gitPullCommandInput" type="text" readonly value="Loading..." />
-            </label>
-            <label class="git-command-field" for="gitPushCommandInput">
-              Push
-              <input id="gitPushCommandInput" type="text" readonly value="Loading..." />
-            </label>
-          </div>
+          </details>
         </section>
 
-        <section id="sharePanel" class="card share-panel reveal" style="--d: 105ms" aria-labelledby="sharePanelTitle">
-          <div class="git-panel-head">
-            <div>
-              <h2 id="sharePanelTitle">Public Shares</h2>
-              <p id="shareSelectionLabel">Select a file to create an expiring public link.</p>
+        <section class="card disclosure-panel reveal" style="--d: 100ms">
+          <details id="workspaceSearchDetails" class="context-disclosure" data-filelab-disclosure-key="filelab-workspace-search-open-v1">
+            <summary>
+              <span role="heading" aria-level="2">Workspace Search</span>
+              <span id="workspaceSearchSummary" class="tab-meta">Filename, text, hybrid, and regex</span>
+            </summary>
+            <div class="context-disclosure-body workspace-search-panel">
+              <div class="workspace-search-controls">
+                <label class="search-query-field" for="workspaceSearchQueryInput">Query
+                  <input id="workspaceSearchQueryInput" type="search" placeholder="Search this workspace" />
+                </label>
+                <label for="workspaceSearchModeSelect">Mode
+                  <select id="workspaceSearchModeSelect">
+                    <option value="hybrid">Hybrid</option>
+                    <option value="filename">Filename</option>
+                    <option value="text">Text</option>
+                    <option value="regex">Regex</option>
+                  </select>
+                </label>
+                <label for="workspaceSearchPathInput">Path
+                  <input id="workspaceSearchPathInput" type="text" placeholder="Whole workspace" />
+                </label>
+                <label for="workspaceSearchLimitInput">Limit
+                  <input id="workspaceSearchLimitInput" type="number" min="1" max="100" value="30" />
+                </label>
+                <label class="search-case-toggle"><input id="workspaceSearchCaseInput" type="checkbox" /> Match case</label>
+                <button id="workspaceSearchBtn" class="btn" type="button">Search</button>
+              </div>
+              <p id="workspaceSearchStatus" class="muted-inline" aria-live="polite">Enter a query to search.</p>
+              <ul id="workspaceSearchResults" class="workspace-search-results" aria-label="Workspace search results"></ul>
+
+              <details id="workspaceReplaceDetails" class="context-disclosure nested-disclosure">
+                <summary>
+                  <span role="heading" aria-level="3">Replace Review</span>
+                  <span id="workspaceReplaceSummary" class="tab-meta">Preview before changing files</span>
+                </summary>
+                <div class="context-disclosure-body">
+                  <div class="workspace-replace-controls">
+                    <label for="workspaceReplaceInput">Replacement
+                      <input id="workspaceReplaceInput" type="text" placeholder="Replacement text" />
+                    </label>
+                    <button id="workspaceReplacePreviewBtn" class="btn btn-soft" type="button">Preview</button>
+                    <button id="workspaceReplaceApplyBtn" class="btn" type="button" disabled>Apply Accepted</button>
+                  </div>
+                  <p id="workspaceReplaceStatus" class="muted-inline" aria-live="polite">Preview uses the current query, path, case, and regex settings.</p>
+                  <div id="workspaceReplaceResults" class="workspace-replace-results"></div>
+                </div>
+              </details>
             </div>
-            <button id="refreshSharesBtn" class="btn btn-soft" type="button">Refresh</button>
-          </div>
-          <div class="share-controls">
-            <label>Expires
-              <select id="shareExpirySelect">
-                <option value="1">1 hour</option>
-                <option value="24">1 day</option>
-                <option value="168" selected>7 days</option>
-                <option value="720">30 days</option>
-              </select>
-            </label>
-            <label>Password
-              <input id="sharePasswordInput" type="password" maxlength="256" placeholder="Optional" autocomplete="new-password" />
-            </label>
-            <label class="share-toggle"><input id="shareEncryptInput" type="checkbox" /> Encrypt stored copy</label>
-            <button id="createShareBtn" class="btn" type="button">Create Share</button>
-          </div>
-          <p class="share-compat-note">Direct video players work with links that have no password or encryption. Encrypted links do not support seeking.</p>
-          <div id="shareResult" class="share-result" hidden>
-            <label>View URL <input id="shareViewUrlInput" type="text" readonly /></label>
-            <button id="copyShareViewBtn" class="btn btn-soft" type="button">Copy View URL</button>
-            <label>Direct URL <input id="shareDirectUrlInput" type="text" readonly /></label>
-            <button id="copyShareDirectBtn" class="btn btn-soft" type="button">Copy Direct URL</button>
-          </div>
-          <div id="shareList" class="share-list" aria-live="polite"></div>
+          </details>
+        </section>
+
+        <section id="sharePanel" class="card disclosure-panel reveal" style="--d: 105ms">
+          <details id="publicSharesDetails" class="context-disclosure" data-filelab-disclosure-key="filelab-public-shares-open-v1">
+            <summary>
+              <span role="heading" aria-level="2">Public Shares</span>
+              <span id="shareSelectionLabel" class="tab-meta">Select a file to create an expiring public link.</span>
+            </summary>
+            <div class="context-disclosure-body share-panel">
+              <div class="top-actions">
+                <button id="refreshSharesBtn" class="btn btn-soft" type="button">Refresh</button>
+              </div>
+              <div class="share-controls">
+                <label>Expires
+                  <select id="shareExpirySelect">
+                    <option value="1">1 hour</option>
+                    <option value="24">1 day</option>
+                    <option value="168" selected>7 days</option>
+                    <option value="720">30 days</option>
+                  </select>
+                </label>
+                <label>Password
+                  <input id="sharePasswordInput" type="password" maxlength="256" placeholder="Optional" autocomplete="new-password" />
+                </label>
+                <label class="share-toggle"><input id="shareEncryptInput" type="checkbox" /> Encrypt stored copy</label>
+                <button id="createShareBtn" class="btn" type="button">Create Share</button>
+              </div>
+              <p class="share-compat-note">Direct video players work with links that have no password or encryption. Encrypted links do not support seeking.</p>
+              <div id="shareResult" class="share-result" hidden>
+                <label>View URL <input id="shareViewUrlInput" type="text" readonly /></label>
+                <button id="copyShareViewBtn" class="btn btn-soft" type="button">Copy View URL</button>
+                <label>Direct URL <input id="shareDirectUrlInput" type="text" readonly /></label>
+                <button id="copyShareDirectBtn" class="btn btn-soft" type="button">Copy Direct URL</button>
+              </div>
+              <details id="shareListDetails" class="context-disclosure nested-disclosure" data-filelab-disclosure-key="filelab-share-list-open-v1">
+                <summary>
+                  <span role="heading" aria-level="3">Share List</span>
+                  <span id="shareListSummary" class="tab-meta">0 active</span>
+                </summary>
+                <div class="context-disclosure-body">
+                  <div id="shareList" class="share-list" aria-live="polite"></div>
+                </div>
+              </details>
+            </div>
+          </details>
         </section>
 
         <section class="card editor-panel reveal" style="--d: 120ms">
@@ -246,6 +312,6 @@
     </main>
 
     <script src="api-auth.js"></script>
-    <script type="module" src="filelab.js?v=20260824b"></script>
+    <script type="module" src="filelab.js?v=20260827c"></script>
   </body>
 </html>

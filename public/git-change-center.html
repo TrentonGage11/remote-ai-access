@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Git Change Center | Remote AI Access</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css?v=20260828a" />
+  </head>
+  <body>
+    <main class="docs-shell git-center-shell">
+      <section class="card reveal">
+        <div class="topbar">
+          <div><h1>Git Change Center</h1><p id="gitSummary">Loading workspace state...</p></div>
+          <div class="top-actions">
+            <a class="btn btn-soft" href="filelab.html">File Lab</a>
+            <a class="btn btn-soft" href="index.html">Chat</a>
+            <button id="themeToggle" class="btn btn-soft" type="button">Dark mode</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="git-command-band reveal">
+        <label>Branch<select id="branchSelect"></select></label>
+        <button id="switchBranchBtn" class="btn btn-soft" type="button">Switch</button>
+        <label>New branch<input id="newBranchInput" maxlength="120" placeholder="feature/name" /></label>
+        <button id="createBranchBtn" class="btn btn-soft" type="button">Create</button>
+        <label class="git-commit-field">Commit staged changes<input id="commitMessageInput" maxlength="240" placeholder="Concise commit message" /></label>
+        <button id="commitBtn" class="btn" type="button">Commit</button>
+      </section>
+
+      <div class="git-center-grid reveal">
+        <section class="card git-changes-pane">
+          <div class="section-heading"><h2>Changes</h2><button id="refreshBtn" class="btn btn-soft" type="button">Refresh</button></div>
+          <p id="gitStatus" class="muted-inline">Ready.</p>
+          <div class="git-bulk-actions">
+            <button id="stageBtn" class="btn btn-soft" type="button">Stage selected</button>
+            <button id="unstageBtn" class="btn btn-soft" type="button">Unstage selected</button>
+          </div>
+          <ul id="changeList" class="git-change-list"></ul>
+        </section>
+
+        <section class="card git-review-pane">
+          <div class="section-heading"><h2 id="diffTitle">Review</h2><a id="openFileLink" class="btn btn-soft" href="filelab.html" hidden>Open file</a></div>
+          <div id="conflictActions" class="git-conflict-actions" hidden>
+            <button data-strategy="ours" class="btn btn-soft" type="button">Keep ours</button>
+            <button data-strategy="theirs" class="btn btn-soft" type="button">Keep theirs</button>
+            <button data-strategy="mark-resolved" class="btn" type="button">Mark edited file resolved</button>
+          </div>
+          <div class="git-diff-tabs"><button id="workingDiffBtn" class="btn btn-soft" type="button">Working</button><button id="stagedDiffBtn" class="btn btn-soft" type="button">Staged</button></div>
+          <pre id="rawDiff" class="doc-json git-raw-diff">Select a changed file.</pre>
+          <div class="diff-columns git-side-by-side"><pre id="leftDiff" class="doc-json">No diff.</pre><pre id="rightDiff" class="doc-json">No diff.</pre></div>
+        </section>
+      </div>
+    </main>
+    <script src="api-auth.js"></script>
+    <script type="module" src="git-change-center.js?v=20260829f"></script>
+  </body>
+</html>

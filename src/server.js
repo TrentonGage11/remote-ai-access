@@ -10,6 +10,7 @@ import path from "path";
 import fs from "fs";
 import fsp from "fs/promises";
 import os from "os";
+import net from "net";
 import { promisify } from "util";
 import { execFile, spawn } from "child_process";
 import { fileURLToPath } from "url";
@@ -17,6 +18,95 @@ import { AsyncLocalStorage } from "async_hooks";
 import { createCipheriv, createDecipheriv, createHash, randomBytes, scrypt, timingSafeEqual } from "crypto";
 import { pipeline } from "stream/promises";
 import { resolveProviderMessageContext } from "./chat-context.js";
+import { buildBoundedAgentConversation, serializeBoundedToolOutput } from "./compatible-agent-context.js";
+import {
+  agentToolPolicySummary,
+  filterAgentToolDefinitions,
+  isAgentToolAllowed,
+  normalizeAgentToolProfile
+} from "./agent-policy.js";
+import {
+  compareQueuedChatJobs,
+  normalizeChatJobPriority,
+  orderedQueuedChatJobs,
+  selectDispatchableChatJobs
+} from "./chat-job-queue.js";
+import {
+  readChatJobState,
+  restoreChatJobState,
+  serializeChatJobState,
+  writeChatJobState
+} from "./chat-job-persistence.js";
+import {
+  isRetryableProviderStatus,
+  providerRetryDelayMs
+} from "./provider-retry.js";
+import {
+  firstConfiguredEnv,
+  isValidProviderModelName,
+  parseProviderModelList,
+  resolveProviderApiKey,
+  resolveProviderModel,
+  selectDefaultProvider
+} from "./provider-config.js";
+import {
+  calculateNextRunAt,
+  normalizeAgentRecipeSchedule
+} from "./agent-recipe-schedule.js";
+import {
+  isSubagentWritePathAllowed,
+  normalizeSubagentAllowedPaths,
+  normalizeSubagentLimits,
+  normalizeSubagentRole,
+  resolveSubagentAllowedTools,
+  SUBAGENT_LIMITS
+} from "./subagent-policy.js";
+import { previewDeployment } from "./deployment-policy.js";
+import {
+  beginDeploymentActivation,
+  completeDeploymentActivation,
+  createDeploymentApproval,
+  failDeploymentActivation,
+  publicDeploymentApproval,
+  revokeDeploymentApproval
+} from "./deployment-approval.js";
+import { makeReleaseId } from "./deployment-helper-policy.js";
+import { summarizeDirectoryContents } from "./directory-summary.js";
+import {
+  BASIC_AUTH_SESSION_COOKIE,
+  createBasicAuthSession,
+  normalizeBasicAuthReturnPath,
+  verifyBasicAuthSession
+} from "./basic-auth-session.js";
+import {
+  CHAT_ARCHIVE_FORMAT,
+  normalizeStoredArchivePayload,
+  readStoredArchive,
+  writeStoredArchive
+} from "./chat-archive-store.js";
+import {
+  extendShareExpiration,
+  publicShareAnalytics,
+  recordShareActivity
+} from "./share-analytics.js";
+import { buildAutomaticGitAddArgs, isManagedGitPath, isNothingToCommit, normalizeGitChangePaths, parseGitStatusPorcelain } from "./git-change-center.js";
+import { appendMetricSample, calculateCpuPercent, summarizeRuntimeSample } from "./runtime-monitor.js";
+import { addTokenUsage, aggregateUsage, estimateUsageCost, normalizeTokenUsage } from "./usage-ledger.js";
+import {
+  applyWorkspaceReplacements,
+  previewWorkspaceReplacements,
+  searchWorkspaceFiles
+} from "./workspace-search.js";
+import { matchesUnlockCode, parseWorkspaceUnlockCodes } from "./workspace-unlock-codes.js";
+import { extractGeneratedImage, normalizeImageRequest, parseWikimediaImageResults } from "./image-tools.js";
+import { buildWorkspaceActivityTimeline } from "./workspace-activity.js";
+import { collectSubagentArtifacts, extractSubagentContextProposals, mergeSubagentAcceptance } from "./subagent-results.js";
+import {
+  managedToolContainerIds,
+  MANAGED_TOOL_CONTAINER_CONFIRMATION,
+  MANAGED_TOOL_CONTAINER_LABEL,
+  parseManagedToolContainers
+} from "./managed-tool-containers.js";
 
 const app = express();
 
@@ -50,13 +140,41 @@ const workspaceGitHttpsBaseUrl = String(process.env.WORKSPACE_GIT_HTTPS_BASE_URL
 const defaultUploadMaxBytes = Math.max(1024, Number(process.env.FILE_API_UPLOAD_MAX_BYTES || 20 * 1024 * 1024));
 const workspaceUploadBypassCodesRaw = String(process.env.WORKSPACE_UPLOAD_BYPASS_CODES || "");
 const workspaceUploadBypassCodes = parseWorkspaceUploadBypassCodes(workspaceUploadBypassCodesRaw);
+const workspaceAgentStepOverrideCodesRaw = String(process.env.WORKSPACE_AGENT_STEP_OVERRIDE_CODES || "");
 const chunkUploadThresholdBytes = Math.max(1024 * 1024, Number(process.env.FILE_API_CHUNK_UPLOAD_THRESHOLD_BYTES || 64 * 1024 * 1024));
 const chunkUploadChunkSizeBytes = Math.max(256 * 1024, Number(process.env.FILE_API_CHUNK_SIZE_BYTES || 4 * 1024 * 1024));
+const chunkUploadMaxChunkSizeBytes = Math.max(chunkUploadChunkSizeBytes, Number(process.env.FILE_API_MAX_CHUNK_SIZE_BYTES || 64 * 1024 * 1024));
 const chunkUploadSessionMaxAgeMs = Math.max(60_000, Number(process.env.FILE_API_CHUNK_SESSION_MAX_AGE_MS || 2 * 60 * 60 * 1000));
 const fileShareDbPath = path.resolve(process.env.FILE_SHARE_DB_PATH || path.join(sandboxBaseRoot, "_admin", "file-shares.json"));
 const fileShareDataRoot = path.resolve(process.env.FILE_SHARE_DATA_ROOT || path.join(sandboxBaseRoot, "_admin", "file-share-data"));
 const fileShareEncryptionSecret = String(process.env.FILE_SHARE_ENCRYPTION_SECRET || "");
 const videoPreviewTranscodeTimeoutMs = Math.max(60_000, Number(process.env.VIDEO_PREVIEW_TRANSCODE_TIMEOUT_MS || 2 * 60 * 60 * 1000));
+const agentRecipeScheduleDbPath = path.resolve(process.env.AGENT_RECIPE_SCHEDULE_DB_PATH || path.join(sandboxBaseRoot, "_admin", "agent-recipe-schedules.json"));
+const chatJobDbPath = path.resolve(process.env.CHAT_JOB_DB_PATH || path.join(sandboxBaseRoot, "_admin", "chat-jobs.json"));
+const chatArchiveRoot = path.resolve(process.env.CHAT_ARCHIVE_ROOT || path.join(sandboxBaseRoot, "_admin", "chat-archives"));
+const chatArchiveMaxBytes = Math.max(256 * 1024, Math.min(25 * 1024 * 1024, Number(process.env.CHAT_ARCHIVE_MAX_BYTES || 20 * 1024 * 1024)));
+const usageLedgerPath = path.resolve(process.env.USAGE_LEDGER_PATH || path.join(sandboxBaseRoot, "_admin", "usage.jsonl"));
+const usagePricing = (() => { try { return JSON.parse(process.env.USAGE_PRICING_JSON || "{}"); } catch { return {}; } })();
+const usageMonthlyWarningTokens = Math.max(0, Number(process.env.USAGE_MONTHLY_WARNING_TOKENS || 0));
+const usageMonthlyHardLimitTokens = Math.max(0, Number(process.env.USAGE_MONTHLY_HARD_LIMIT_TOKENS || 0));
+const usageMonthlyWarningUsd = Math.max(0, Number(process.env.USAGE_MONTHLY_WARNING_USD || 0));
+const usageMonthlyHardLimitUsd = Math.max(0, Number(process.env.USAGE_MONTHLY_HARD_LIMIT_USD || 0));
+const deploymentAllowedSuffixes = String(process.env.DEPLOYMENT_ALLOWED_SUFFIXES || "")
+  .split(",")
+  .map((item) => item.trim().toLowerCase())
+  .filter(Boolean);
+const deploymentAllowedRuntimes = String(process.env.DEPLOYMENT_ALLOWED_RUNTIMES || "static,node-service")
+  .split(",")
+  .map((item) => item.trim().toLowerCase())
+  .filter(Boolean);
+const deploymentAllowedEnvironmentNames = String(process.env.DEPLOYMENT_ALLOWED_ENV_NAMES || "")
+  .split(",")
+  .map((item) => item.trim())
+  .filter(Boolean);
+const deploymentPreviewPort = Math.max(1024, Math.min(65535, Number(process.env.DEPLOYMENT_PREVIEW_PORT || 8900)));
+const deploymentApprovalDbPath = path.resolve(process.env.DEPLOYMENT_APPROVAL_DB_PATH || path.join(sandboxBaseRoot, "_admin", "deployment-approvals.json"));
+const deploymentHelperSocketPath = String(process.env.DEPLOYMENT_HELPER_SOCKET_PATH || "/run/raa-deploy/helper.sock").trim();
+const deploymentHelperTimeoutMs = Math.max(5_000, Math.min(120_000, Number(process.env.DEPLOYMENT_HELPER_TIMEOUT_MS || 30_000)));
 
 const execFileAsync = promisify(execFile);
 const safeTerminalCommands = new Set([
@@ -89,8 +207,15 @@ const scheduledTasks = new Map();
 const notificationStore = [];
 const uploadSessionStore = new Map();
 const chatJobStore = new Map();
+const pausedChatJobWorkspaces = new Set();
+const agentRecipeScheduleStore = new Map();
+const subagentJobStore = new Map();
+const runtimeMetricHistory = new Map();
+const providerLatencyHistory = new Map();
+let previousHostCpuSnapshot = null;
 let scheduledTaskCounter = 0;
 let chatJobCounter = 0;
+let subagentJobCounter = 0;
 const workspaceContextStore = new AsyncLocalStorage();
 const workspaceReadyPromises = new Map();
 const workspaceBranchState = new Map();
@@ -178,6 +303,12 @@ const terminalVfaScript = String(process.env.TERMINAL_VFA_SCRIPT || "../VFA/vfa.
 let workspaceBackupTimer = null;
 let lastAuditRetentionRunAt = 0;
 let fileShareWriteQueue = Promise.resolve();
+let deploymentApprovalWriteQueue = Promise.resolve();
+let deploymentApprovalMutationQueue = Promise.resolve();
+let deploymentActivationQueue = Promise.resolve();
+let usageLedgerWriteQueue = Promise.resolve();
+let chatJobPersistenceWriteQueue = Promise.resolve();
+let chatJobPersistenceTimer = null;
 
 const port = Number(process.env.PORT || 8787);
 const host = String(process.env.HOST || "127.0.0.1").trim() || "127.0.0.1";
@@ -186,7 +317,6 @@ const appBaseUrl = configuredAppBaseUrl || `http://localhost:${port}`;
 const apiRateLimitWindowMs = Math.max(1000, Math.min(60 * 60 * 1000, Number(process.env.API_RATE_LIMIT_WINDOW_MS || 60 * 1000)));
 const apiRateLimitMax = Math.max(1, Math.min(200000, Number(process.env.API_RATE_LIMIT_MAX || 3000)));
 const defaultModel = process.env.OPENAI_MODEL || "gpt-4.1";
-const defaultProvider = "openai";
 const xaiDefaultModel = process.env.XAI_MODEL || "grok-4.6";
 const googleDefaultModel = process.env.GOOGLE_MODEL || "gemini-3.7-flash";
 const agentMaxStepsHardLimit = Math.max(16, Math.min(4096, Number(process.env.AGENT_MAX_STEPS_HARD_LIMIT || 1024)));
@@ -194,6 +324,10 @@ const agentMaxSteps = Math.max(1, Math.min(agentMaxStepsHardLimit, Number(proces
 const agentMaxStepsOverrideLimit = Math.max(agentMaxSteps, Math.min(agentMaxStepsHardLimit, Number(process.env.AGENT_MAX_STEPS_OVERRIDE_LIMIT || 40)));
 const agentMaxStepsOverrideCode = String(process.env.AGENT_MAX_STEPS_OVERRIDE_CODE || "").trim();
 const agentWebTimeoutMs = Math.max(1000, Math.min(40000, Number(process.env.AGENT_WEB_TIMEOUT_MS || 16000)));
+const providerRequestTimeoutMs = Math.max(30_000, Math.min(2 * 60 * 60 * 1000, Number(process.env.PROVIDER_REQUEST_TIMEOUT_MS || 30 * 60 * 1000)));
+const providerMaxRetries = Math.max(0, Math.min(10, Number(process.env.PROVIDER_MAX_RETRIES || 5)));
+const providerRetryBaseMs = Math.max(100, Math.min(30_000, Number(process.env.PROVIDER_RETRY_BASE_MS || 1000)));
+const providerRetryMaxMs = Math.max(providerRetryBaseMs, Math.min(5 * 60 * 1000, Number(process.env.PROVIDER_RETRY_MAX_MS || 60_000)));
 const agentReachHome = path.resolve(process.env.AGENT_REACH_HOME || "/var/lib/remote-ai-access");
 const agentReachBin = path.resolve(process.env.AGENT_REACH_BIN || "/opt/agent-reach/venv/bin/agent-reach");
 const agentReachMcporterBin = path.resolve(process.env.AGENT_REACH_MCPORTER_BIN || "/opt/agent-reach/npm/bin/mcporter");
@@ -204,9 +338,25 @@ const agentReachYoutubeCookiesFile = String(process.env.AGENT_REACH_YOUTUBE_COOK
 const chatMessageMaxChars = Math.max(1000, Math.min(20000, Number(process.env.CHAT_MESSAGE_MAX_CHARS || 8000)));
 const chatContextMaxChars = Math.max(chatMessageMaxChars, Math.min(200000, Number(process.env.CHAT_CONTEXT_MAX_CHARS || 32000)));
 const chatCompactionSummaryMaxChars = Math.max(1000, Math.min(chatContextMaxChars, Number(process.env.CHAT_COMPACTION_SUMMARY_MAX_CHARS || 6000)));
-const chatJobMaxAgeMs = Math.max(60_000, Math.min(24 * 60 * 60 * 1000, Number(process.env.CHAT_JOB_MAX_AGE_MS || 2 * 60 * 60 * 1000)));
+const compatibleAgentContextMaxChars = Math.max(chatContextMaxChars, Math.min(200000, Number(process.env.COMPATIBLE_AGENT_CONTEXT_MAX_CHARS || 64000)));
+const compatibleAgentToolOutputMaxChars = Math.max(500, Math.min(20000, Number(process.env.COMPATIBLE_AGENT_TOOL_OUTPUT_MAX_CHARS || 4000)));
+const chatJobMaxAgeMs = Math.max(60_000, Math.min(24 * 60 * 60 * 1000, Number(process.env.CHAT_JOB_MAX_AGE_MS || 6 * 60 * 60 * 1000)));
 const chatJobMaxEntries = Math.max(20, Math.min(2000, Number(process.env.CHAT_JOB_MAX_ENTRIES || 300)));
 const chatJobEventHistoryMax = Math.max(20, Math.min(4000, Number(process.env.CHAT_JOB_EVENT_HISTORY_MAX || 240)));
+const chatJobMaxConcurrent = Math.max(1, Math.min(12, Number(process.env.CHAT_JOB_MAX_CONCURRENT || 2)));
+const chatJobDefaultWorkspaceConcurrent = Math.max(1, Math.min(chatJobMaxConcurrent, Number(process.env.CHAT_JOB_DEFAULT_WORKSPACE_CONCURRENT || chatJobMaxConcurrent)));
+const chatJobWorkspaceConcurrency = (() => {
+  try {
+    const parsed = JSON.parse(process.env.CHAT_JOB_WORKSPACE_CONCURRENCY_JSON || "{}");
+    return new Map(Object.entries(parsed).map(([code, limit]) => [
+      normalizeWorkspaceCode(code),
+      Math.max(1, Math.min(chatJobMaxConcurrent, Number(limit || chatJobDefaultWorkspaceConcurrent)))
+    ]).filter(([code]) => code));
+  } catch {
+    return new Map();
+  }
+})();
+const runtimeMetricHistoryLimit = Math.max(10, Math.min(1440, Number(process.env.RUNTIME_METRIC_HISTORY_LIMIT || 180)));
 const auditLogMaxBytes = Math.max(128 * 1024, Math.min(64 * 1024 * 1024, Number(process.env.AUDIT_LOG_MAX_BYTES || 8 * 1024 * 1024)));
 const auditRetentionDays = Math.max(1, Math.min(365, Number(process.env.AUDIT_RETENTION_DAYS || 14)));
 const auditRetentionPruneIntervalMs = Math.max(30_000, Math.min(60 * 60 * 1000, Number(process.env.AUDIT_RETENTION_PRUNE_INTERVAL_MS || 5 * 60 * 1000)));
@@ -215,8 +365,29 @@ const xaiApiKey = String(process.env.XAI_API_KEY || "").trim();
 const xaiApiBaseUrl = String(process.env.XAI_API_BASE_URL || "https://api.x.ai/v1").trim().replace(/\/+$/, "");
 const googleApiKey = String(process.env.GOOGLE_API_KEY || "").trim();
 const googleApiBaseUrl = String(process.env.GOOGLE_API_BASE_URL || "https://generativelanguage.googleapis.com/v1beta/openai").trim().replace(/\/+$/, "");
+const deepseekApiKey = resolveProviderApiKey("deepseek");
+const deepseekApiBaseUrl = firstConfiguredEnv(process.env, ["DEEPSEEK_API_BASE_URL"], "https://api.deepseek.com").replace(/\/+$/, "");
+const deepseekDefaultModel = firstConfiguredEnv(process.env, ["DEEPSEEK_MODEL"], "deepseek-v4-flash");
+const anthropicApiKey = resolveProviderApiKey("anthropic");
+const anthropicApiBaseUrl = firstConfiguredEnv(process.env, ["ANTHROPIC_API_BASE_URL", "ANTHROPIC_CLAUDE_API_BASE_URL"], "https://api.anthropic.com/v1").replace(/\/+$/, "");
+const anthropicDefaultModel = firstConfiguredEnv(process.env, ["ANTHROPIC_MODEL", "ANTHROPIC_CLAUDE_MODEL"], "claude-sonnet-5");
+const anthropicVersion = String(process.env.ANTHROPIC_VERSION || "2023-06-01").trim();
+const anthropicMaxTokens = Math.max(1, Math.min(64_000, Number(process.env.ANTHROPIC_MAX_TOKENS || 4096)));
+const togetherApiKey = resolveProviderApiKey("together");
+const togetherApiBaseUrl = firstConfiguredEnv(process.env, ["TOGETHER_API_BASE_URL", "TOGETHER_AI_API_BASE_URL"], "https://api.together.ai/v1").replace(/\/+$/, "");
+const togetherDefaultModel = firstConfiguredEnv(process.env, ["TOGETHER_MODEL", "TOGETHER_AI_MODEL"], "meta-llama/Llama-3.3-70B-Instruct-Turbo");
+const openRouterApiKey = resolveProviderApiKey("openrouter");
+const openRouterApiBaseUrl = firstConfiguredEnv(process.env, ["OPENROUTER_API_BASE_URL", "OPEN_ROUTER_API_BASE_URL"], "https://openrouter.ai/api/v1").replace(/\/+$/, "");
+const openRouterDefaultModel = firstConfiguredEnv(process.env, ["OPENROUTER_MODEL", "OPEN_ROUTER_MODEL"], "anthropic/claude-sonnet-5");
+const openRouterHttpReferer = String(process.env.OPENROUTER_HTTP_REFERER || configuredAppBaseUrl || "").trim();
+const openRouterTitle = String(process.env.OPENROUTER_TITLE || "Remote AI Access").trim();
+const openaiImageModel = String(process.env.OPENAI_IMAGE_MODEL || "gpt-image-1").trim();
+const xaiImageModel = String(process.env.XAI_IMAGE_MODEL || "grok-imagine-image").trim();
+const googleImageModel = String(process.env.GOOGLE_IMAGE_MODEL || "gemini-2.5-flash-image").trim();
+const googleNativeApiBaseUrl = String(process.env.GOOGLE_NATIVE_API_BASE_URL || "https://generativelanguage.googleapis.com/v1beta").trim().replace(/\/+$/, "");
 const copilotApiBaseUrl = String(process.env.COPILOT_API_BASE_URL || "https://models.github.ai/inference").trim();
-const copilotApiVersion = String(process.env.COPILOT_API_VERSION || "2026-03-10").trim();
+const copilotApiVersion = firstConfiguredEnv(process.env, ["COPILOT_API_VERSION", "GITHUB_API_VERSION"], "2026-03-10");
+const copilotDefaultModel = firstConfiguredEnv(process.env, ["COPILOT_MODEL"], "openai/gpt-4.1");
 const allowedModels = String(process.env.OPENAI_ALLOWED_MODELS || "")
   .split(",")
   .map((item) => item.trim())
@@ -229,6 +400,14 @@ const googleAllowedModels = String(process.env.GOOGLE_ALLOWED_MODELS || "")
   .split(",")
   .map((item) => item.trim())
   .filter(Boolean);
+const copilotAllowedModels = parseProviderModelList(process.env.COPILOT_ALLOWED_MODELS);
+const deepseekAllowedModels = parseProviderModelList(process.env.DEEPSEEK_ALLOWED_MODELS);
+const anthropicAllowedModels = parseProviderModelList(firstConfiguredEnv(process.env, ["ANTHROPIC_ALLOWED_MODELS", "ANTHROPIC_CLAUDE_ALLOWED_MODELS"]));
+const togetherAllowedModels = parseProviderModelList(firstConfiguredEnv(process.env, ["TOGETHER_ALLOWED_MODELS", "TOGETHER_AI_ALLOWED_MODELS"]));
+const openRouterAllowedModels = parseProviderModelList(firstConfiguredEnv(process.env, ["OPENROUTER_ALLOWED_MODELS", "OPEN_ROUTER_ALLOWED_MODELS"]));
+const deepseekAgentModels = parseProviderModelList(firstConfiguredEnv(process.env, ["DEEPSEEK_AGENT_MODELS"], deepseekDefaultModel));
+const togetherAgentModels = parseProviderModelList(firstConfiguredEnv(process.env, ["TOGETHER_AGENT_MODELS", "TOGETHER_AI_AGENT_MODELS"], togetherDefaultModel));
+const openRouterAgentModels = parseProviderModelList(firstConfiguredEnv(process.env, ["OPENROUTER_AGENT_MODELS", "OPEN_ROUTER_AGENT_MODELS"], openRouterDefaultModel));
 
 const rawAllowedOrigins = process.env.ALLOWED_ORIGINS || "";
 const allowedOrigins = rawAllowedOrigins
@@ -263,12 +442,16 @@ let adminSettingsCache = null;
 let adminSettingsLoaded = false;
 
 const openaiApiKey = process.env.OPENAI_API_KEY;
-if (!openaiApiKey && !xaiApiKey && !googleApiKey && !githubPat) {
-  console.error("Missing provider credentials. Set at least one of OPENAI_API_KEY, XAI_API_KEY, GOOGLE_API_KEY, or GITHUB_PAT/GITHUB_TOKEN.");
+if (!openaiApiKey && !xaiApiKey && !googleApiKey && !githubPat && !deepseekApiKey && !anthropicApiKey && !togetherApiKey && !openRouterApiKey) {
+  console.error("Missing provider credentials. Set at least one supported provider API key.");
   process.exit(1);
 }
 
-const client = openaiApiKey ? new OpenAI({ apiKey: openaiApiKey }) : null;
+const client = openaiApiKey ? new OpenAI({
+  apiKey: openaiApiKey,
+  timeout: providerRequestTimeoutMs,
+  maxRetries: providerMaxRetries
+}) : null;
 
 // This app runs behind Apache reverse proxy in production.
 app.set("trust proxy", 1);
@@ -279,6 +462,12 @@ function isValidModelName(value) {
 
 function isValidCopilotModelName(value) {
   return typeof value === "string" && /^[a-zA-Z0-9._/-]{2,120}$/.test(value);
+}
+
+function resolveCopilotModel(requestedModel) {
+  if (!isValidCopilotModelName(requestedModel)) return copilotDefaultModel;
+  if (copilotAllowedModels.length > 0 && !copilotAllowedModels.includes(requestedModel)) return copilotDefaultModel;
+  return requestedModel;
 }
 
 function resolveModel(requestedModel) {
@@ -323,6 +512,121 @@ function resolveGoogleModel(requestedModel) {
   }
 
   return requestedModel;
+}
+
+const compatibleProviderConfigs = {
+  xai: {
+    label: "xAI",
+    apiKey: xaiApiKey,
+    apiBaseUrl: xaiApiBaseUrl,
+    defaultModel: xaiDefaultModel,
+    allowedModels: xaiAllowedModels,
+    supportsAgentMode: true,
+    supportsReasoningEffort: true
+  },
+  google: {
+    label: "Google AI",
+    apiKey: googleApiKey,
+    apiBaseUrl: googleApiBaseUrl,
+    defaultModel: googleDefaultModel,
+    allowedModels: googleAllowedModels,
+    supportsAgentMode: true,
+    supportsReasoningEffort: false
+  },
+  deepseek: {
+    label: "DeepSeek",
+    apiKey: deepseekApiKey,
+    apiBaseUrl: deepseekApiBaseUrl,
+    defaultModel: deepseekDefaultModel,
+    allowedModels: deepseekAllowedModels,
+    agentModels: deepseekAgentModels,
+    supportsAgentMode: true,
+    supportsReasoningEffort: true
+  },
+  together: {
+    label: "Together AI",
+    apiKey: togetherApiKey,
+    apiBaseUrl: togetherApiBaseUrl,
+    defaultModel: togetherDefaultModel,
+    allowedModels: togetherAllowedModels,
+    agentModels: togetherAgentModels,
+    supportsAgentMode: true,
+    supportsReasoningEffort: false
+  },
+  openrouter: {
+    label: "OpenRouter",
+    apiKey: openRouterApiKey,
+    apiBaseUrl: openRouterApiBaseUrl,
+    defaultModel: openRouterDefaultModel,
+    allowedModels: openRouterAllowedModels,
+    agentModels: openRouterAgentModels,
+    supportsAgentMode: true,
+    supportsReasoningEffort: false,
+    headers: {
+      ...(openRouterHttpReferer ? { "HTTP-Referer": openRouterHttpReferer } : {}),
+      ...(openRouterTitle ? { "X-OpenRouter-Title": openRouterTitle } : {})
+    }
+  }
+};
+
+const nativeProviderConfigs = {
+  anthropic: {
+    label: "Anthropic Claude",
+    apiKey: anthropicApiKey,
+    apiBaseUrl: anthropicApiBaseUrl,
+    defaultModel: anthropicDefaultModel,
+    allowedModels: anthropicAllowedModels,
+    supportsAgentMode: false
+  }
+};
+
+const externalProviderConfigs = {
+  ...compatibleProviderConfigs,
+  ...nativeProviderConfigs
+};
+
+function configuredExternalProviders() {
+  return Object.entries(externalProviderConfigs)
+    .filter(([, config]) => Boolean(config.apiKey))
+    .map(([provider]) => provider);
+}
+
+function configuredProviders() {
+  return [
+    ...(openaiApiKey ? ["openai"] : []),
+    ...(githubPat ? ["copilot"] : []),
+    ...configuredExternalProviders()
+  ];
+}
+
+const configuredProviderIds = configuredProviders();
+const defaultProvider = selectDefaultProvider(configuredProviderIds, process.env.DEFAULT_PROVIDER);
+
+function resolveExternalProviderModel(provider, requestedModel) {
+  const config = externalProviderConfigs[provider];
+  if (!config) {
+    return "";
+  }
+  return resolveProviderModel({
+    requestedModel,
+    defaultModel: config.defaultModel,
+    allowedModels: config.allowedModels
+  });
+}
+
+function compatibleAgentModelsForConfig(config) {
+  if (!Array.isArray(config?.agentModels)) return null;
+  const allowedModels = Array.isArray(config.allowedModels) ? config.allowedModels : [];
+  return [...new Set(config.agentModels
+    .filter(isValidProviderModelName)
+    .filter((model) => allowedModels.length === 0 || allowedModels.includes(model)))];
+}
+
+function supportsCompatibleAgentModel(provider, model) {
+  const config = compatibleProviderConfigs[provider];
+  if (!config?.supportsAgentMode) return false;
+  const agentModels = compatibleAgentModelsForConfig(config);
+  return agentModels === null || agentModels.includes(model);
 }
 
 function normalizeReasoningEffort(value) {
@@ -440,6 +744,7 @@ function getDefaultAdminSecuritySettings() {
     apiKeyExemptPathPrefixes: normalizePathPrefixList(apiKeyExemptPathPrefixes),
     apiKeyRequireHeaderOnly,
     agentMaxStepsOverrideCode,
+    workspaceAgentStepOverrideCodesRaw,
     workspaceUploadBypassCodesRaw,
     updatedAt: null
   };
@@ -464,6 +769,7 @@ async function loadAdminSecuritySettings() {
       apiKeyAuthEnabled: Boolean(parsed?.apiKeyAuthEnabled),
       apiKeyRequireHeaderOnly: parsed?.apiKeyRequireHeaderOnly !== false,
       agentMaxStepsOverrideCode: String(parsed?.agentMaxStepsOverrideCode || fallback.agentMaxStepsOverrideCode).trim(),
+      workspaceAgentStepOverrideCodesRaw: String(parsed?.workspaceAgentStepOverrideCodesRaw ?? fallback.workspaceAgentStepOverrideCodesRaw ?? "").trim(),
       workspaceUploadBypassCodesRaw: String(parsed?.workspaceUploadBypassCodesRaw ?? fallback.workspaceUploadBypassCodesRaw ?? "").trim()
     };
   } catch {
@@ -486,6 +792,7 @@ async function saveAdminSecuritySettings(update = {}) {
     apiKeyAuthEnabled: Boolean(update?.apiKeyAuthEnabled ?? current.apiKeyAuthEnabled),
     apiKeyRequireHeaderOnly: update?.apiKeyRequireHeaderOnly !== false,
     agentMaxStepsOverrideCode: String(update?.agentMaxStepsOverrideCode ?? current.agentMaxStepsOverrideCode ?? "").trim(),
+    workspaceAgentStepOverrideCodesRaw: String(update?.workspaceAgentStepOverrideCodesRaw ?? current.workspaceAgentStepOverrideCodesRaw ?? "").trim(),
     workspaceUploadBypassCodesRaw: String(update?.workspaceUploadBypassCodesRaw ?? current.workspaceUploadBypassCodesRaw ?? "").trim(),
     updatedAt: new Date().toISOString()
   };
@@ -507,6 +814,7 @@ async function getEffectiveSecuritySettings() {
     apiKeyExemptPathPrefixes: normalizePathPrefixList(settings.apiKeyExemptPathPrefixes),
     apiKeyRequireHeaderOnly: settings.apiKeyRequireHeaderOnly !== false,
     agentMaxStepsOverrideCode: String(settings.agentMaxStepsOverrideCode || "").trim(),
+    workspaceAgentStepOverrideCodes: parseWorkspaceUnlockCodes(settings.workspaceAgentStepOverrideCodesRaw, normalizeWorkspaceCode),
     workspaceUploadBypassCodes: parseWorkspaceUploadBypassCodes(settings.workspaceUploadBypassCodesRaw)
   };
 }
@@ -521,6 +829,7 @@ function getEffectiveSecuritySettingsSync() {
     apiKeyExemptPathPrefixes: normalizePathPrefixList(settings.apiKeyExemptPathPrefixes),
     apiKeyRequireHeaderOnly: settings.apiKeyRequireHeaderOnly !== false,
     agentMaxStepsOverrideCode: String(settings.agentMaxStepsOverrideCode || "").trim(),
+    workspaceAgentStepOverrideCodes: parseWorkspaceUnlockCodes(settings.workspaceAgentStepOverrideCodesRaw, normalizeWorkspaceCode),
     workspaceUploadBypassCodes: parseWorkspaceUploadBypassCodes(settings.workspaceUploadBypassCodesRaw)
   };
 }
@@ -540,9 +849,34 @@ function assertAgentToolAuthorized(req) {
     error.status = 503;
     throw error;
   }
+  const internal = req?.internalAgentAuthorization;
+  if (internal) {
+    const keyStillValid = security.apiKeys.some((value) => createHash("sha256").update(value).digest("hex") === internal.apiKeyFingerprint);
+    const workspaceMatches = getWorkspaceContext().code === internal.workspaceCode;
+    if (keyStillValid && workspaceMatches) return;
+  }
   if (!hasValidApiKey(req, security)) {
     const error = new Error("API key required for agent tools");
     error.status = 401;
+    throw error;
+  }
+}
+
+function getAgentToolProfile(req) {
+  return normalizeAgentToolProfile(req?.internalAgentAuthorization?.toolProfile || req?.body?.toolProfile);
+}
+
+function assertAgentToolAllowed(req, callName) {
+  const profile = getAgentToolProfile(req);
+  if (!isAgentToolAllowed(callName, profile)) {
+    const error = new Error(`tool '${String(callName || "")}' is not allowed by the '${profile}' profile`);
+    error.status = 403;
+    throw error;
+  }
+  const internalTools = req?.internalAgentAuthorization?.allowedTools;
+  if (Array.isArray(internalTools) && !internalTools.includes(callName)) {
+    const error = new Error(`tool '${String(callName || "")}' is outside this child agent's allow-list`);
+    error.status = 403;
     throw error;
   }
 }
@@ -919,7 +1253,7 @@ function publicFileShareRecord(share) {
     expiresAt: share.expiresAt,
     passwordProtected: Boolean(share.passwordHash),
     encrypted: Boolean(share.encrypted),
-    accessCount: Number(share.accessCount || 0)
+    ...publicShareAnalytics(share)
   };
 }
 
@@ -1152,6 +1486,30 @@ async function runGitCommand(sandboxRoot, args, allowFail = false) {
 async function runGit(args, allowFail = false) {
   const sandboxRoot = getSandboxRoot();
   return enqueueWorkspaceGitOperation(() => runGitCommand(sandboxRoot, args, allowFail));
+}
+
+function selectedGitChangePaths(value) {
+  const paths = normalizeGitChangePaths(value);
+  if (paths.length === 0) throw new Error("Select at least one workspace file");
+  return paths.map((item) => {
+    const { rel } = resolveSandboxPath(item);
+    if (!rel || rel === ".git" || rel.startsWith(".git/") || isManagedGitPath(rel)) throw new Error("Server metadata cannot be selected");
+    return rel;
+  });
+}
+
+async function getGitChangeCenterStatus() {
+  const [{ stdout }, branchesResult] = await Promise.all([
+    runGit(["status", "--porcelain=v1", "-z", "--branch"], true),
+    runGit(["for-each-ref", "--format=%(refname:short)", "refs/heads"], true)
+  ]);
+  const status = parseGitStatusPorcelain(stdout);
+  status.files = status.files.filter((file) => !isManagedGitPath(file.path));
+  return {
+    ...status,
+    branches: String(branchesResult.stdout || "").split("\n").map((item) => item.trim()).filter(Boolean),
+    clean: status.files.length === 0
+  };
 }
 
 async function runGitInRepo(repoRoot, args, allowFail = false) {
@@ -1455,6 +1813,7 @@ async function ensureSandboxReady() {
 
   const readyPromise = (async () => {
   await fsp.mkdir(sandboxRoot, { recursive: true });
+  await fsp.chmod(sandboxRoot, 0o750);
   if (!fs.existsSync(auditLogPath)) {
     await fsp.writeFile(auditLogPath, "", "utf8");
   }
@@ -1465,7 +1824,7 @@ async function ensureSandboxReady() {
     await runGit(["config", "user.name", gitUserName]);
     await runGit(["config", "user.email", gitUserEmail]);
     await runGit(["checkout", "-B", "main"], true);
-    await runGit(["add", "-A"]);
+    await runGit(buildAutomaticGitAddArgs());
     await runGit(["commit", "--allow-empty", "-m", "Initialize sandbox"]);
   }
 
@@ -1480,9 +1839,9 @@ async function commitSandboxSnapshot(message, paths = []) {
   const sandboxRoot = getSandboxRoot();
   const scopedPaths = [...new Set(paths.map((item) => String(item || "").trim()).filter(Boolean))];
   return enqueueWorkspaceGitOperation(async () => {
-    await runGitCommand(sandboxRoot, ["add", "-A", ...(scopedPaths.length > 0 ? ["--", ...scopedPaths] : [])]);
+    await runGitCommand(sandboxRoot, buildAutomaticGitAddArgs(scopedPaths));
     const result = await runGitCommand(sandboxRoot, ["commit", "-m", message], true);
-    const nothingToCommit = /nothing to commit|no changes added/i.test(result.stderr || "");
+    const nothingToCommit = isNothingToCommit(result);
     if (!nothingToCommit && result.code && result.code !== 0) {
       throw new Error(result.stderr || "git commit failed");
     }
@@ -1569,6 +1928,47 @@ async function appendAuditLog(req, operation, details = {}) {
   }
 }
 
+function appendUsageLedger(entry) {
+  const operation = usageLedgerWriteQueue.then(async () => {
+    await fsp.mkdir(path.dirname(usageLedgerPath), { recursive: true });
+    await fsp.appendFile(usageLedgerPath, `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: 0o600 });
+  });
+  usageLedgerWriteQueue = operation.catch(() => {});
+  return operation;
+}
+
+async function readUsageLedger(limit = 5000) {
+  const raw = await fsp.readFile(usageLedgerPath, "utf8").catch((error) => error?.code === "ENOENT" ? "" : Promise.reject(error));
+  return String(raw).split("\n").filter(Boolean).slice(-Math.max(1, Math.min(20_000, limit))).map((line) => {
+    try { return JSON.parse(line); } catch { return null; }
+  }).filter(Boolean).reverse();
+}
+
+async function recordProviderUsage(req, result, latencyMs, ok, error = "") {
+  const provider = String(result?.provider || req.body?.provider || defaultProvider).trim().toLowerCase();
+  const model = String(result?.model || req.body?.model || "unknown").trim() || "unknown";
+  const tokens = normalizeTokenUsage(result?.usage || {});
+  const price = estimateUsageCost(provider, model, tokens, usagePricing);
+  const values = providerLatencyHistory.get(provider) || [];
+  providerLatencyHistory.set(provider, [...values, latencyMs].slice(-100));
+  await appendUsageLedger({
+    timestamp: new Date().toISOString(), workspaceCode: getWorkspaceContext().code,
+    traceId: resolveRequestTraceId(req) || createTraceId(), provider, model, ok,
+    error: String(error || "").slice(0, 500), latencyMs,
+    toolCalls: Array.isArray(result?.executedTools) ? result.executedTools.length : 0,
+    ...tokens, ...price
+  });
+}
+
+async function enforceUsageHardLimits() {
+  if (!usageMonthlyHardLimitTokens && !usageMonthlyHardLimitUsd) return;
+  const monthStart = new Date();
+  monthStart.setUTCDate(1); monthStart.setUTCHours(0, 0, 0, 0);
+  const { totals } = aggregateUsage(await readUsageLedger(), { workspaceCode: getWorkspaceContext().code, from: monthStart.getTime() });
+  if (usageMonthlyHardLimitTokens && totals.totalTokens >= usageMonthlyHardLimitTokens) throw Object.assign(new Error("Monthly workspace token limit reached"), { status: 429 });
+  if (usageMonthlyHardLimitUsd && totals.estimatedCostUsd >= usageMonthlyHardLimitUsd) throw Object.assign(new Error("Monthly workspace estimated cost limit reached"), { status: 429 });
+}
+
 function sanitizeAuditPayload(value, depth = 0, keyPath = "") {
   if (value == null) {
     return value;
@@ -1615,15 +2015,18 @@ function sanitizeAuditPayload(value, depth = 0, keyPath = "") {
 
 function pruneChatJobs() {
   const now = Date.now();
+  let changed = false;
   for (const [id, job] of chatJobStore.entries()) {
     const age = now - Number(new Date(job.updatedAt || job.createdAt || 0).getTime() || 0);
     if (age > chatJobMaxAgeMs) {
       closeChatJobStreams(job);
       chatJobStore.delete(id);
+      changed = true;
     }
   }
 
   if (chatJobStore.size <= chatJobMaxEntries) {
+    if (changed) scheduleChatJobStateSave();
     return;
   }
 
@@ -1635,7 +2038,73 @@ function pruneChatJobs() {
     if (id) {
       closeChatJobStreams(chatJobStore.get(id));
       chatJobStore.delete(id);
+      changed = true;
     }
+  }
+  if (changed) scheduleChatJobStateSave();
+}
+
+function saveChatJobState() {
+  chatJobPersistenceWriteQueue = chatJobPersistenceWriteQueue
+    .catch(() => undefined)
+    .then(() => writeChatJobState(
+      chatJobDbPath,
+      serializeChatJobState(chatJobStore.values(), pausedChatJobWorkspaces)
+    ));
+  return chatJobPersistenceWriteQueue;
+}
+
+function scheduleChatJobStateSave() {
+  if (chatJobPersistenceTimer) return;
+  chatJobPersistenceTimer = setTimeout(() => {
+    chatJobPersistenceTimer = null;
+    saveChatJobState().catch((error) => {
+      console.error("Failed to persist chat jobs:", error?.message || error);
+    });
+  }, 100);
+}
+
+function createChatJobExecution(job, requestBody, request = {}) {
+  const context = workspaceContextForCode(job.workspaceCode);
+  const abortController = new AbortController();
+  const security = getEffectiveSecuritySettingsSync();
+  const providedApiKey = String(request.headers?.[security.apiKeyHeaderName] || "").trim();
+  const executionApiKey = security.apiKeys.includes(providedApiKey) ? providedApiKey : security.apiKeys[0] || "";
+  const reqClone = {
+    body: JSON.parse(JSON.stringify(requestBody || {})),
+    headers: {
+      "user-agent": String(request.headers?.["user-agent"] || "restored-chat-job").slice(0, 300),
+      ...(executionApiKey ? { [security.apiKeyHeaderName]: executionApiKey } : {})
+    },
+    ip: request.ip || "queue-recovery",
+    workspace: { code: job.workspaceCode },
+    traceId: job.traceId,
+    chatJobId: job.id,
+    abortSignal: abortController.signal,
+    onJobEvent: (type, payload) => {
+      const current = chatJobStore.get(job.id);
+      if (current) recordChatJobEvent(current, type, payload);
+    }
+  };
+  return { context, reqClone, abortController };
+}
+
+async function loadChatJobState() {
+  try {
+    const restored = restoreChatJobState(await readChatJobState(chatJobDbPath));
+    for (const workspaceCode of restored.pausedWorkspaceCodes) pausedChatJobWorkspaces.add(workspaceCode);
+    for (const job of restored.jobs) {
+      if (job.status === "queued" && job.requestBody) {
+        job.execution = createChatJobExecution(job, job.requestBody);
+      }
+      chatJobStore.set(job.id, job);
+      const counterMatch = String(job.id).match(/-(\d+)$/);
+      if (counterMatch) chatJobCounter = Math.max(chatJobCounter, Number(counterMatch[1]) + 1);
+    }
+    pruneChatJobs();
+    await saveChatJobState();
+  } catch (error) {
+    if (error?.code !== "ENOENT") console.error("Failed to load chat jobs:", error?.message || error);
   }
 }
 
@@ -1645,12 +2114,18 @@ function createChatJob(req, provider, agentMode) {
   const traceId = resolveRequestTraceId(req) || createTraceId();
   const workspace = getWorkspaceContext();
   const createdAt = new Date().toISOString();
+  const requestMessages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
+  const recoveryPrompt = [...requestMessages].reverse().find((message) => message?.role === "user")?.content || "";
   const job = {
     id,
     traceId,
     status: "queued",
+    priority: normalizeChatJobPriority(req?.body?.priority),
     provider,
     agentMode: Boolean(agentMode),
+    toolProfile: getAgentToolProfile(req),
+    autoCheckpoint: Boolean(req?.body?.autoCheckpoint) && Boolean(agentMode),
+    checkpoint: null,
     workspaceCode: workspace.code,
     createdAt,
     updatedAt: createdAt,
@@ -1660,10 +2135,25 @@ function createChatJob(req, provider, agentMode) {
     events: [],
     abortController: null,
     result: null,
-    error: null
+    error: null,
+    recovery: {
+      clientChatId: String(req?.body?.clientChatId || "").slice(0, 120),
+      clientUserMessageId: String(req?.body?.clientUserMessageId || "").slice(0, 120),
+      prompt: String(recoveryPrompt).slice(0, chatMessageMaxChars),
+      model: String(req?.body?.model || "").slice(0, 120)
+    },
+    requestBody: JSON.parse(JSON.stringify(req?.body || {}))
   };
-  recordChatJobEvent(job, "queued", { provider, agentMode: Boolean(agentMode), traceId });
+  recordChatJobEvent(job, "queued", {
+    provider,
+    priority: job.priority,
+    agentMode: Boolean(agentMode),
+    toolProfile: job.toolProfile,
+    autoCheckpoint: job.autoCheckpoint,
+    traceId
+  });
   chatJobStore.set(id, job);
+  scheduleChatJobStateSave();
   return job;
 }
 
@@ -1683,6 +2173,7 @@ function recordChatJobEvent(job, type, payload = {}) {
   if (job.events.length > chatJobEventHistoryMax) {
     job.events.splice(0, job.events.length - chatJobEventHistoryMax);
   }
+  scheduleChatJobStateSave();
 
   const lines = [
     `id: ${event.id}`,
@@ -1735,6 +2226,7 @@ function setChatJobStatus(job, status, extra = {}) {
   if (["completed", "failed", "cancelled"].includes(status)) {
     closeChatJobStreams(job);
   }
+  scheduleChatJobStateSave();
 }
 
 function cancelChatJob(job, reason = "Cancelled by user") {
@@ -1744,11 +2236,17 @@ function cancelChatJob(job, reason = "Cancelled by user") {
   if (["completed", "failed", "cancelled"].includes(job.status)) {
     return false;
   }
+  const wasQueued = job.status === "queued";
   if (job.abortController) {
     try {
       job.abortController.abort(reason);
     } catch {
       // Ignore abort errors.
+    }
+  }
+  for (const child of subagentJobStore.values()) {
+    if (child.parentId === job.id && ["queued", "running"].includes(child.status)) {
+      cancelSubagentJob(child, "Parent job cancelled");
     }
   }
 
@@ -1762,6 +2260,14 @@ function cancelChatJob(job, reason = "Cancelled by user") {
     },
     eventPayload: { reason }
   });
+  if (wasQueued && job.scheduleId) {
+    queueMicrotask(() => {
+      finishScheduledAgentRecipeJob(job).catch((error) => {
+        console.error("Failed to finalize cancelled scheduled recipe:", error?.message || error);
+      });
+    });
+  }
+  queueMicrotask(dispatchChatJobs);
   return true;
 }
 
@@ -1773,16 +2279,249 @@ function getChatJobResponse(job) {
     id: job.id,
     traceId: job.traceId,
     status: job.status,
+    priority: job.priority,
+    queuePosition: getChatJobQueuePosition(job),
     provider: job.provider,
     agentMode: job.agentMode,
+    toolProfile: job.toolProfile,
+    autoCheckpoint: job.autoCheckpoint,
+    checkpoint: job.checkpoint,
     workspaceCode: job.workspaceCode,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     cancelRequested: Boolean(job.cancelRequested),
     cancelledAt: job.cancelledAt || null,
+    recovery: job.recovery || null,
     result: job.status === "completed" ? job.result : null,
     error: ["failed", "cancelled"].includes(job.status) ? job.error : null
   };
+}
+
+function getChatJobQueuePosition(job) {
+  if (!job || job.status !== "queued") {
+    return null;
+  }
+  const queued = [...chatJobStore.values()]
+    .filter((item) => item.workspaceCode === job.workspaceCode && item.status === "queued")
+    .sort(compareQueuedChatJobs);
+  const index = queued.findIndex((item) => item.id === job.id);
+  return index >= 0 ? index + 1 : null;
+}
+
+function activeChatJobCount() {
+  return [...chatJobStore.values()]
+    .filter((job) => ["starting", "checkpointing", "running"].includes(job.status))
+    .length;
+}
+
+function activeWorkspaceChatJobCount(workspaceCode) {
+  return [...chatJobStore.values()]
+    .filter((job) => job.workspaceCode === workspaceCode && ["starting", "checkpointing", "running"].includes(job.status))
+    .length;
+}
+
+function workspaceChatJobLimit(workspaceCode) {
+  return chatJobWorkspaceConcurrency.get(workspaceCode) || chatJobDefaultWorkspaceConcurrent;
+}
+
+function startQueuedChatJob(job) {
+  const execution = job?.execution;
+  if (!job || !execution || job.status !== "queued") {
+    return;
+  }
+  setChatJobStatus(job, "starting", { eventPayload: { priority: job.priority, traceId: job.traceId } });
+  job.abortController = execution.abortController;
+
+  workspaceContextStore.run(execution.context, async () => {
+    try {
+      if (job.cancelRequested || job.status === "cancelled") {
+        return;
+      }
+      if (job.autoCheckpoint) {
+        setChatJobStatus(job, "checkpointing", { eventPayload: { traceId: job.traceId } });
+        job.checkpoint = await createManualSnapshot(`agent checkpoint ${job.traceId}`);
+        recordChatJobEvent(job, "checkpoint-created", {
+          traceId: job.traceId,
+          checkpoint: job.checkpoint
+        });
+      }
+      setChatJobStatus(job, "running", { eventPayload: { provider: job.provider, traceId: job.traceId } });
+      const result = await generateChatResponse(execution.reqClone);
+      result.contextMutations = Array.isArray(execution.reqClone.agentContextMutations)
+        ? execution.reqClone.agentContextMutations
+        : [];
+      result.checkpoint = job.checkpoint;
+      if (job.status !== "cancelled") {
+        setChatJobStatus(job, "completed", { result, eventPayload: { traceId: job.traceId } });
+      }
+    } catch (error) {
+      if (job.status !== "cancelled") {
+        setChatJobStatus(job, "failed", {
+          error: {
+            message: String(error?.message || error),
+            status: Number(error?.status || 500),
+            traceId: job.traceId
+          },
+          eventPayload: { traceId: job.traceId }
+        });
+      }
+    } finally {
+      job.abortController = null;
+      job.execution = null;
+      await finishScheduledAgentRecipeJob(job);
+      dispatchChatJobs();
+    }
+  });
+}
+
+function dispatchChatJobs() {
+  const slots = chatJobMaxConcurrent - activeChatJobCount();
+  if (slots <= 0) {
+    return;
+  }
+  const ready = selectDispatchableChatJobs(chatJobStore.values(), {
+    globalSlots: slots,
+    defaultWorkspaceLimit: chatJobDefaultWorkspaceConcurrent,
+    workspaceLimits: chatJobWorkspaceConcurrency,
+    pausedWorkspaceCodes: pausedChatJobWorkspaces
+  });
+  for (const job of ready) {
+    startQueuedChatJob(job);
+  }
+}
+
+function enqueueChatJob(req) {
+  const provider = String(req.body?.provider || defaultProvider).trim().toLowerCase();
+  const agentMode = Boolean(req.body?.agentMode);
+  const job = createChatJob(req, provider, agentMode);
+  job.execution = createChatJobExecution(job, job.requestBody, req);
+  queueMicrotask(dispatchChatJobs);
+  return job;
+}
+
+function publicAgentRecipeSchedule(schedule) {
+  const lastJob = schedule.lastJobId ? chatJobStore.get(schedule.lastJobId) : null;
+  return {
+    ...schedule,
+    timer: undefined,
+    lastJobStatus: lastJob?.status || schedule.lastJobStatus || null
+  };
+}
+
+async function saveAgentRecipeSchedules() {
+  await fsp.mkdir(path.dirname(agentRecipeScheduleDbPath), { recursive: true });
+  const schedules = [...agentRecipeScheduleStore.values()].map((schedule) => {
+    const { timer, ...stored } = schedule;
+    return stored;
+  });
+  await fsp.writeFile(agentRecipeScheduleDbPath, `${JSON.stringify({ version: 1, schedules }, null, 2)}\n`, "utf8");
+}
+
+function resolveScheduledProviderModel(providerValue, modelValue) {
+  const provider = String(providerValue || defaultProvider).trim().toLowerCase();
+  if (compatibleProviderConfigs[provider]?.apiKey && compatibleProviderConfigs[provider].supportsAgentMode) {
+    return { provider, model: resolveExternalProviderModel(provider, modelValue) };
+  }
+  if (provider === "copilot" && githubPat) {
+    return { provider, model: resolveCopilotModel(modelValue) };
+  }
+  if (provider === "openai" && openaiApiKey) return { provider, model: resolveModel(modelValue) };
+  throw new Error(`Provider '${provider}' is not configured for scheduled agents`);
+}
+
+async function finishScheduledAgentRecipeJob(job) {
+  if (!job?.scheduleId) return;
+  const schedule = agentRecipeScheduleStore.get(job.scheduleId);
+  if (!schedule) return;
+  schedule.lastJobStatus = job.status;
+  schedule.lastCompletedAt = new Date().toISOString();
+  await saveAgentRecipeSchedules();
+  const syntheticReq = { ip: "scheduler", headers: { "user-agent": "agent-recipe-scheduler" }, traceId: job.traceId };
+  const level = job.status === "completed" ? "success" : job.status === "cancelled" ? "warning" : "error";
+  await createNotification(syntheticReq, `Scheduled recipe ${schedule.name} ${job.status}.`, level);
+}
+
+function armAgentRecipeSchedule(schedule) {
+  if (schedule.timer) clearTimeout(schedule.timer);
+  schedule.timer = null;
+  if (!schedule.enabled || !schedule.nextRunAt) return;
+  const delayMs = Math.max(0, Date.parse(schedule.nextRunAt) - Date.now());
+  const boundedDelay = Math.min(delayMs, 2_147_000_000);
+  schedule.timer = setTimeout(() => {
+    if (delayMs > boundedDelay) {
+      armAgentRecipeSchedule(schedule);
+      return;
+    }
+    runScheduledAgentRecipe(schedule.id).catch((error) => {
+      console.error("Scheduled agent recipe failed:", error?.message || error);
+    });
+  }, boundedDelay);
+}
+
+async function runScheduledAgentRecipe(scheduleId) {
+  const schedule = agentRecipeScheduleStore.get(scheduleId);
+  if (!schedule?.enabled) return;
+  const previousJob = schedule.lastJobId ? chatJobStore.get(schedule.lastJobId) : null;
+  if (previousJob && !["completed", "failed", "cancelled"].includes(previousJob.status)) {
+    schedule.lastJobStatus = "overlap-skipped";
+  } else {
+    const context = workspaceContextForCode(schedule.workspaceCode);
+    await workspaceContextStore.run(context, async () => {
+      const syntheticReq = {
+        body: {
+          provider: schedule.provider,
+          model: schedule.model,
+          agentMode: true,
+          priority: schedule.priority,
+          toolProfile: schedule.toolProfile,
+          autoCheckpoint: schedule.autoCheckpoint,
+          messages: [{ role: "user", content: schedule.prompt }]
+        },
+        headers: { "user-agent": "agent-recipe-scheduler" },
+        ip: "scheduler",
+        workspace: { code: schedule.workspaceCode }
+      };
+      const job = enqueueChatJob(syntheticReq);
+      job.scheduleId = schedule.id;
+      schedule.lastJobId = job.id;
+      schedule.lastJobStatus = job.status;
+      schedule.lastRunAt = new Date().toISOString();
+      await appendAuditLog(syntheticReq, "agent-recipe-scheduled-run", {
+        scheduleId: schedule.id,
+        name: schedule.name,
+        jobId: job.id,
+        provider: schedule.provider,
+        model: schedule.model
+      });
+    });
+  }
+
+  if (schedule.kind === "once") {
+    schedule.enabled = false;
+    schedule.nextRunAt = null;
+  } else {
+    schedule.nextRunAt = calculateNextRunAt(schedule, Date.now());
+  }
+  await saveAgentRecipeSchedules();
+  armAgentRecipeSchedule(schedule);
+}
+
+async function loadAgentRecipeSchedules() {
+  try {
+    const raw = await fsp.readFile(agentRecipeScheduleDbPath, "utf8");
+    const parsed = JSON.parse(raw);
+    for (const item of Array.isArray(parsed?.schedules) ? parsed.schedules : []) {
+      if (!item?.id || !item?.workspaceCode || !item?.prompt) continue;
+      const schedule = { ...item, timer: null };
+      if (schedule.enabled && (!schedule.nextRunAt || Date.parse(schedule.nextRunAt) <= Date.now())) {
+        schedule.nextRunAt = new Date(Date.now() + 1000).toISOString();
+      }
+      agentRecipeScheduleStore.set(schedule.id, schedule);
+      armAgentRecipeSchedule(schedule);
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") console.error("Failed to load agent recipe schedules:", error?.message || error);
+  }
 }
 
 async function pruneAuditEntries() {
@@ -2483,34 +3222,6 @@ function resolveMessageContext(body) {
   });
 }
 
-async function summarizeDirectoryContents(rootPath) {
-  let size = 0;
-  let fileCount = 0;
-  let directoryCount = 0;
-  const pending = [rootPath];
-
-  while (pending.length > 0) {
-    const current = pending.pop();
-    const entries = await fsp.readdir(current, { withFileTypes: true });
-    for (const entry of entries) {
-      const entryPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        directoryCount += 1;
-        pending.push(entryPath);
-        continue;
-      }
-      if (!entry.isFile()) {
-        continue;
-      }
-      const stat = await fsp.stat(entryPath);
-      size += stat.size;
-      fileCount += 1;
-    }
-  }
-
-  return { size, fileCount, directoryCount };
-}
-
 async function getFileList(pathValue) {
   const { absolute, rel } = resolveSandboxPath(pathValue || "");
   const entries = await fsp.readdir(absolute, { withFileTypes: true });
@@ -2666,12 +3377,12 @@ async function readTextFile(pathValue) {
   return { path: rel, size: stat.size, content };
 }
 
-async function writeTextFile(pathValue, content) {
+async function writeTextFile(pathValue, content, options = {}) {
   const { absolute, rel } = resolveSandboxPath(pathValue || "");
   const text = typeof content === "string" ? content : "";
   await fsp.mkdir(path.dirname(absolute), { recursive: true });
   await fsp.writeFile(absolute, text, "utf8");
-  await commitSandboxSnapshot(`write ${rel || "."}`, [rel]);
+  if (options.snapshot !== false) await commitSandboxSnapshot(`write ${rel || "."}`, [rel]);
   return { ok: true, path: rel };
 }
 
@@ -3334,9 +4045,15 @@ function normalizeRequestedDockerImage(value) {
 async function runWorkspaceCommandInDocker(commandName, commandArgs, cwdRel, timeout, sandboxRoot, envVars, dockerImage) {
   const image = normalizeRequestedDockerImage(dockerImage);
   const inContainerCwd = cwdRel ? `/workspace/${cwdRel}` : "/workspace";
+  const containerName = `raa-tool-${process.pid}-${randomBytes(6).toString("hex")}`;
   const dockerArgs = [
     "run",
     "--rm",
+    "--name", containerName,
+    "--label", MANAGED_TOOL_CONTAINER_LABEL,
+    "--log-driver", "json-file",
+    "--log-opt", "max-size=10m",
+    "--log-opt", "max-file=3",
     "--network", terminalDockerNetwork,
     "--memory", terminalDockerMemory,
     "--cpus", terminalDockerCpus,
@@ -3351,7 +4068,11 @@ async function runWorkspaceCommandInDocker(commandName, commandArgs, cwdRel, tim
   }
 
   dockerArgs.push(image, commandName, ...commandArgs);
-  return execFileAsync("docker", dockerArgs, { timeout });
+  try {
+    return await execFileAsync("docker", dockerArgs, { timeout });
+  } finally {
+    await execFileAsync("docker", ["rm", "-f", containerName], { timeout: 15_000 }).catch(() => {});
+  }
 }
 
 async function prepareTerminalExecution(cwdPath) {
@@ -4018,87 +4739,15 @@ async function searchSandboxContent(args = {}) {
   if (!query) {
     throw new Error("query is required");
   }
-
-  const modeRaw = String(args.mode || "hybrid").trim().toLowerCase();
-  const mode = modeRaw === "full" || modeRaw === "semantic" || modeRaw === "hybrid" ? modeRaw : "hybrid";
-  const limit = Math.max(1, Math.min(100, Number(args.limit || 20)));
-  const maxFiles = Math.max(1, Math.min(800, Number(args.maxFiles || 300)));
-  const maxFileBytes = Math.max(2048, Math.min(1024 * 1024, Number(args.maxFileBytes || 300000)));
   const { absolute: baseAbs, rel: baseRel } = resolveSandboxPath(args.path || "");
-  const stat = await fsp.stat(baseAbs);
-  const targets = stat.isDirectory() ? await collectFilesRecursive(baseAbs, maxFiles) : [baseAbs];
-
-  const queryLower = query.toLowerCase();
-  const queryTokens = new Set(tokenizeSearchText(query));
-  const results = [];
-
-  for (const filePath of targets) {
-    let fileStat;
-    try {
-      fileStat = await fsp.stat(filePath);
-    } catch {
-      continue;
-    }
-    if (!fileStat.isFile() || fileStat.size > maxFileBytes) {
-      continue;
-    }
-
-    let content;
-    try {
-      content = await fsp.readFile(filePath, "utf8");
-    } catch {
-      continue;
-    }
-    if (content.includes("\0")) {
-      continue;
-    }
-
-    const lower = content.toLowerCase();
-    const exactCount = lower.split(queryLower).length - 1;
-
-    const fileTokens = new Set(tokenizeSearchText(content.slice(0, 12000)));
-    let overlap = 0;
-    for (const token of queryTokens) {
-      if (fileTokens.has(token)) {
-        overlap += 1;
-      }
-    }
-    const semanticScore = queryTokens.size > 0 ? overlap / queryTokens.size : 0;
-
-    let score = 0;
-    if (mode === "full") {
-      score = exactCount;
-    } else if (mode === "semantic") {
-      score = semanticScore;
-    } else {
-      score = exactCount * 1.25 + semanticScore;
-    }
-
-    if (score <= 0) {
-      continue;
-    }
-
-    results.push({
-      path: path.relative(getSandboxRoot(), filePath).replaceAll("\\", "/"),
-      score: Number(score.toFixed(4)),
-      exactCount,
-      semanticScore: Number(semanticScore.toFixed(4)),
-      snippet: extractSearchSnippet(content, queryLower),
-      size: fileStat.size,
-      modifiedAt: fileStat.mtime.toISOString()
-    });
-  }
-
-  results.sort((a, b) => b.score - a.score || b.exactCount - a.exactCount || a.path.localeCompare(b.path));
-
+  const requestedMode = String(args.mode || "hybrid").trim().toLowerCase();
+  const result = await searchWorkspaceFiles(getSandboxRoot(), baseAbs, args);
   return {
     ok: true,
     query,
-    mode,
+    mode: requestedMode === "full" ? "text" : requestedMode,
     path: baseRel,
-    filesScanned: targets.length,
-    resultCount: results.length,
-    results: results.slice(0, limit)
+    ...result
   };
 }
 
@@ -4360,6 +5009,160 @@ async function testApiEndpoint(args = {}) {
   }
 }
 
+async function previewWorkspaceDeployment(args = {}) {
+  const action = String(args?.action || "preview").trim().toLowerCase();
+  if (action !== "preview") {
+    throw new Error("only deployment preview is available; activation requires the privileged helper release");
+  }
+  const result = previewDeployment(args?.manifest, {
+    allowedSuffixes: deploymentAllowedSuffixes,
+    allowedRuntimes: deploymentAllowedRuntimes,
+    allowedEnvironmentNames: deploymentAllowedEnvironmentNames,
+    port: deploymentPreviewPort
+  });
+  const artifact = resolveSandboxPath(result.manifest.artifactPath);
+  const artifactStat = await fsp.stat(artifact.absolute).catch(() => null);
+  if (!artifactStat?.isDirectory()) {
+    throw new Error("artifactPath must reference an existing workspace directory");
+  }
+  let entrypoint = null;
+  if (result.manifest.entrypoint) {
+    entrypoint = resolveSandboxPath(`${result.manifest.artifactPath}/${result.manifest.entrypoint}`);
+    const entrypointStat = await fsp.stat(entrypoint.absolute).catch(() => null);
+    if (!entrypointStat?.isFile()) {
+      throw new Error("entrypoint must reference an existing file inside artifactPath");
+    }
+  }
+  return {
+    ...result,
+    checks: {
+      artifactDirectory: artifact.rel,
+      entrypointFile: entrypoint?.rel || null,
+      workspace: getWorkspaceContext().code
+    }
+  };
+}
+
+async function readDeploymentApprovalDb() {
+  try {
+    const parsed = JSON.parse(await fsp.readFile(deploymentApprovalDbPath, "utf8"));
+    return { version: 1, approvals: Array.isArray(parsed?.approvals) ? parsed.approvals : [] };
+  } catch (error) {
+    if (error?.code === "ENOENT") return { version: 1, approvals: [] };
+    throw error;
+  }
+}
+
+async function writeDeploymentApprovalDb(db) {
+  const operation = deploymentApprovalWriteQueue.then(async () => {
+    await fsp.mkdir(path.dirname(deploymentApprovalDbPath), { recursive: true });
+    const temporaryPath = `${deploymentApprovalDbPath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+    await fsp.writeFile(temporaryPath, JSON.stringify(db, null, 2), { encoding: "utf8", mode: 0o600 });
+    await fsp.rename(temporaryPath, deploymentApprovalDbPath);
+  });
+  deploymentApprovalWriteQueue = operation.catch(() => {});
+  return operation;
+}
+
+async function mutateDeploymentApprovalDb(mutator) {
+  const operation = deploymentApprovalMutationQueue.then(async () => {
+    const db = await readDeploymentApprovalDb();
+    const result = await mutator(db);
+    await writeDeploymentApprovalDb(db);
+    return result;
+  });
+  deploymentApprovalMutationQueue = operation.catch(() => {});
+  return operation;
+}
+
+function findDeploymentApproval(db, id) {
+  return db.approvals.find((approval) => approval.id === String(id || "").trim()) || null;
+}
+
+function callDeploymentHelper(request) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(deploymentHelperSocketPath);
+    let response = "";
+    let settled = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      if (error) reject(error);
+      else resolve(result);
+    };
+    const timer = setTimeout(() => finish(new Error("deployment helper timed out")), deploymentHelperTimeoutMs);
+    socket.setEncoding("utf8");
+    socket.on("connect", () => socket.end(JSON.stringify(request)));
+    socket.on("data", (chunk) => {
+      response += chunk;
+      if (response.length > 64 * 1024) finish(new Error("deployment helper response is too large"));
+    });
+    socket.on("end", () => {
+      try {
+        const result = JSON.parse(response);
+        if (!result?.ok) throw new Error(result?.error || "deployment helper rejected activation");
+        finish(null, result);
+      } catch (error) {
+        finish(error);
+      }
+    });
+    socket.on("error", (error) => finish(error));
+  });
+}
+
+async function executeApprovedWorkspaceDeployment(args = {}, action = "activate") {
+  const operation = deploymentActivationQueue.then(async () => {
+    const preview = await previewWorkspaceDeployment({ action: "preview", manifest: args?.manifest });
+    if (preview.manifest.runtime !== "static") throw new Error("approved deployment actions currently support static runtime only");
+    if (preview.manifest.environmentNames.length > 0 || preview.manifest.persistentData) {
+      throw new Error("static activation does not support environment names or persistent data");
+    }
+    const workspaceCode = getWorkspaceContext().code;
+    const approvalId = String(args?.approvalId || "").trim();
+    const approvalToken = String(args?.approvalToken || "").trim();
+    if (!approvalId || !approvalToken) throw new Error(`approvalId and approvalToken are required for ${action}`);
+    await mutateDeploymentApprovalDb((db) => {
+      const approval = findDeploymentApproval(db, approvalId);
+      if (!approval) throw new Error("deployment approval not found");
+      const activating = beginDeploymentActivation(approval, {
+        token: approvalToken,
+        workspaceCode,
+        manifest: preview.manifest,
+        action
+      });
+      db.approvals = db.approvals.map((item) => item.id === approval.id ? activating : item);
+    });
+    const releaseId = action === "activate" ? makeReleaseId(new Date(), randomBytes(6).toString("hex")) : null;
+    try {
+      const result = await callDeploymentHelper({
+        action: action === "rollback" ? "rollback-static" : "activate-static",
+        workspaceCode,
+        ...(releaseId ? { releaseId } : {}),
+        manifest: preview.manifest
+      });
+      await mutateDeploymentApprovalDb((db) => {
+        const approval = findDeploymentApproval(db, approvalId);
+        const consumed = completeDeploymentActivation(approval, { releaseId: result.releaseId });
+        db.approvals = db.approvals.map((item) => item.id === approval.id ? consumed : item);
+      });
+      return { ...result, approvalId };
+    } catch (error) {
+      await mutateDeploymentApprovalDb((db) => {
+        const approval = findDeploymentApproval(db, approvalId);
+        if (approval?.status === "activating") {
+          const failed = failDeploymentActivation(approval, { error: error?.message || error });
+          db.approvals = db.approvals.map((item) => item.id === approval.id ? failed : item);
+        }
+      });
+      throw error;
+    }
+  });
+  deploymentActivationQueue = operation.catch(() => {});
+  return operation;
+}
+
 async function callInternalApiFromAgent(args = {}) {
   const rawPath = String(args.path || "").trim();
   if (!rawPath || !rawPath.startsWith("/api/")) {
@@ -4367,6 +5170,9 @@ async function callInternalApiFromAgent(args = {}) {
   }
   if (rawPath.startsWith("/api/admin/")) {
     throw new Error("/api/admin endpoints are not available to agent tools");
+  }
+  if (/^\/api\/chat\/subagents\/[^/]+\/approve(?:\?|$)/.test(rawPath)) {
+    throw new Error("coding subagent approval requires an authenticated browser user");
   }
 
   const method = String(args.method || "GET").trim().toUpperCase();
@@ -4672,6 +5478,71 @@ async function searchInternetWithAgentReach(queryValue, limitValue) {
     String(agentReachTimeoutMs)
   ]);
   return { query, limit, provider: "exa", result: parseAgentReachJson(output, "Exa search") };
+}
+
+async function searchImages(queryValue, limitValue) {
+  const query = String(queryValue || "").trim().slice(0, 500);
+  if (!query) throw new Error("query is required");
+  const limit = Math.max(1, Math.min(20, Number(limitValue || 8)));
+  const url = new URL("https://commons.wikimedia.org/w/api.php");
+  url.search = new URLSearchParams({
+    action: "query",
+    generator: "search",
+    gsrsearch: query,
+    gsrnamespace: "6",
+    gsrlimit: String(limit),
+    prop: "imageinfo",
+    iiprop: "url|mime|size|extmetadata",
+    iiurlwidth: "640",
+    format: "json",
+    origin: "*"
+  }).toString();
+  const response = await fetch(url, { headers: { "User-Agent": "remote-ai-access/1.0" } });
+  if (!response.ok) throw new Error(`Wikimedia image search failed (${response.status})`);
+  return { query, provider: "wikimedia-commons", results: parseWikimediaImageResults(await response.json(), limit) };
+}
+
+async function generateWorkspaceImage(args = {}) {
+  const request = normalizeImageRequest(args);
+  const model = request.model || (request.provider === "xai" ? xaiImageModel : request.provider === "google" ? googleImageModel : openaiImageModel);
+  let payload;
+  if (request.provider === "openai") {
+    if (!client) throw new Error("OpenAI image generation is not configured");
+    payload = await client.images.generate({ model, prompt: request.prompt, size: request.size, quality: request.quality });
+  } else if (request.provider === "xai") {
+    if (!xaiApiKey) throw new Error("xAI image generation is not configured");
+    const response = await fetch(`${xaiApiBaseUrl}/images/generations`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${xaiApiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, prompt: request.prompt, response_format: "b64_json" })
+    });
+    payload = await response.json();
+    if (!response.ok) throw new Error(payload?.error?.message || payload?.error || `xAI image generation failed (${response.status})`);
+  } else {
+    if (!googleApiKey) throw new Error("Google image generation is not configured");
+    const response = await fetch(`${googleNativeApiBaseUrl}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(googleApiKey)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents: [{ parts: [{ text: request.prompt }] }], generationConfig: { responseModalities: ["TEXT", "IMAGE"] } })
+    });
+    payload = await response.json();
+    if (!response.ok) throw new Error(payload?.error?.message || `Google image generation failed (${response.status})`);
+  }
+  const generated = extractGeneratedImage(payload);
+  let bytes;
+  if (generated.base64) {
+    bytes = Buffer.from(generated.base64, "base64");
+  } else {
+    const response = await fetch(generated.url);
+    if (!response.ok) throw new Error(`Generated image download failed (${response.status})`);
+    bytes = Buffer.from(await response.arrayBuffer());
+  }
+  if (bytes.length === 0 || bytes.length > 25 * 1024 * 1024) throw new Error("Generated image size is invalid or exceeds 25 MB");
+  const { absolute, rel } = resolveSandboxPath(request.outputPath);
+  await fsp.mkdir(path.dirname(absolute), { recursive: true });
+  await fsp.writeFile(absolute, bytes, { mode: 0o644 });
+  await commitSandboxSnapshot(`generate image ${rel}`);
+  return { ok: true, provider: request.provider, model, path: rel, size: bytes.length };
 }
 
 async function searchYoutubeWithAgentReach(queryValue, limitValue) {
@@ -5104,6 +5975,37 @@ const agentToolDefinitions = [
   {
     type: "function",
     function: {
+      name: "search_images",
+      description: "Search Wikimedia Commons images with source and license metadata.",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string" }, limit: { type: "number" } },
+        required: ["query"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "generate_image",
+      description: "Generate an image with a configured OpenAI, xAI, or Google image model and save it in the workspace.",
+      parameters: {
+        type: "object",
+        properties: {
+          prompt: { type: "string" },
+          provider: { type: "string", enum: ["openai", "xai", "google"] },
+          model: { type: "string" },
+          outputPath: { type: "string" },
+          size: { type: "string" },
+          quality: { type: "string" }
+        },
+        required: ["prompt", "outputPath"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
       name: "get_youtube_transcript",
       description: "Extract available subtitles or automatic captions from a YouTube video.",
       parameters: {
@@ -5503,15 +6405,302 @@ const agentToolDefinitions = [
         required: []
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "deploy_application",
+      description: "Preview a declarative deployment, activate an approved static release, or roll back to its registry-recorded prior release.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["preview", "activate", "rollback"] },
+          approvalId: { type: "string" },
+          approvalToken: { type: "string" },
+          manifest: {
+            type: "object",
+            properties: {
+              application: { type: "string" },
+              hostname: { type: "string" },
+              runtime: { type: "string", enum: ["static", "node-service"] },
+              artifactPath: { type: "string" },
+              entrypoint: { type: "string" },
+              healthPath: { type: "string" },
+              environmentNames: { type: "array", items: { type: "string" } },
+              persistentData: { type: "boolean" },
+              resources: {
+                type: "object",
+                properties: {
+                  memoryMb: { type: "integer" },
+                  cpuQuotaPercent: { type: "integer" },
+                  processLimit: { type: "integer" }
+                }
+              }
+            },
+            required: ["application", "hostname", "runtime", "artifactPath"]
+          }
+        },
+        required: ["action", "manifest"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "spawn_subagent",
+      description: "Start a bounded research, review, image, or approval-gated coding child and return its job ID immediately. For broad work, spawn parallel siblings for independent components or non-overlapping file scopes, then wait for them together.",
+      parameters: {
+        type: "object",
+        properties: {
+          idempotencyKey: { type: "string" },
+          task: { type: "string" },
+          role: { type: "string", enum: ["research", "review", "image", "coding"] },
+          provider: { type: "string" },
+          model: { type: "string" },
+          allowedTools: { type: "array", items: { type: "string" } },
+          allowedPaths: { type: "array", items: { type: "string" } },
+          maxSteps: { type: "number" },
+          timeoutMs: { type: "number" }
+        },
+        required: ["idempotencyKey", "task"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_subagent",
+      description: "Get a child agent's status, bounded events, and result.",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "wait_subagents",
+      description: "Wait briefly for one or more child agents to reach a terminal state.",
+      parameters: {
+        type: "object",
+        properties: {
+          ids: { type: "array", items: { type: "string" } },
+          timeoutMs: { type: "number" }
+        },
+        required: ["ids"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "cancel_subagent",
+      description: "Cancel a child agent owned by this parent request.",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"]
+      }
+    }
   }
 ];
 
+function agentToolDefinitionsForRequest(req) {
+  const profileDefinitions = filterAgentToolDefinitions(agentToolDefinitions, getAgentToolProfile(req));
+  const internalTools = req?.internalAgentAuthorization?.allowedTools;
+  return Array.isArray(internalTools)
+    ? profileDefinitions.filter((definition) => internalTools.includes(definition?.function?.name))
+    : profileDefinitions;
+}
+
+function subagentParentId(req) {
+  return String(req?.chatJobId || resolveRequestTraceId(req) || "").trim();
+}
+
+function publicSubagentJob(job) {
+  return {
+    id: job.id,
+    parentId: job.parentId,
+    task: job.task,
+    role: job.role,
+    provider: job.provider,
+    model: job.model,
+    status: job.status,
+    allowedTools: job.allowedTools,
+    allowedPaths: job.allowedPaths || [],
+    limits: job.limits ? { maxSteps: job.limits.maxSteps, timeoutMs: job.limits.timeoutMs } : null,
+    approvedAt: job.approvedAt || null,
+    createdAt: job.createdAt,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt,
+    events: job.events,
+    acceptance: job.acceptance || { artifacts: {}, context: {}, updatedAt: null },
+    result: job.status === "completed" ? job.result : null,
+    error: ["failed", "cancelled"].includes(job.status) ? job.error : null
+  };
+}
+
+function recordSubagentEvent(job, type, payload = {}) {
+  job.events.push({ type, timestamp: new Date().toISOString(), payload: sanitizeAuditPayload(payload) });
+  if (job.events.length > SUBAGENT_LIMITS.maxEvents) job.events.splice(0, job.events.length - SUBAGENT_LIMITS.maxEvents);
+}
+
+function cancelSubagentJob(job, reason = "Cancelled by parent") {
+  if (!job || !["awaiting_approval", "queued", "running"].includes(job.status)) return false;
+  job.abortController.abort(new Error(reason));
+  clearTimeout(job.timeout);
+  job.status = "cancelled";
+  job.completedAt = new Date().toISOString();
+  job.error = { message: reason, cancelled: true };
+  recordSubagentEvent(job, "cancelled", { reason });
+  return true;
+}
+
+function startSubagentJob(job) {
+  if (!job || !["awaiting_approval", "queued"].includes(job.status)) return false;
+  job.status = "queued";
+  recordSubagentEvent(job, "queued", { role: job.role, provider: job.provider, model: job.model });
+  queueMicrotask(() => job.workspaceContextStore.run(job.workspaceContext, async () => {
+    if (job.status === "cancelled") return;
+    job.status = "running";
+    job.startedAt = new Date().toISOString();
+    recordSubagentEvent(job, "running", {});
+    job.timeout = setTimeout(() => cancelSubagentJob(job, "Subagent runtime limit reached"), job.limits.timeoutMs);
+    const profile = ["image", "coding"].includes(job.role) ? "standard" : "read-only";
+    const action = job.role === "review" ? "Review" : job.role === "image" ? "Find or create imagery for" : job.role === "coding" ? "Implement" : "Research";
+    const pathRule = job.role === "coding" ? ` You may write only these exact approved paths: ${job.allowedPaths.join(", ")}. Leave all changes uncommitted for human review in Git Change Center.` : "";
+    const childReq = {
+      body: {
+        provider: job.provider,
+        model: job.model,
+        agentMode: true,
+        toolProfile: profile,
+        agentMaxStepsOverride: job.limits.maxSteps,
+        messages: [{ role: "user", content: `${action} this focused task and return a concise evidence-based result with sources, files, and tool evidence.${pathRule} Do not mutate persistent context. If useful, propose context separately using an exact fenced block such as \`\`\`raa-context add with scope and label header lines; proposals require parent acceptance.\n\n${job.task}` }]
+      },
+      headers: {},
+      ip: "internal-subagent",
+      traceId: job.id,
+      abortSignal: job.abortController.signal,
+      internalAgentAuthorization: {
+        apiKeyFingerprint: job.apiKeyFingerprint,
+        workspaceCode: job.workspaceCode,
+        toolProfile: profile,
+        allowedTools: job.allowedTools,
+        allowedPaths: job.allowedPaths,
+        codingApproved: job.role === "coding" && Boolean(job.approvedAt),
+        depth: 1
+      },
+      onJobEvent: (type, payload) => recordSubagentEvent(job, type, payload)
+    };
+    try {
+      const response = await generateChatResponse(childReq);
+      if (job.status !== "cancelled") {
+        job.status = "completed";
+        job.completedAt = new Date().toISOString();
+        job.result = {
+          summary: String(response.reply || "").slice(0, SUBAGENT_LIMITS.maxSummaryChars),
+          executedTools: Array.isArray(response.executedTools) ? response.executedTools : [],
+          evidence: job.events.filter((event) => event.type === "tool-end").slice(-20).map((event) => event.payload),
+          usage: { ...normalizeTokenUsage(response.usage), elapsedMs: Date.now() - Date.parse(job.startedAt) }
+        };
+        job.result.artifacts = collectSubagentArtifacts(job.events);
+        job.result.proposedContextMutations = extractSubagentContextProposals(job.result.summary);
+        recordSubagentEvent(job, "completed", { executedTools: job.result.executedTools });
+      }
+    } catch (error) {
+      if (job.status !== "cancelled") {
+        job.status = "failed";
+        job.completedAt = new Date().toISOString();
+        job.error = { message: String(error?.message || error).slice(0, 1000) };
+        recordSubagentEvent(job, "failed", job.error);
+      }
+    } finally {
+      clearTimeout(job.timeout);
+      job.timeout = null;
+    }
+  }));
+  return true;
+}
+
+function requireOwnedSubagent(req, id) {
+  const job = subagentJobStore.get(String(id || "").trim());
+  if (!job) throw Object.assign(new Error("subagent not found"), { status: 404 });
+  if (job.parentId !== subagentParentId(req) || job.workspaceCode !== getWorkspaceContext().code) {
+    throw Object.assign(new Error("subagent belongs to a different parent or workspace"), { status: 403 });
+  }
+  return job;
+}
+
+async function normalizeCodingWriteScopes(values) {
+  const scopes = normalizeSubagentAllowedPaths(values);
+  return Promise.all(scopes.map(async (scope) => {
+    try {
+      const { absolute } = resolveSandboxPath(scope);
+      const stat = await fsp.stat(absolute);
+      return stat.isDirectory() && !scope.endsWith("/") ? `${scope}/` : scope;
+    } catch (error) {
+      if (error?.code === "ENOENT") return scope;
+      throw error;
+    }
+  }));
+}
+
+async function spawnResearchSubagent(req, args) {
+  if (req?.internalAgentAuthorization) throw Object.assign(new Error("subagents cannot spawn children"), { status: 403 });
+  const parentId = subagentParentId(req);
+  if (!parentId) throw new Error("parent request identity is unavailable");
+  const idempotencyKey = String(args?.idempotencyKey || "").trim().slice(0, 160);
+  const task = String(args?.task || "").trim().slice(0, chatMessageMaxChars);
+  const role = normalizeSubagentRole(args?.role);
+  if (!idempotencyKey || !task) throw new Error("idempotencyKey and task are required");
+  if (!role) throw new Error("subagent role must be research, review, image, or coding");
+  const existing = [...subagentJobStore.values()].find((job) => job.parentId === parentId && job.idempotencyKey === idempotencyKey);
+  if (existing) return publicSubagentJob(existing);
+  const siblings = [...subagentJobStore.values()].filter((job) => job.parentId === parentId);
+  if (siblings.length >= SUBAGENT_LIMITS.maxChildrenPerParent) throw Object.assign(new Error("subagent limit reached for this parent"), { status: 429 });
+  if (siblings.filter((job) => ["queued", "running"].includes(job.status)).length >= SUBAGENT_LIMITS.maxConcurrentPerParent) {
+    throw Object.assign(new Error("concurrent subagent limit reached for this parent"), { status: 429 });
+  }
+
+  const parentTools = agentToolDefinitionsForRequest(req).map((definition) => definition.function.name);
+  const allowedTools = resolveSubagentAllowedTools({ role, requestedTools: args?.allowedTools, parentTools });
+  if (allowedTools.length === 0) throw new Error(`no requested ${role} tools are allowed by the parent profile`);
+  const allowedPaths = role === "coding" ? await normalizeCodingWriteScopes(args?.allowedPaths) : [];
+  if (role === "coding" && (!allowedTools.includes("write_file") || allowedPaths.length === 0)) {
+    throw new Error("coding subagents require parent-approved write_file and at least one exact allowed path");
+  }
+  const limits = normalizeSubagentLimits(args, role);
+  const security = getEffectiveSecuritySettingsSync();
+  const providedKey = String(req?.headers?.[security.apiKeyHeaderName] || "").trim();
+  if (!providedKey) throw Object.assign(new Error("API key required for subagents"), { status: 401 });
+  const provider = String(args?.provider || req.body?.provider || defaultProvider).trim().toLowerCase();
+  const model = String(args?.model || req.body?.model || "").trim();
+  const id = `subagent-${Date.now()}-${subagentJobCounter++}`;
+  const abortController = new AbortController();
+  const workspaceCode = getWorkspaceContext().code;
+  const job = {
+    id, parentId, idempotencyKey, task, role, provider, model, workspaceCode, allowedTools, allowedPaths,
+    status: role === "coding" ? "awaiting_approval" : "queued", createdAt: new Date().toISOString(), startedAt: null, completedAt: null,
+    approvedAt: null, events: [], result: null, error: null, acceptance: { artifacts: {}, context: {}, updatedAt: null }, abortController, timeout: null,
+    limits, apiKeyFingerprint: createHash("sha256").update(providedKey).digest("hex"), workspaceContext: getWorkspaceContext(), workspaceContextStore
+  };
+  if (role === "coding") recordSubagentEvent(job, "awaiting-approval", { allowedTools, allowedPaths });
+  subagentJobStore.set(id, job);
+  if (role !== "coding") startSubagentJob(job);
+  await appendAuditLog(req, "subagent-spawn", { id, parentId, role, provider, model, allowedTools, maxSteps: limits.maxSteps, timeoutMs: limits.timeoutMs });
+  return publicSubagentJob(job);
+}
+
 async function executeAgentTool(req, callName, args) {
   assertAgentToolAuthorized(req);
+  assertAgentToolAllowed(req, callName);
   switch (callName) {
     case "list_tools": {
       const result = {
-        tools: agentToolDefinitions.map((tool) => ({
+        tools: agentToolDefinitionsForRequest(req).map((tool) => ({
           name: tool.function.name,
           description: tool.function.description
         }))
@@ -5523,7 +6712,10 @@ async function executeAgentTool(req, callName, args) {
       const result = {
         apis: [
           { method: "GET", path: "/api/config", purpose: "Runtime model/provider configuration" },
-          { method: "POST", path: "/api/chat", purpose: "Chat endpoint (supports agentMode for OpenAI, Google, and xAI)" },
+          { method: "POST", path: "/api/chat", purpose: "Chat endpoint (supports OpenAI, Copilot, Google, xAI, DeepSeek, Anthropic Claude, Together AI, and OpenRouter; agentMode is available on configured OpenAI-compatible providers)" },
+          { method: "GET", path: "/api/activity?limit=...", purpose: "Unified workspace activity timeline" },
+          { method: "POST", path: "/api/chat/subagents/:id/approve", purpose: "Approve and start a pending coding child" },
+          { method: "PATCH", path: "/api/chat/subagents/:id/acceptance", purpose: "Accept or reject declared child artifacts and context proposals" },
           { method: "GET", path: "/api/tools", purpose: "Tool catalog and capabilities" },
           { method: "GET", path: "/api/notifications?limit=...", purpose: "Recent notify_user entries" },
           { method: "GET", path: "/api/files/list?path=...", purpose: "List directory" },
@@ -5531,6 +6723,8 @@ async function executeAgentTool(req, callName, args) {
           { method: "POST", path: "/api/files/write", purpose: "Write file" },
           { method: "POST", path: "/api/files/upload", purpose: "Upload file(s)" },
           { method: "GET", path: "/api/files/download?path=...", purpose: "Download file or directory zip" },
+          { method: "GET", path: "/api/files/shares", purpose: "List shares with views, downloads, last access, and expiry status" },
+          { method: "PATCH", path: "/api/files/shares/:id/expiration", purpose: "Extend a share expiration" },
           { method: "POST", path: "/api/files/copy", purpose: "Duplicate path" },
           { method: "POST", path: "/api/files/move", purpose: "Move path" },
           { method: "POST", path: "/api/files/rename", purpose: "Rename path" },
@@ -5654,7 +6848,14 @@ async function executeAgentTool(req, callName, args) {
       return result;
     }
     case "write_file": {
-      const result = await writeTextFile(args?.path || "", args?.content || "");
+      const codingAuthorization = req?.internalAgentAuthorization?.codingApproved;
+      if (req?.internalAgentAuthorization?.depth === 1 && !codingAuthorization) {
+        throw Object.assign(new Error("child writes require an approved coding subagent"), { status: 403 });
+      }
+      if (codingAuthorization && !isSubagentWritePathAllowed(args?.path, req.internalAgentAuthorization.allowedPaths)) {
+        throw Object.assign(new Error("write path is outside this coding subagent's approved paths"), { status: 403 });
+      }
+      const result = await writeTextFile(args?.path || "", args?.content || "", { snapshot: !codingAuthorization });
       await appendAuditLog(req, "agent-tool", { name: callName, path: result.path });
       return result;
     }
@@ -5687,6 +6888,16 @@ async function executeAgentTool(req, callName, args) {
     case "search_internet": {
       const result = await searchInternetWithAgentReach(args?.query, args?.limit);
       await appendAuditLog(req, "agent-tool", { name: callName, query: result.query, limit: result.limit, provider: result.provider });
+      return result;
+    }
+    case "search_images": {
+      const result = await searchImages(args?.query, args?.limit);
+      await appendAuditLog(req, "agent-tool", { name: callName, query: result.query, resultCount: result.results.length, provider: result.provider });
+      return result;
+    }
+    case "generate_image": {
+      const result = await generateWorkspaceImage(args || {});
+      await appendAuditLog(req, "agent-tool", { name: callName, provider: result.provider, model: result.model, path: result.path, size: result.size });
       return result;
     }
     case "search_youtube": {
@@ -5828,6 +7039,26 @@ async function executeAgentTool(req, callName, args) {
         method: result.method,
         status: result.status,
         ok: result.ok
+      });
+      return result;
+    }
+    case "deploy_application": {
+      const action = String(args?.action || "preview").trim().toLowerCase();
+      const result = action === "preview"
+        ? await previewWorkspaceDeployment(args || {})
+        : ["activate", "rollback"].includes(action)
+          ? await executeApprovedWorkspaceDeployment(args || {}, action)
+          : (() => { throw new Error("action must be preview, activate, or rollback"); })();
+      await appendAuditLog(req, action === "preview" ? "deployment-preview" : `deployment-${action}`, {
+        name: callName,
+        action,
+        application: result.manifest?.application || result.application,
+        hostname: result.manifest?.hostname || result.hostname,
+        runtime: result.manifest?.runtime || "static",
+        artifactPath: result.manifest?.artifactPath || null,
+        environmentNames: result.manifest?.environmentNames || [],
+        releaseId: result.releaseId || null,
+        approvalId: result.approvalId || null
       });
       return result;
     }
@@ -6023,6 +7254,28 @@ async function executeAgentTool(req, callName, args) {
       await appendAuditLog(req, "agent-tool", { name: callName, id: note.id, level: note.level });
       return { ok: true, notification: note };
     }
+    case "spawn_subagent":
+      return { ok: true, job: await spawnResearchSubagent(req, args) };
+    case "get_subagent":
+      return { ok: true, job: publicSubagentJob(requireOwnedSubagent(req, args?.id)) };
+    case "wait_subagents": {
+      const ids = [...new Set((Array.isArray(args?.ids) ? args.ids : []).map((id) => String(id || "").trim()).filter(Boolean))].slice(0, SUBAGENT_LIMITS.maxChildrenPerParent);
+      if (ids.length === 0) throw new Error("ids is required");
+      const jobs = ids.map((id) => requireOwnedSubagent(req, id));
+      const timeoutMs = Math.max(0, Math.min(60_000, Number(args?.timeoutMs || 30_000)));
+      const deadline = Date.now() + timeoutMs;
+      while (jobs.some((job) => ["awaiting_approval", "queued", "running"].includes(job.status)) && Date.now() < deadline) {
+        assertNotAborted(req);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      return { ok: true, jobs: jobs.map(publicSubagentJob) };
+    }
+    case "cancel_subagent": {
+      const job = requireOwnedSubagent(req, args?.id);
+      cancelSubagentJob(job);
+      await appendAuditLog(req, "subagent-cancel", { id: job.id, parentId: job.parentId });
+      return { ok: true, job: publicSubagentJob(job) };
+    }
     default:
       throw new Error(`Unknown tool: ${callName}`);
   }
@@ -6045,8 +7298,14 @@ function resolveAgentStepBudget(req) {
     inputError("agentMaxStepsOverride must be a positive integer");
   }
 
+  if (req?.internalAgentAuthorization?.depth === 1) {
+    if (requested > SUBAGENT_LIMITS.maxSteps) inputError(`subagent maxSteps exceeds limit (${SUBAGENT_LIMITS.maxSteps})`);
+    return { maxSteps: requested, override: requested > agentMaxSteps };
+  }
+
   const security = getEffectiveSecuritySettingsSync();
-  const overrideCode = security.agentMaxStepsOverrideCode;
+  const overrideCode = security.workspaceAgentStepOverrideCodes.get(getWorkspaceContext().code)
+    || security.agentMaxStepsOverrideCode;
 
   if (requested <= agentMaxSteps) {
     return { maxSteps: requested, override: false };
@@ -6067,7 +7326,7 @@ function resolveAgentStepBudget(req) {
       || ""
   ).trim();
 
-  if (!providedCode || providedCode !== overrideCode) {
+  if (!matchesUnlockCode(providedCode, overrideCode)) {
     inputError("invalid agent step override code");
   }
 
@@ -6095,6 +7354,8 @@ function emitJobProgress(req, type, payload = {}) {
 
 async function runOpenAiAgentWithTools(req, model, messages, maxSteps = agentMaxSteps) {
   const executedTools = [];
+  let usage = normalizeTokenUsage();
+  const availableTools = agentToolDefinitionsForRequest(req);
   const traceId = resolveRequestTraceId(req) || createTraceId();
   const latestUserText = [...messages]
     .reverse()
@@ -6104,7 +7365,7 @@ async function runOpenAiAgentWithTools(req, model, messages, maxSteps = agentMax
   const conversation = [
     {
       role: "system",
-      content: "You are a coding agent. If the user asks for file operations, web/API fetches, git operations, conversions, scheduling, or notifications, you must call the appropriate tool first and then summarize the real result. Never simulate tool calls or describe hypothetical actions as completed."
+      content: "You are a coding agent. If the user asks for file operations, web/API fetches, git operations, conversions, scheduling, or notifications, you must call the appropriate tool first and then summarize the real result. When spawn_subagent is available and work divides into independent components, delegate focused sibling tasks in parallel; give coding siblings non-overlapping file or directory scopes, wait for their results, and integrate the evidence. Never simulate tool calls or describe hypothetical actions as completed."
     },
     ...messages.map((item) => ({ role: item.role, content: item.content }))
   ];
@@ -6115,10 +7376,11 @@ async function runOpenAiAgentWithTools(req, model, messages, maxSteps = agentMax
     const completion = await client.chat.completions.create({
       model,
       messages: conversation,
-      tools: agentToolDefinitions,
+      tools: availableTools,
       tool_choice: "auto",
       ...(model.startsWith("gpt-5.6-") ? { reasoning_effort: "none" } : {})
     });
+    usage = addTokenUsage(usage, completion.usage);
 
     const assistant = completion.choices?.[0]?.message;
     if (!assistant) {
@@ -6203,7 +7465,7 @@ async function runOpenAiAgentWithTools(req, model, messages, maxSteps = agentMax
       continue;
     }
 
-    return { text: assistant.content || "", executedTools };
+    return { text: assistant.content || "", executedTools, usage };
   }
 
   try {
@@ -6215,14 +7477,15 @@ async function runOpenAiAgentWithTools(req, model, messages, maxSteps = agentMax
     const finalize = await client.chat.completions.create({
       model,
       messages: conversation,
-      tools: agentToolDefinitions,
+      tools: availableTools,
       tool_choice: "none",
       ...(model.startsWith("gpt-5.6-") ? { reasoning_effort: "none" } : {})
     });
+    usage = addTokenUsage(usage, finalize.usage);
     const finalAssistant = finalize.choices?.[0]?.message;
     const finalText = String(finalAssistant?.content || "").trim();
     if (finalText) {
-      return { text: finalText, executedTools };
+      return { text: finalText, executedTools, usage };
     }
   } catch {
     // Fall through to deterministic fallback message.
@@ -6233,100 +7496,153 @@ async function runOpenAiAgentWithTools(req, model, messages, maxSteps = agentMax
     text: count > 0
       ? `Agent step limit reached after executing ${count} tool call(s). Please ask me to continue from current state.`
       : "Reached agent step limit before producing a final answer.",
-    executedTools
+    executedTools,
+    usage
   };
+}
+
+async function createOpenAiCompatibleChatCompletion(provider, model, conversation, options = {}) {
+  const config = compatibleProviderConfigs[provider];
+  if (!config) {
+    throw new Error(`Provider '${provider}' is not OpenAI-compatible`);
+  }
+  const payload = {
+    model,
+    messages: conversation,
+    ...options
+  };
+  const abortSignal = options.abortSignal;
+  if (Object.prototype.hasOwnProperty.call(payload, "abortSignal")) {
+    delete payload.abortSignal;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "headers")) {
+    delete payload.headers;
+  }
+
+  return createCompatibleProviderCompletion(config.label, `${config.apiBaseUrl}/chat/completions`, config.apiKey, payload, abortSignal, {
+    headers: {
+      ...(config.headers || {}),
+      ...(options.headers || {})
+    }
+  });
 }
 
 async function createXaiChatCompletion(model, conversation, options = {}) {
-  const payload = {
-    model,
-    messages: conversation,
-    ...options
-  };
-  const abortSignal = options.abortSignal;
-  if (Object.prototype.hasOwnProperty.call(payload, "abortSignal")) {
-    delete payload.abortSignal;
-  }
+  return createOpenAiCompatibleChatCompletion("xai", model, conversation, options);
+}
 
-  const response = await fetch(`${xaiApiBaseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${xaiApiKey}`
-    },
-    signal: abortSignal,
-    body: JSON.stringify(payload)
-  });
-
-  const rawBody = await response.text();
-  const data = (() => {
-    try {
-      return JSON.parse(rawBody);
-    } catch {
-      return {};
+function providerRetryDelay(delayMs, abortSignal) {
+  return new Promise((resolve, reject) => {
+    if (abortSignal?.aborted) {
+      reject(abortSignal.reason || new Error("Provider request cancelled"));
+      return;
     }
-  })();
+    const onAbort = () => {
+      clearTimeout(timer);
+      abortSignal?.removeEventListener("abort", onAbort);
+      reject(abortSignal.reason || new Error("Provider request cancelled"));
+    };
+    const timer = setTimeout(() => {
+      abortSignal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
-  if (!response.ok) {
-    const details = data?.error?.message
-      || data?.message
-      || rawBody
-      || `HTTP ${response.status}`;
-    const error = new Error(`xAI request failed: ${details}`);
+async function createCompatibleProviderCompletion(providerLabel, url, apiKey, payload, abortSignal, options = {}) {
+  for (let attempt = 0; attempt <= providerMaxRetries; attempt += 1) {
+    const timeoutController = new AbortController();
+    const timeout = setTimeout(() => timeoutController.abort(new Error(`${providerLabel} request timed out`)), providerRequestTimeoutMs);
+    const onAbort = () => timeoutController.abort(abortSignal.reason || new Error("Provider request cancelled"));
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
+    let response;
+    let rawBody;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(options.authorization === false || !apiKey ? {} : { "Authorization": `Bearer ${apiKey}` }),
+          ...(options.headers || {})
+        },
+        signal: timeoutController.signal,
+        body: JSON.stringify(payload)
+      });
+      rawBody = await response.text();
+    } catch (error) {
+      if (abortSignal?.aborted || attempt >= providerMaxRetries) throw error;
+      const delayMs = providerRetryDelayMs({ attempt, baseDelayMs: providerRetryBaseMs, maxDelayMs: providerRetryMaxMs });
+      await providerRetryDelay(delayMs, abortSignal);
+      continue;
+    } finally {
+      clearTimeout(timeout);
+      abortSignal?.removeEventListener("abort", onAbort);
+    }
+
+    const data = (() => {
+      try {
+        return JSON.parse(rawBody);
+      } catch {
+        return {};
+      }
+    })();
+
+    if (response.ok) return data;
+    if (attempt < providerMaxRetries && isRetryableProviderStatus(response.status)) {
+      const delayMs = providerRetryDelayMs({
+        attempt,
+        retryAfter: response.headers.get("retry-after"),
+        baseDelayMs: providerRetryBaseMs,
+        maxDelayMs: providerRetryMaxMs
+      });
+      await providerRetryDelay(delayMs, abortSignal);
+      continue;
+    }
+
+    const details = data?.error?.message || data?.message || rawBody || `HTTP ${response.status}`;
+    const error = new Error(`${providerLabel} request failed: ${details}`);
     error.status = response.status;
     throw error;
   }
-
-  return data;
+  throw new Error(`${providerLabel} request failed after retries`);
 }
 
 async function createGoogleChatCompletion(model, conversation, options = {}) {
-  const payload = {
+  return createOpenAiCompatibleChatCompletion("google", model, conversation, options);
+}
+
+async function createAnthropicMessage(model, conversation, options = {}) {
+  const systemMessages = conversation
+    .filter((item) => item.role === "system")
+    .map((item) => item.content)
+    .filter(Boolean)
+    .join("\n\n");
+  const messages = conversation
+    .filter((item) => item.role === "user" || item.role === "assistant")
+    .map((item) => ({ role: item.role, content: item.content }));
+  return createCompatibleProviderCompletion("Anthropic Claude", `${anthropicApiBaseUrl}/messages`, anthropicApiKey, {
     model,
-    messages: conversation,
-    ...options
-  };
-  const abortSignal = options.abortSignal;
-  if (Object.prototype.hasOwnProperty.call(payload, "abortSignal")) {
-    delete payload.abortSignal;
-  }
-
-  const response = await fetch(`${googleApiBaseUrl}/chat/completions`, {
-    method: "POST",
+    max_tokens: anthropicMaxTokens,
+    ...(systemMessages ? { system: systemMessages } : {}),
+    messages
+  }, options.abortSignal, {
+    authorization: false,
     headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${googleApiKey}`
-    },
-    signal: abortSignal,
-    body: JSON.stringify(payload)
-  });
-
-  const rawBody = await response.text();
-  const data = (() => {
-    try {
-      return JSON.parse(rawBody);
-    } catch {
-      return {};
+      "x-api-key": anthropicApiKey,
+      "anthropic-version": anthropicVersion
     }
-  })();
-
-  if (!response.ok) {
-    const details = data?.error?.message
-      || data?.message
-      || rawBody
-      || `HTTP ${response.status}`;
-    const error = new Error(`Google AI request failed: ${details}`);
-    error.status = response.status;
-    throw error;
-  }
-
-  return data;
+  });
 }
 
 async function runCompatibleAgentWithTools(req, provider, model, messages, maxSteps = agentMaxSteps, reasoningEffort = null) {
   const executedTools = [];
+  let usage = normalizeTokenUsage();
+  const availableTools = agentToolDefinitionsForRequest(req);
   const traceId = resolveRequestTraceId(req) || createTraceId();
-  const createCompletion = provider === "google" ? createGoogleChatCompletion : createXaiChatCompletion;
+  const createCompletion = provider === "google"
+    ? createGoogleChatCompletion
+    : provider === "xai" ? createXaiChatCompletion : (completionModel, providerConversation, options) => createOpenAiCompatibleChatCompletion(provider, completionModel, providerConversation, options);
   const latestUserText = [...messages]
     .reverse()
     .find((item) => item.role === "user")?.content || "";
@@ -6335,20 +7651,23 @@ async function runCompatibleAgentWithTools(req, provider, model, messages, maxSt
   const conversation = [
     {
       role: "system",
-      content: "You are a coding agent. If the user asks for file operations, web/API fetches, git operations, conversions, scheduling, or notifications, you must call the appropriate tool first and then summarize the real result. Never simulate tool calls or describe hypothetical actions as completed."
+      content: "You are a coding agent. If the user asks for file operations, web/API fetches, git operations, conversions, scheduling, or notifications, you must call the appropriate tool first and then summarize the real result. When spawn_subagent is available and work divides into independent components, delegate focused sibling tasks in parallel; give coding siblings non-overlapping file or directory scopes, wait for their results, and integrate the evidence. Never simulate tool calls or describe hypothetical actions as completed."
     },
     ...messages.map((item) => ({ role: item.role, content: item.content }))
   ];
+  const protectedConversationCount = conversation.length;
 
   for (let step = 0; step < maxSteps; step += 1) {
     assertNotAborted(req);
     emitJobProgress(req, "agent-step", { step: step + 1, maxSteps, provider, traceId });
-    const completion = await createCompletion(model, conversation, {
-      tools: agentToolDefinitions,
-      tool_choice: "auto",
+    const providerConversation = buildBoundedAgentConversation(conversation, protectedConversationCount, compatibleAgentContextMaxChars);
+    const completion = await createCompletion(model, providerConversation, {
+      tools: availableTools,
+      ...(provider === "deepseek" ? {} : { tool_choice: "auto" }),
       abortSignal: req?.abortSignal,
-      ...(provider === "xai" && reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
+      ...(compatibleProviderConfigs[provider]?.supportsReasoningEffort && reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
     });
+    usage = addTokenUsage(usage, completion?.usage);
 
     const assistant = completion?.choices?.[0]?.message;
     if (!assistant) {
@@ -6359,6 +7678,9 @@ async function runCompatibleAgentWithTools(req, provider, model, messages, maxSt
       conversation.push({
         role: "assistant",
         content: assistant.content || "",
+        ...(provider === "deepseek" && Object.prototype.hasOwnProperty.call(assistant, "reasoning_content")
+          ? { reasoning_content: assistant.reasoning_content }
+          : {}),
         tool_calls: assistant.tool_calls
       });
 
@@ -6417,7 +7739,7 @@ async function runCompatibleAgentWithTools(req, provider, model, messages, maxSt
         conversation.push({
           role: "tool",
           tool_call_id: toolCall.id,
-          content: JSON.stringify(output)
+          content: serializeBoundedToolOutput(output, compatibleAgentToolOutputMaxChars)
         });
       }
 
@@ -6433,7 +7755,7 @@ async function runCompatibleAgentWithTools(req, provider, model, messages, maxSt
       continue;
     }
 
-    return { text: assistant.content || "", executedTools };
+    return { text: assistant.content || "", executedTools, usage };
   }
 
   try {
@@ -6443,15 +7765,15 @@ async function runCompatibleAgentWithTools(req, provider, model, messages, maxSt
     });
 
     const finalize = await createCompletion(model, conversation, {
-      tools: agentToolDefinitions,
-      tool_choice: "none",
+      ...(provider === "deepseek" ? {} : { tools: availableTools, tool_choice: "none" }),
       abortSignal: req?.abortSignal,
-      ...(provider === "xai" && reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
+      ...(compatibleProviderConfigs[provider]?.supportsReasoningEffort && reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
     });
+    usage = addTokenUsage(usage, finalize?.usage);
     const finalAssistant = finalize?.choices?.[0]?.message;
     const finalText = String(finalAssistant?.content || "").trim();
     if (finalText) {
-      return { text: finalText, executedTools };
+      return { text: finalText, executedTools, usage };
     }
   } catch {
     // Fall through to deterministic fallback message.
@@ -6462,7 +7784,8 @@ async function runCompatibleAgentWithTools(req, provider, model, messages, maxSt
     text: count > 0
       ? `Agent step limit reached after executing ${count} tool call(s). Please ask me to continue from current state.`
       : "Reached agent step limit before producing a final answer.",
-    executedTools
+    executedTools,
+    usage
   };
 }
 
@@ -6471,7 +7794,8 @@ app.use(helmet({
     directives: {
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'", "https://esm.sh"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:"],
       connectSrc: ["'self'", appBaseUrl, "https://esm.sh"],
       objectSrc: ["'none'"],
@@ -6481,6 +7805,7 @@ app.use(helmet({
   }
 }));
 
+app.use("/api/chat/archive", express.json({ limit: "25mb" }));
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false, limit: "16kb" }));
 
@@ -6506,6 +7831,8 @@ app.get("/share/:token", publicFileShareLimiter, async (req, res) => {
   try {
     const found = await findActiveFileShare(req.params.token);
     if (!found) return res.status(404).send("Share not found or expired.");
+    recordShareActivity(found.share, "view");
+    await writeFileShareDb(found.db);
     const visibleShare = isFileShareUnlocked(req, found.share)
       ? { ...found.share, passwordHash: "" }
       : found.share;
@@ -6557,6 +7884,7 @@ app.get("/share/:token/content", publicFileShareLimiter, async (req, res) => {
     }
     found.share.accessCount = Number(found.share.accessCount || 0) + 1;
     found.share.lastAccessedAt = new Date().toISOString();
+    if (req.method === "GET" && !req.headers.range) recordShareActivity(found.share, "download");
     await writeFileShareDb(found.db);
     return await streamFileShare(req, res, found.share);
   } catch (error) {
@@ -6573,9 +7901,119 @@ app.get("/share-media.js", publicFileShareLimiter, (_req, res) => {
 const authEnabled = String(process.env.ENABLE_BASIC_AUTH).toLowerCase() === "true";
 const authUser = process.env.BASIC_AUTH_USER || "";
 const authPass = process.env.BASIC_AUTH_PASS || "";
+const basicAuthSessionSecret = String(process.env.BASIC_AUTH_SESSION_SECRET || createHash("sha256").update(`${authUser}\0${authPass}\0remote-ai-access-session`).digest("hex"));
+const basicAuthSessionTtlMs = Math.max(60_000, Math.min(7 * 24 * 60 * 60 * 1000, Number(process.env.BASIC_AUTH_SESSION_TTL_MS || 12 * 60 * 60 * 1000)));
+const basicAuthLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+function basicAuthCredentialsMatch(username, password) {
+  const providedUser = Buffer.from(String(username || ""));
+  const expectedUser = Buffer.from(authUser);
+  const providedPass = Buffer.from(String(password || ""));
+  const expectedPass = Buffer.from(authPass);
+  const userMatches = providedUser.length === expectedUser.length && timingSafeEqual(providedUser, expectedUser);
+  const passMatches = providedPass.length === expectedPass.length && timingSafeEqual(providedPass, expectedPass);
+  return userMatches && passMatches;
+}
+
+function hasBasicAuthSession(req) {
+  const token = parseCookieHeader(req.headers.cookie || "")[BASIC_AUTH_SESSION_COOKIE];
+  return verifyBasicAuthSession(token, { username: authUser, secret: basicAuthSessionSecret });
+}
+
+function chatArchiveSubject(req) {
+  if (authEnabled && authUser) return `basic-auth:${authUser}`;
+  if (hasValidApiKey(req)) return "api-key";
+  return "local";
+}
+
+function chatArchiveProfile(req) {
+  const raw = req.method === "GET" ? req.query?.profile : req.body?.profile;
+  const profile = String(raw || "default").trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._ -]{0,63}$/.test(profile)) {
+    throw new Error("archive profile must start with a letter or number and contain only letters, numbers, spaces, dots, underscores, or hyphens");
+  }
+  return profile;
+}
+
+function chatArchiveSubjectForProfile(req, profile) {
+  const subject = chatArchiveSubject(req);
+  return profile === "default" ? subject : `${subject}:profile:${profile}`;
+}
+
+function designWorkspaceSlug(value) {
+  const slug = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  if (!slug) throw new Error("workspace name is required");
+  return slug;
+}
+
+function designWorkspaceText(value, field, maxChars = 200_000) {
+  const text = String(value || "").trim();
+  if (text.length > maxChars) throw new Error(`${field} exceeds ${maxChars} characters`);
+  return text;
+}
+
+function basicAuthCookieOptions(req) {
+  return {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: Boolean(req.secure || configuredAppBaseUrl.startsWith("https://")),
+    path: "/",
+    maxAge: basicAuthSessionTtlMs
+  };
+}
+
+function escapeBasicAuthHtml(value) {
+  return String(value).replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function renderBasicAuthPage({ nextPath = "/", error = "", authenticated = false } = {}) {
+  const safeNext = normalizeBasicAuthReturnPath(nextPath);
+  const escapedNext = escapeBasicAuthHtml(safeNext);
+  const errorMarkup = error ? `<p class="login-error" role="alert">${escapeBasicAuthHtml(error)}</p>` : "";
+  const formMarkup = authenticated
+    ? `<p class="login-status">Signed in with the browser session.</p><a class="login-button" href="${escapedNext}">Continue</a><form method="post" action="/basic-auth/logout"><button class="login-link" type="submit">Sign out</button></form>`
+    : `${errorMarkup}<form method="post" action="/basic-auth"><input type="hidden" name="next" value="${escapedNext}"><label>Username<input name="username" type="text" autocomplete="username" required autofocus></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button class="login-button" type="submit">Sign in</button></form>`;
+  return `<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in | Remote AI Access</title><style>:root{color-scheme:light dark;--bg:#eef3ed;--panel:#fff;--ink:#14231c;--muted:#5d6f65;--line:#c9d5cd;--accent:#16734a;--danger:#ad3329}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:linear-gradient(145deg,#e7efe9,#f7f4eb);color:var(--ink);font-family:"Segoe UI",sans-serif}.login-shell{width:min(100%,420px);border:1px solid var(--line);border-top:5px solid var(--accent);background:var(--panel);padding:28px;box-shadow:0 18px 50px rgba(20,35,28,.13)}h1{margin:0 0 8px;font-size:1.8rem;letter-spacing:0}p{color:var(--muted);line-height:1.5}form{display:grid;gap:16px;margin-top:22px}label{display:grid;gap:6px;font-weight:650}input{width:100%;min-height:44px;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:9px 11px;font:inherit}.login-button{display:inline-flex;align-items:center;justify-content:center;min-height:44px;border:0;background:var(--accent);color:#fff;padding:10px 18px;font:700 1rem/1 inherit;text-decoration:none;cursor:pointer}.login-link{border:0;background:none;color:var(--muted);text-decoration:underline;cursor:pointer;font:inherit}.login-error{color:var(--danger);font-weight:650}.login-status{color:var(--accent);font-weight:650}@media(prefers-color-scheme:dark){:root{--bg:#101813;--panel:#17231c;--ink:#edf5f0;--muted:#a9b9af;--line:#405047;--accent:#51b984}body{background:linear-gradient(145deg,#101813,#20231d)}}</style></head><body><main class="login-shell"><h1>Remote AI Access</h1><p>Sign in with the same credentials used by HTTP Basic Auth.</p>${formMarkup}</main></body></html>`;
+}
+
+app.get("/basic-auth", (req, res) => {
+  if (!authEnabled) return res.redirect(303, "/");
+  const nextPath = normalizeBasicAuthReturnPath(req.query?.next);
+  return res.type("html").send(renderBasicAuthPage({ nextPath, authenticated: hasBasicAuthSession(req) }));
+});
+
+app.post("/basic-auth", basicAuthLoginLimiter, (req, res) => {
+  if (!authEnabled) return res.redirect(303, "/");
+  const nextPath = normalizeBasicAuthReturnPath(req.body?.next);
+  if (!basicAuthCredentialsMatch(req.body?.username, req.body?.password)) {
+    return res.status(401).type("html").send(renderBasicAuthPage({ nextPath, error: "Invalid username or password." }));
+  }
+  const token = createBasicAuthSession({ username: authUser, secret: basicAuthSessionSecret, ttlMs: basicAuthSessionTtlMs });
+  res.cookie(BASIC_AUTH_SESSION_COOKIE, token, basicAuthCookieOptions(req));
+  return res.redirect(303, nextPath);
+});
+
+app.post("/basic-auth/logout", (req, res) => {
+  res.clearCookie(BASIC_AUTH_SESSION_COOKIE, { ...basicAuthCookieOptions(req), maxAge: undefined });
+  return res.redirect(303, "/basic-auth");
+});
 
 if (authEnabled) {
   app.use((req, res, next) => {
+    if (hasBasicAuthSession(req)) {
+      req.basicAuthAuthenticated = true;
+      return next();
+    }
     const header = req.headers.authorization;
     if (!header?.startsWith("Basic ")) {
       res.set("WWW-Authenticate", "Basic realm=Remote AI Access");
@@ -6588,10 +8026,11 @@ if (authEnabled) {
     const user = sepIndex >= 0 ? decoded.slice(0, sepIndex) : "";
     const pass = sepIndex >= 0 ? decoded.slice(sepIndex + 1) : "";
 
-    if (user !== authUser || pass !== authPass) {
+    if (!basicAuthCredentialsMatch(user, pass)) {
       return res.status(401).send("Invalid credentials.");
     }
 
+    req.basicAuthAuthenticated = true;
     next();
   });
 }
@@ -6710,6 +8149,69 @@ app.use("/api/admin", (req, res, next) => {
   next();
 });
 
+app.get("/api/chat/archive", async (req, res) => {
+  if (!authEnabled) {
+    return res.status(503).json({ error: "Server chat archives require Basic Auth to be enabled." });
+  }
+  try {
+    const profile = chatArchiveProfile(req);
+    const stored = await readStoredArchive(chatArchiveRoot, chatArchiveSubjectForProfile(req, profile));
+    if (!stored) return res.json({ ok: true, format: CHAT_ARCHIVE_FORMAT, profile, exists: false, payload: null });
+    return res.json({ ok: true, format: CHAT_ARCHIVE_FORMAT, profile, exists: true, payload: stored.payload });
+  } catch (error) {
+    console.error("Failed to read chat archive:", error?.message || error);
+    return res.status(500).json({ error: "Failed to read server chat archive." });
+  }
+});
+
+app.put("/api/chat/archive", async (req, res) => {
+  if (!authEnabled) {
+    return res.status(503).json({ error: "Server chat archives require Basic Auth to be enabled." });
+  }
+  try {
+    const profile = chatArchiveProfile(req);
+    const payload = normalizeStoredArchivePayload(req.body?.payload);
+    const serialized = JSON.stringify(payload);
+    if (Buffer.byteLength(serialized, "utf8") > chatArchiveMaxBytes) {
+      return res.status(413).json({ error: `archive exceeds ${chatArchiveMaxBytes} byte limit` });
+    }
+    await writeStoredArchive(chatArchiveRoot, chatArchiveSubjectForProfile(req, profile), payload);
+    return res.json({ ok: true, format: CHAT_ARCHIVE_FORMAT, profile, encrypted: payload.encrypted, bytes: Buffer.byteLength(serialized, "utf8") });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Invalid chat archive") });
+  }
+});
+
+app.post("/api/design/workspace", async (req, res) => {
+  try {
+    const slug = designWorkspaceSlug(req.body?.name);
+    const rootRel = path.join("design-workspaces", slug);
+    const project = designWorkspaceText(req.body?.project, "project idea");
+    const context = designWorkspaceText(req.body?.context, "project context");
+    const artifact = designWorkspaceText(req.body?.artifact, "design artifact");
+    const provider = designWorkspaceText(req.body?.provider, "provider", 120);
+    const model = designWorkspaceText(req.body?.model, "model", 180);
+    const stage = designWorkspaceText(req.body?.stage, "stage", 80);
+    const files = new Map([
+      ["README.md", `# ${slug}\n\nCreated from the Remote AI Access Design Lab.\n\n- Provider: ${provider || "(not selected)"}\n- Model: ${model || "(not selected)"}\n- Last stage: ${stage || "(unknown)"}\n\nSee the accompanying Markdown files for the full design inputs and output.\n`],
+      ["feature-idea.md", `${project}\n`],
+      ["project-context.md", `${context || "(No additional context supplied.)"}\n`],
+      ["design-artifact.md", `${artifact || "(No design artifact supplied.)"}\n`],
+      ["design-manifest.json", `${JSON.stringify({ format: "remote-ai-design-workspace-v1", createdAt: new Date().toISOString(), provider, model, stage, source: "design-lab" }, null, 2)}\n`]
+    ]);
+    for (const [name, content] of files) {
+      const { absolute } = resolveSandboxPath(path.join(rootRel, name));
+      await fsp.mkdir(path.dirname(absolute), { recursive: true });
+      await fsp.writeFile(absolute, content, { encoding: "utf8", mode: 0o600 });
+    }
+    await commitSandboxSnapshot(`create design workspace ${slug}`, [...files.keys()].map((name) => path.join(rootRel, name)));
+    await appendAuditLog(req, "design-workspace-create", { path: rootRel, fileCount: files.size });
+    return res.status(201).json({ ok: true, workspace: slug, path: rootRel, files: [...files.keys()] });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to create design workspace") });
+  }
+});
+
 app.post("/api/files/browser-session", (req, res) => {
   const token = randomBytes(32).toString("base64url");
   const expiresAt = Date.now() + browserFileSessionTtlMs;
@@ -6740,6 +8242,7 @@ app.get("/api/admin/security", async (_req, res) => {
       apiKeyExemptPathPrefixes: normalizePathPrefixList(settings.apiKeyExemptPathPrefixes),
       apiKeyRequireHeaderOnly: settings.apiKeyRequireHeaderOnly !== false,
       agentMaxStepsOverrideCode: String(settings.agentMaxStepsOverrideCode || "").trim(),
+      workspaceAgentStepOverrideCodesRaw: String(settings.workspaceAgentStepOverrideCodesRaw || ""),
       workspaceUploadBypassCodesRaw: String(settings.workspaceUploadBypassCodesRaw || ""),
       updatedAt: settings.updatedAt || null,
       settingsDbPath: adminSettingsDbPath
@@ -6760,6 +8263,7 @@ app.put("/api/admin/security", async (req, res) => {
       apiKeyExemptPathPrefixes: payload.apiKeyExemptPathPrefixes,
       apiKeyRequireHeaderOnly: payload.apiKeyRequireHeaderOnly,
       agentMaxStepsOverrideCode: payload.agentMaxStepsOverrideCode,
+      workspaceAgentStepOverrideCodesRaw: payload.workspaceAgentStepOverrideCodesRaw,
       workspaceUploadBypassCodesRaw: payload.workspaceUploadBypassCodesRaw
     };
 
@@ -6774,6 +8278,7 @@ app.put("/api/admin/security", async (req, res) => {
         apiKeyExemptPathPrefixes: normalizePathPrefixList(saved.apiKeyExemptPathPrefixes),
         apiKeyRequireHeaderOnly: saved.apiKeyRequireHeaderOnly !== false,
         agentMaxStepsOverrideCode: String(saved.agentMaxStepsOverrideCode || "").trim(),
+        workspaceAgentStepOverrideCodesRaw: String(saved.workspaceAgentStepOverrideCodesRaw || ""),
         workspaceUploadBypassCodesRaw: String(saved.workspaceUploadBypassCodesRaw || ""),
         updatedAt: saved.updatedAt || null,
         settingsDbPath: adminSettingsDbPath
@@ -6781,6 +8286,70 @@ app.put("/api/admin/security", async (req, res) => {
     });
   } catch (error) {
     return res.status(400).json({ error: String(error?.message || "Failed to save admin security settings") });
+  }
+});
+
+app.get("/api/admin/deployment-approvals", async (req, res) => {
+  try {
+    const workspaceCode = getWorkspaceContext().code;
+    const db = await readDeploymentApprovalDb();
+    const approvals = db.approvals
+      .filter((approval) => approval.workspaceCode === workspaceCode)
+      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+      .slice(0, 100)
+      .map(publicDeploymentApproval);
+    return res.json({ ok: true, workspaceCode, approvals });
+  } catch (error) {
+    return res.status(500).json({ error: String(error?.message || "Failed to read deployment approvals") });
+  }
+});
+
+app.post("/api/admin/deployment-approvals", async (req, res) => {
+  try {
+    const preview = await previewWorkspaceDeployment({ action: "preview", manifest: req.body?.manifest });
+    const created = createDeploymentApproval({
+      workspaceCode: getWorkspaceContext().code,
+      manifest: preview.manifest,
+      action: req.body?.action || "activate",
+      ttlMs: req.body?.ttlMs
+    });
+    await mutateDeploymentApprovalDb((db) => {
+      db.approvals = [created.record, ...db.approvals].slice(0, 1000);
+    });
+    await appendAuditLog(req, "deployment-approval-create", {
+      id: created.record.id,
+      application: created.record.application,
+      hostname: created.record.hostname,
+      manifestDigest: created.record.manifestDigest,
+      expiresAt: created.record.expiresAt
+    });
+    return res.status(201).json({
+      ok: true,
+      approval: publicDeploymentApproval(created.record),
+      token: created.token,
+      warning: "This one-time token is shown only in this response."
+    });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to create deployment approval") });
+  }
+});
+
+app.delete("/api/admin/deployment-approvals/:approvalId", async (req, res) => {
+  try {
+    const revoked = await mutateDeploymentApprovalDb((db) => {
+      const approval = findDeploymentApproval(db, req.params.approvalId);
+      if (!approval) throw Object.assign(new Error("deployment approval not found"), { status: 404 });
+      if (approval.workspaceCode !== getWorkspaceContext().code) {
+        throw Object.assign(new Error("deployment approval belongs to a different workspace"), { status: 403 });
+      }
+      const result = revokeDeploymentApproval(approval);
+      db.approvals = db.approvals.map((item) => item.id === result.id ? result : item);
+      return result;
+    });
+    await appendAuditLog(req, "deployment-approval-revoke", { id: revoked.id, application: revoked.application, hostname: revoked.hostname });
+    return res.json({ ok: true, approval: publicDeploymentApproval(revoked) });
+  } catch (error) {
+    return res.status(error?.status || 400).json({ error: String(error?.message || "Failed to revoke deployment approval") });
   }
 });
 
@@ -7054,7 +8623,7 @@ app.all(/^\/git\/([a-z0-9][a-z0-9_-]{1,47})\.git(?:\/(.*))?$/, (req, res, next) 
   handleGitHttp(req, res, next);
 });
 
-async function generateChatResponse(req) {
+async function generateChatResponseCore(req) {
   const traceId = resolveRequestTraceId(req) || createTraceId();
   req.traceId = traceId;
   assertNotAborted(req);
@@ -7063,7 +8632,7 @@ async function generateChatResponse(req) {
   if (agentMode) {
     assertAgentToolAuthorized(req);
   }
-  if (provider !== "openai" && provider !== "copilot" && provider !== "xai" && provider !== "google") {
+  if (provider !== "openai" && provider !== "copilot" && !externalProviderConfigs[provider]) {
     const error = new Error(`provider '${provider}' is not configured on this server yet`);
     error.status = 400;
     throw error;
@@ -7105,7 +8674,8 @@ async function generateChatResponse(req) {
         agentMode: true,
         agentMaxStepsUsed: stepBudget.maxSteps,
         agentMaxStepsOverrideUsed: stepBudget.override,
-        executedTools: result.executedTools
+        executedTools: result.executedTools,
+        usage: result.usage
       };
     }
 
@@ -7139,7 +8709,7 @@ async function generateChatResponse(req) {
 
     const response = await client.responses.create(responseRequest);
     const text = response.output_text || "";
-    return { reply: text, model, provider: "openai", traceId, reasoningEffort: reasoningEffort || null, contextCompaction: compaction };
+    return { reply: text, model, provider: "openai", traceId, reasoningEffort: reasoningEffort || null, contextCompaction: compaction, usage: response.usage };
   }
 
   if (provider === "copilot") {
@@ -7149,12 +8719,7 @@ async function generateChatResponse(req) {
       throw error;
     }
 
-    const requestedModel = String(req.body?.model || "").trim();
-    if (!isValidCopilotModelName(requestedModel)) {
-      const error = new Error("copilot model must be a valid string, like openai/gpt-4.1");
-      error.status = 400;
-      throw error;
-    }
+    const model = resolveCopilotModel(req.body?.model);
 
     const copilotResponse = await fetch(`${copilotApiBaseUrl}/chat/completions`, {
       method: "POST",
@@ -7166,7 +8731,7 @@ async function generateChatResponse(req) {
       },
       signal: req?.abortSignal,
       body: JSON.stringify({
-        model: requestedModel,
+        model,
         messages
       })
     });
@@ -7196,49 +8761,101 @@ async function generateChatResponse(req) {
 
     return {
       reply: typeof text === "string" ? text : JSON.stringify(text),
-      model: requestedModel,
+      model,
       provider: "copilot",
       traceId,
-      contextCompaction: compaction
+      contextCompaction: compaction,
+      usage: copilotData?.usage
     };
   }
 
-  if (provider === "google") {
-    if (!googleApiKey) {
-      const error = new Error("google provider is not enabled: missing GOOGLE_API_KEY");
+  if (provider === "anthropic") {
+    if (!anthropicApiKey) {
+      const error = new Error("anthropic provider is not enabled: missing ANTHROPIC_API_KEY");
       error.status = 400;
       throw error;
     }
 
-    let model = resolveGoogleModel(req.body?.model);
+    if (agentMode) {
+      const error = new Error("anthropic provider does not support Agent Tools mode yet");
+      error.status = 400;
+      throw error;
+    }
+
+    const model = resolveExternalProviderModel(provider, req.body?.model);
+    const anthropicData = await createAnthropicMessage(model, messages, { abortSignal: req?.abortSignal });
+    const text = Array.isArray(anthropicData?.content)
+      ? anthropicData.content
+        .filter((item) => item?.type === "text" && typeof item.text === "string")
+        .map((item) => item.text)
+        .join("")
+      : "";
+
+    return {
+      reply: text || JSON.stringify(anthropicData?.content || ""),
+      model,
+      provider: "anthropic",
+      traceId,
+      contextCompaction: compaction,
+      usage: anthropicData?.usage
+    };
+  }
+
+  if (compatibleProviderConfigs[provider]) {
+    const providerConfig = compatibleProviderConfigs[provider];
+    if (!providerConfig.apiKey) {
+      const error = new Error(`${provider} provider is not enabled: missing ${provider.toUpperCase()}_API_KEY`);
+      error.status = 400;
+      throw error;
+    }
+
+    let model = resolveExternalProviderModel(provider, req.body?.model);
+    const reasoningEffort = providerConfig.supportsReasoningEffort
+      ? normalizeReasoningEffort(req.body?.reasoningEffort || req.body?.reasoning_effort)
+      : null;
+    if (providerConfig.supportsReasoningEffort && (req.body?.reasoningEffort || req.body?.reasoning_effort) && !reasoningEffort) {
+      const error = new Error("reasoningEffort must be one of: none, minimal, low, medium, high, xhigh, max");
+      error.status = 400;
+      throw error;
+    }
     const stepBudget = agentMode ? resolveAgentStepBudget(req) : { maxSteps: agentMaxSteps, override: false };
     if (agentMode) {
-      const result = await runCompatibleAgentWithTools(req, "google", model, messages, stepBudget.maxSteps);
+      if (!supportsCompatibleAgentModel(provider, model)) {
+        const error = new Error(`${provider} model '${model}' is not enabled for Agent Tools mode`);
+        error.status = 400;
+        throw error;
+      }
+      const result = await runCompatibleAgentWithTools(req, provider, model, messages, stepBudget.maxSteps, reasoningEffort);
       return {
         reply: result.text,
         model,
-        provider: "google",
+        provider,
         traceId,
         contextCompaction: compaction,
         agentMode: true,
         agentMaxStepsUsed: stepBudget.maxSteps,
         agentMaxStepsOverrideUsed: stepBudget.override,
-        executedTools: result.executedTools
+        reasoningEffort: reasoningEffort || null,
+        executedTools: result.executedTools,
+        usage: result.usage
       };
     }
 
-    let googleData;
+    const body = { model, messages };
+    if (reasoningEffort) {
+      body.reasoning_effort = reasoningEffort;
+    }
+    let data;
     try {
-      googleData = await createGoogleChatCompletion(model, messages, {
-        model,
-        messages,
+      data = await createOpenAiCompatibleChatCompletion(provider, model, messages, {
+        ...body,
         abortSignal: req?.abortSignal
       });
     } catch (error) {
       // Some Google models remain listed but are unavailable for specific accounts.
-      if (Number(error?.status || 0) === 404 && model !== googleDefaultModel) {
-        model = googleDefaultModel;
-        googleData = await createGoogleChatCompletion(model, messages, {
+      if (provider === "google" && Number(error?.status || 0) === 404 && model !== providerConfig.defaultModel) {
+        model = providerConfig.defaultModel;
+        data = await createOpenAiCompatibleChatCompletion(provider, model, messages, {
           model,
           messages,
           abortSignal: req?.abortSignal
@@ -7247,73 +8864,37 @@ async function generateChatResponse(req) {
         throw error;
       }
     }
-    const text = Array.isArray(googleData?.choices)
-      ? (googleData.choices[0]?.message?.content || "")
+    const text = Array.isArray(data?.choices)
+      ? (data.choices[0]?.message?.content || "")
       : "";
 
     return {
       reply: typeof text === "string" ? text : JSON.stringify(text),
       model,
-      provider: "google",
+      provider,
       traceId,
-      contextCompaction: compaction
-    };
-  }
-
-  if (!xaiApiKey) {
-    const error = new Error("xai provider is not enabled: missing XAI_API_KEY");
-    error.status = 400;
-    throw error;
-  }
-
-  const model = resolveXaiModel(req.body?.model);
-  const reasoningEffort = normalizeReasoningEffort(req.body?.reasoningEffort || req.body?.reasoning_effort);
-  if ((req.body?.reasoningEffort || req.body?.reasoning_effort) && !reasoningEffort) {
-    const error = new Error("reasoningEffort must be one of: none, minimal, low, medium, high, xhigh, max");
-    error.status = 400;
-    throw error;
-  }
-
-  const stepBudget = agentMode ? resolveAgentStepBudget(req) : { maxSteps: agentMaxSteps, override: false };
-  if (agentMode) {
-    const result = await runCompatibleAgentWithTools(req, "xai", model, messages, stepBudget.maxSteps, reasoningEffort);
-    return {
-      reply: result.text,
-      model,
-      provider: "xai",
-      traceId,
-      contextCompaction: compaction,
-      agentMode: true,
-      agentMaxStepsUsed: stepBudget.maxSteps,
-      agentMaxStepsOverrideUsed: stepBudget.override,
       reasoningEffort: reasoningEffort || null,
-      executedTools: result.executedTools
+      contextCompaction: compaction,
+      usage: data?.usage
     };
   }
 
-  const xaiBody = {
-    model,
-    messages
-  };
-  if (reasoningEffort) {
-    xaiBody.reasoning_effort = reasoningEffort;
-  }
-  const xaiData = await createXaiChatCompletion(model, messages, {
-    ...xaiBody,
-    abortSignal: req?.abortSignal
-  });
-  const text = Array.isArray(xaiData?.choices)
-    ? (xaiData.choices[0]?.message?.content || "")
-    : "";
+  const error = new Error(`provider '${provider}' is not configured on this server yet`);
+  error.status = 400;
+  throw error;
+}
 
-  return {
-    reply: typeof text === "string" ? text : JSON.stringify(text),
-    model,
-    provider: "xai",
-    traceId,
-    reasoningEffort: reasoningEffort || null,
-    contextCompaction: compaction
-  };
+async function generateChatResponse(req) {
+  await enforceUsageHardLimits();
+  const startedAt = Date.now();
+  try {
+    const result = await generateChatResponseCore(req);
+    await recordProviderUsage(req, result, Date.now() - startedAt, true);
+    return result;
+  } catch (error) {
+    await recordProviderUsage(req, { provider: req.body?.provider, model: req.body?.model }, Date.now() - startedAt, false, error?.message);
+    throw error;
+  }
 }
 
 app.post("/api/chat", async (req, res) => {
@@ -7332,66 +8913,258 @@ app.post("/api/chat", async (req, res) => {
 });
 
 app.post("/api/chat/jobs", async (req, res) => {
-  const provider = String(req.body?.provider || defaultProvider).trim().toLowerCase();
-  const agentMode = Boolean(req.body?.agentMode);
-  const job = createChatJob(req, provider, agentMode);
-
-  const context = getWorkspaceContext();
-  const abortController = new AbortController();
-  const reqClone = {
-    body: JSON.parse(JSON.stringify(req.body || {})),
-    headers: { ...(req.headers || {}) },
-    ip: req.ip,
-    workspace: req.workspace || null,
-    traceId: job.traceId,
-    chatJobId: job.id,
-    abortSignal: abortController.signal,
-    onJobEvent: (type, payload) => {
-      const current = chatJobStore.get(job.id);
-      if (current) {
-        recordChatJobEvent(current, type, payload);
-      }
-    }
-  };
-
-  queueMicrotask(() => {
-    workspaceContextStore.run(context, async () => {
-      const current = chatJobStore.get(job.id);
-      if (!current) {
-        return;
-      }
-      current.abortController = abortController;
-      if (current.cancelRequested || current.status === "cancelled") {
-        return;
-      }
-      setChatJobStatus(current, "running", { eventPayload: { provider, traceId: current.traceId } });
-      try {
-        const result = await generateChatResponse(reqClone);
-        result.contextMutations = Array.isArray(reqClone.agentContextMutations) ? reqClone.agentContextMutations : [];
-        if (current.status !== "cancelled") {
-          setChatJobStatus(current, "completed", { result, eventPayload: { traceId: current.traceId } });
-        }
-      } catch (error) {
-        if (current.status !== "cancelled") {
-          setChatJobStatus(current, "failed", {
-            error: {
-              message: String(error?.message || error),
-              status: Number(error?.status || 500),
-              traceId: current.traceId
-            },
-            eventPayload: { traceId: current.traceId }
-          });
-        }
-      } finally {
-        current.abortController = null;
-      }
-    });
-  });
+  const job = enqueueChatJob(req);
+  await saveChatJobState();
 
   return res.status(202).json({
     ok: true,
     job: getChatJobResponse(job)
   });
+});
+
+app.get("/api/chat/recipe-schedules", async (req, res) => {
+  const workspaceCode = getWorkspaceContext().code;
+  const schedules = [...agentRecipeScheduleStore.values()]
+    .filter((schedule) => schedule.workspaceCode === workspaceCode)
+    .sort((left, right) => Number(new Date(left.nextRunAt || 0)) - Number(new Date(right.nextRunAt || 0)))
+    .map(publicAgentRecipeSchedule);
+  return res.json({ ok: true, schedules });
+});
+
+app.post("/api/chat/recipe-schedules", async (req, res) => {
+  try {
+    const name = String(req.body?.name || "").trim().slice(0, 80);
+    const prompt = String(req.body?.prompt || "").trim().slice(0, chatMessageMaxChars);
+    if (!name || !prompt) return res.status(400).json({ error: "name and prompt are required" });
+    const providerModel = resolveScheduledProviderModel(req.body?.provider, req.body?.model);
+    const timing = normalizeAgentRecipeSchedule(req.body, Date.now());
+    const id = `recipe-schedule-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const schedule = {
+      id,
+      workspaceCode: getWorkspaceContext().code,
+      name,
+      prompt,
+      provider: providerModel.provider,
+      model: providerModel.model,
+      priority: normalizeChatJobPriority(req.body?.priority),
+      toolProfile: normalizeAgentToolProfile(req.body?.toolProfile),
+      autoCheckpoint: Boolean(req.body?.autoCheckpoint),
+      enabled: true,
+      createdAt: new Date().toISOString(),
+      lastRunAt: null,
+      lastCompletedAt: null,
+      lastJobId: null,
+      lastJobStatus: null,
+      ...timing,
+      timer: null
+    };
+    agentRecipeScheduleStore.set(id, schedule);
+    await saveAgentRecipeSchedules();
+    armAgentRecipeSchedule(schedule);
+    await appendAuditLog(req, "agent-recipe-schedule-create", { id, name, provider: schedule.provider, model: schedule.model, kind: schedule.kind });
+    return res.status(201).json({ ok: true, schedule: publicAgentRecipeSchedule(schedule) });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to create schedule") });
+  }
+});
+
+app.patch("/api/chat/recipe-schedules/:scheduleId", async (req, res) => {
+  const schedule = agentRecipeScheduleStore.get(String(req.params.scheduleId || ""));
+  if (!schedule) return res.status(404).json({ error: "schedule not found" });
+  if (schedule.workspaceCode !== getWorkspaceContext().code) return res.status(403).json({ error: "schedule belongs to a different workspace" });
+  schedule.enabled = req.body?.enabled !== false;
+  if (schedule.enabled && !schedule.nextRunAt) schedule.nextRunAt = calculateNextRunAt(schedule, Date.now());
+  await saveAgentRecipeSchedules();
+  armAgentRecipeSchedule(schedule);
+  return res.json({ ok: true, schedule: publicAgentRecipeSchedule(schedule) });
+});
+
+app.delete("/api/chat/recipe-schedules/:scheduleId", async (req, res) => {
+  const schedule = agentRecipeScheduleStore.get(String(req.params.scheduleId || ""));
+  if (!schedule) return res.status(404).json({ error: "schedule not found" });
+  if (schedule.workspaceCode !== getWorkspaceContext().code) return res.status(403).json({ error: "schedule belongs to a different workspace" });
+  if (schedule.timer) clearTimeout(schedule.timer);
+  agentRecipeScheduleStore.delete(schedule.id);
+  await saveAgentRecipeSchedules();
+  await appendAuditLog(req, "agent-recipe-schedule-delete", { id: schedule.id, name: schedule.name });
+  return res.json({ ok: true });
+});
+
+app.get("/api/chat/jobs", async (req, res) => {
+  pruneChatJobs();
+  const workspaceCode = getWorkspaceContext().code;
+  const jobs = [...chatJobStore.values()]
+    .filter((job) => job.workspaceCode === workspaceCode)
+    .sort((left, right) => Number(new Date(right.createdAt)) - Number(new Date(left.createdAt)))
+    .slice(0, 100)
+    .map(getChatJobResponse);
+  return res.json({
+    ok: true,
+    queue: {
+      paused: pausedChatJobWorkspaces.has(workspaceCode),
+      maxConcurrent: chatJobMaxConcurrent,
+      active: activeWorkspaceChatJobCount(workspaceCode),
+      workspaceMaxConcurrent: workspaceChatJobLimit(workspaceCode),
+      globalActive: activeChatJobCount(),
+      queued: jobs.filter((job) => job.status === "queued").length
+    },
+    jobs
+  });
+});
+
+app.get("/api/activity", async (req, res) => {
+  try {
+    const workspaceCode = getWorkspaceContext().code;
+    const audit = await readAuditEntries({ limit: 1000 });
+    const chatJobs = [...chatJobStore.values()].filter((job) => job.workspaceCode === workspaceCode);
+    const subagentJobs = [...subagentJobStore.values()].filter((job) => job.workspaceCode === workspaceCode);
+    const events = buildWorkspaceActivityTimeline({
+      auditEntries: audit.entries,
+      chatJobs,
+      subagentJobs
+    }, {
+      category: req.query.category,
+      traceId: req.query.traceId || req.query.trace,
+      query: req.query.query,
+      from: req.query.from,
+      to: req.query.to,
+      limit: req.query.limit
+    });
+    const categories = events.reduce((counts, event) => {
+      counts[event.category] = (counts[event.category] || 0) + 1;
+      return counts;
+    }, {});
+    return res.json({ ok: true, workspaceCode, count: events.length, categories, events });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to build workspace activity") });
+  }
+});
+
+app.get("/api/chat/subagents", async (req, res) => {
+  const workspaceCode = getWorkspaceContext().code;
+  const requestedStatus = String(req.query?.status || "").trim().toLowerCase();
+  const requestedParentId = String(req.query?.parentId || "").trim();
+  const allowedStatuses = new Set(["awaiting_approval", "queued", "running", "completed", "failed", "cancelled"]);
+  if (requestedStatus && !allowedStatuses.has(requestedStatus)) {
+    return res.status(400).json({ error: "invalid subagent status filter" });
+  }
+  const jobs = [...subagentJobStore.values()]
+    .filter((job) => job.workspaceCode === workspaceCode)
+    .filter((job) => !requestedStatus || job.status === requestedStatus)
+    .filter((job) => !requestedParentId || job.parentId === requestedParentId)
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+    .slice(0, 100)
+    .map(publicSubagentJob);
+  const summary = {
+    total: jobs.length,
+    active: jobs.filter((job) => ["awaiting_approval", "queued", "running"].includes(job.status)).length,
+    completed: jobs.filter((job) => job.status === "completed").length,
+    failed: jobs.filter((job) => ["failed", "cancelled"].includes(job.status)).length
+  };
+  return res.json({ ok: true, workspaceCode, summary, jobs });
+});
+
+app.delete("/api/chat/subagents/:subagentId", async (req, res) => {
+  const job = subagentJobStore.get(String(req.params.subagentId || "").trim());
+  if (!job) return res.status(404).json({ error: "subagent not found" });
+  if (job.workspaceCode !== getWorkspaceContext().code) {
+    return res.status(403).json({ error: "subagent belongs to a different workspace" });
+  }
+  if (!["awaiting_approval", "queued", "running"].includes(job.status)) {
+    return res.status(409).json({ error: "only active subagents can be cancelled", job: publicSubagentJob(job) });
+  }
+  cancelSubagentJob(job, "Cancelled from operations UI");
+  await appendAuditLog(req, "subagent-cancel", { id: job.id, parentId: job.parentId, source: "operations-ui" });
+  return res.json({ ok: true, job: publicSubagentJob(job) });
+});
+
+app.post("/api/chat/subagents/:subagentId/approve", async (req, res) => {
+  const requestOrigin = String(req.headers.origin || "").trim();
+  if (!requestOrigin || (authEnabled && !req.basicAuthAuthenticated)) {
+    return res.status(403).json({ error: "coding subagent approval requires an authenticated browser session" });
+  }
+  const job = subagentJobStore.get(String(req.params.subagentId || "").trim());
+  if (!job) return res.status(404).json({ error: "subagent not found" });
+  if (job.workspaceCode !== getWorkspaceContext().code) {
+    return res.status(403).json({ error: "subagent belongs to a different workspace" });
+  }
+  if (job.role !== "coding" || job.status !== "awaiting_approval") {
+    return res.status(409).json({ error: "only pending coding subagents can be approved", job: publicSubagentJob(job) });
+  }
+  const activeSiblings = [...subagentJobStore.values()].filter((candidate) => (
+    candidate.parentId === job.parentId && ["queued", "running"].includes(candidate.status)
+  ));
+  if (activeSiblings.length >= SUBAGENT_LIMITS.maxConcurrentPerParent) {
+    return res.status(429).json({ error: "concurrent subagent limit reached for this parent" });
+  }
+  job.approvedAt = new Date().toISOString();
+  recordSubagentEvent(job, "approved", { allowedTools: job.allowedTools, allowedPaths: job.allowedPaths });
+  startSubagentJob(job);
+  await appendAuditLog(req, "subagent-coding-approval", {
+    id: job.id,
+    parentId: job.parentId,
+    allowedTools: job.allowedTools,
+    allowedPaths: job.allowedPaths
+  });
+  return res.json({ ok: true, job: publicSubagentJob(job) });
+});
+
+app.patch("/api/chat/subagents/:subagentId/acceptance", async (req, res) => {
+  try {
+    const job = subagentJobStore.get(String(req.params.subagentId || "").trim());
+    if (!job) return res.status(404).json({ error: "subagent not found" });
+    if (job.workspaceCode !== getWorkspaceContext().code) {
+      return res.status(403).json({ error: "subagent belongs to a different workspace" });
+    }
+    if (job.status !== "completed" || !job.result) {
+      return res.status(409).json({ error: "only completed subagent output can be reviewed" });
+    }
+    job.acceptance = mergeSubagentAcceptance(job, req.body);
+    await appendAuditLog(req, "subagent-acceptance", {
+      id: job.id,
+      parentId: job.parentId,
+      artifacts: job.acceptance.artifacts,
+      context: job.acceptance.context
+    });
+    return res.json({ ok: true, acceptance: job.acceptance });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to update subagent acceptance") });
+  }
+});
+
+app.post("/api/chat/jobs/queue-control", async (req, res) => {
+  const workspaceCode = getWorkspaceContext().code;
+  const action = String(req.body?.action || "").trim().toLowerCase();
+  if (action === "pause") {
+    pausedChatJobWorkspaces.add(workspaceCode);
+  } else if (action === "resume") {
+    pausedChatJobWorkspaces.delete(workspaceCode);
+    queueMicrotask(dispatchChatJobs);
+  } else {
+    return res.status(400).json({ error: "action must be pause or resume" });
+  }
+  await saveChatJobState();
+  return res.json({ ok: true, paused: pausedChatJobWorkspaces.has(workspaceCode) });
+});
+
+app.patch("/api/chat/jobs/:jobId", async (req, res) => {
+  pruneChatJobs();
+  const job = chatJobStore.get(String(req.params.jobId || "").trim());
+  if (!job) {
+    return res.status(404).json({ error: "chat job not found" });
+  }
+  if (job.workspaceCode !== getWorkspaceContext().code) {
+    return res.status(403).json({ error: "chat job belongs to a different workspace" });
+  }
+  if (job.status !== "queued") {
+    return res.status(409).json({ error: "only queued jobs can change priority" });
+  }
+  job.priority = normalizeChatJobPriority(req.body?.priority);
+  job.updatedAt = new Date().toISOString();
+  recordChatJobEvent(job, "priority-changed", { priority: job.priority });
+  await saveChatJobState();
+  queueMicrotask(dispatchChatJobs);
+  return res.json({ ok: true, job: getChatJobResponse(job) });
 });
 
 app.get("/api/chat/jobs/:jobId", async (req, res) => {
@@ -7421,6 +9194,7 @@ app.delete("/api/chat/jobs/:jobId", async (req, res) => {
   }
 
   const cancelled = cancelChatJob(job, "Cancelled by user");
+  await saveChatJobState();
   return res.json({ ok: true, cancelled, job: getChatJobResponse(job) });
 });
 
@@ -7476,21 +9250,30 @@ app.get("/api/chat/jobs/:jobId/events", async (req, res) => {
 
 app.get("/api/config", (_req, res) => {
   const security = getEffectiveSecuritySettingsSync();
-  const supportedProviders = ["openai"];
-  if (githubPat) {
-    supportedProviders.push("copilot");
-  }
-  if (googleApiKey) {
-    supportedProviders.push("google");
-  }
-  if (xaiApiKey) {
-    supportedProviders.push("xai");
-  }
+  const supportedProviders = configuredProviders();
+  const defaultModelsByProvider = {
+    openai: defaultModel,
+    copilot: copilotDefaultModel,
+    ...Object.fromEntries(Object.entries(externalProviderConfigs).map(([provider, config]) => [provider, config.defaultModel]))
+  };
+  const allowedModelsByProvider = {
+    openai: allowedModels,
+    copilot: copilotAllowedModels,
+    ...Object.fromEntries(Object.entries(externalProviderConfigs).map(([provider, config]) => [provider, config.allowedModels]))
+  };
+  const agentModeModelsByProvider = Object.fromEntries(
+    Object.entries(compatibleProviderConfigs)
+      .filter(([, config]) => Array.isArray(config.agentModels))
+      .map(([provider, config]) => [provider, compatibleAgentModelsForConfig(config)])
+  );
 
   res.json({
     defaultProvider,
-    defaultModel,
+    defaultModel: defaultModelsByProvider[defaultProvider] || defaultModel,
     allowedModels,
+    defaultModelsByProvider,
+    allowedModelsByProvider,
+    agentModeModelsByProvider,
     googleDefaultModel,
     googleAllowedModels,
     xaiDefaultModel,
@@ -7498,11 +9281,15 @@ app.get("/api/config", (_req, res) => {
     supportedProviders,
     agentModeSupportedProviders: [
       ...(openaiApiKey ? ["openai"] : []),
-      ...(googleApiKey ? ["google"] : []),
-      ...(xaiApiKey ? ["xai"] : [])
+      ...Object.entries(compatibleProviderConfigs)
+        .filter(([, config]) => {
+          const agentModels = compatibleAgentModelsForConfig(config);
+          return config.apiKey && config.supportsAgentMode && (agentModels === null || agentModels.length > 0);
+        })
+        .map(([provider]) => provider)
     ],
     agentStepOverride: {
-      enabled: Boolean(security.agentMaxStepsOverrideCode),
+      enabled: Boolean(security.agentMaxStepsOverrideCode || security.workspaceAgentStepOverrideCodes.size),
       baseMaxSteps: agentMaxSteps,
       maxOverrideSteps: agentMaxStepsOverrideLimit
     },
@@ -7520,6 +9307,211 @@ app.get("/api/config", (_req, res) => {
       exemptPathPrefixes: security.apiKeyExemptPathPrefixes
     }
   });
+});
+
+app.get("/api/operations/health", async (_req, res) => {
+  const context = getWorkspaceContext();
+  const providerConfigured = {
+    openai: Boolean(openaiApiKey),
+    google: Boolean(googleApiKey),
+    xai: Boolean(xaiApiKey),
+    copilot: Boolean(githubPat),
+    deepseek: Boolean(deepseekApiKey),
+    anthropic: Boolean(anthropicApiKey),
+    together: Boolean(togetherApiKey),
+    openrouter: Boolean(openRouterApiKey)
+  };
+  const checks = {
+    providers: {
+      status: Object.values(providerConfigured).some(Boolean) ? "ok" : "error",
+      configured: providerConfigured
+    },
+    docker: {
+      status: terminalRuntime === "docker" ? "checking" : "disabled",
+      runtime: terminalRuntime,
+      image: terminalRuntime === "docker" ? terminalDockerImage : null
+    },
+    git: { status: "checking", branch: null, clean: null },
+    storage: { status: "checking", writable: null, totalBytes: null, availableBytes: null, usedPercent: null }
+  };
+
+  const tasks = [];
+  if (terminalRuntime === "docker") {
+    tasks.push(execFileAsync("docker", ["info", "--format", "{{.ServerVersion}}"], { timeout: 5000 })
+      .then(({ stdout }) => {
+        checks.docker.status = "ok";
+        checks.docker.version = String(stdout || "").trim() || null;
+      })
+      .catch((error) => {
+        checks.docker.status = "error";
+        checks.docker.message = String(error?.message || "Docker is unavailable").slice(0, 240);
+      }));
+  }
+
+  tasks.push(runGit(["status", "--short", "--branch"], true)
+    .then(({ stdout, code }) => {
+      const lines = String(stdout || "").split("\n").filter(Boolean);
+      checks.git.status = code ? "error" : "ok";
+      checks.git.branch = String(lines[0] || "").replace(/^##\s*/, "") || null;
+      checks.git.clean = lines.slice(1).length === 0;
+    })
+    .catch((error) => {
+      checks.git.status = "error";
+      checks.git.message = String(error?.message || "Git status unavailable").slice(0, 240);
+    }));
+
+  tasks.push(Promise.all([
+    fsp.access(context.sandboxRoot, fs.constants.R_OK | fs.constants.W_OK),
+    typeof fsp.statfs === "function" ? fsp.statfs(context.sandboxRoot) : Promise.resolve(null)
+  ])
+    .then(([, statfs]) => {
+      checks.storage.status = "ok";
+      checks.storage.writable = true;
+      if (statfs) {
+        const totalBytes = Number(statfs.blocks) * Number(statfs.bsize);
+        const availableBytes = Number(statfs.bavail) * Number(statfs.bsize);
+        checks.storage.totalBytes = totalBytes;
+        checks.storage.availableBytes = availableBytes;
+        checks.storage.usedPercent = totalBytes > 0 ? Number((((totalBytes - availableBytes) / totalBytes) * 100).toFixed(1)) : null;
+      }
+    })
+    .catch((error) => {
+      checks.storage.status = "error";
+      checks.storage.message = String(error?.message || "Storage status unavailable").slice(0, 240);
+    }));
+
+  await Promise.all(tasks);
+  const cpuTotals = os.cpus().reduce((totals, cpu) => {
+    totals.idle += Number(cpu.times.idle || 0);
+    totals.total += Object.values(cpu.times).reduce((sum, value) => sum + Number(value || 0), 0);
+    return totals;
+  }, { idle: 0, total: 0 });
+  const memory = process.memoryUsage();
+  const hostTotalMemory = os.totalmem();
+  const workspaceJobs = [...chatJobStore.values()].filter((job) => job.workspaceCode === context.code);
+  const latency = {};
+  for (const [provider, values] of providerLatencyHistory.entries()) {
+    const recent = values.slice(-20);
+    latency[provider] = {
+      samples: recent.length,
+      averageMs: recent.length ? Math.round(recent.reduce((sum, value) => sum + value, 0) / recent.length) : null,
+      latestMs: recent.at(-1) ?? null
+    };
+  }
+  const sample = {
+    timestamp: new Date().toISOString(),
+    cpuPercent: calculateCpuPercent(previousHostCpuSnapshot, cpuTotals),
+    memoryPercent: hostTotalMemory > 0 ? Number((((hostTotalMemory - os.freemem()) / hostTotalMemory) * 100).toFixed(1)) : null,
+    process: { rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, heapTotalBytes: memory.heapTotal, uptimeSeconds: Math.round(process.uptime()) },
+    diskPercent: checks.storage.usedPercent,
+    queue: {
+      queued: workspaceJobs.filter((job) => job.status === "queued").length,
+      running: workspaceJobs.filter((job) => ["starting", "checkpointing", "running"].includes(job.status)).length,
+      paused: pausedChatJobWorkspaces.has(context.code),
+      subagents: [...subagentJobStore.values()].filter((job) => job.workspaceCode === context.code && ["queued", "running"].includes(job.status)).length
+    },
+    uploads: [...uploadSessionStore.values()].filter((session) => session.workspaceCode === context.code).length,
+    providerLatency: latency
+  };
+  previousHostCpuSnapshot = cpuTotals;
+  const summary = summarizeRuntimeSample(sample);
+  const history = appendMetricSample(runtimeMetricHistory.get(context.code), sample, runtimeMetricHistoryLimit);
+  runtimeMetricHistory.set(context.code, history);
+  const statuses = Object.values(checks).map((check) => check.status);
+  const degraded = statuses.includes("error") || summary.status === "degraded";
+  return res.json({
+    ok: !degraded,
+    status: degraded ? "degraded" : "ok",
+    workspaceCode: context.code,
+    checkedAt: new Date().toISOString(),
+    checks,
+    metrics: sample,
+    history,
+    alerts: summary.alerts,
+    thresholds: summary.thresholds
+  });
+});
+
+async function listManagedToolContainers() {
+  if (terminalRuntime !== "docker") return [];
+  const { stdout } = await execFileAsync("docker", [
+    "ps", "-a", "--size",
+    "--filter", `label=${MANAGED_TOOL_CONTAINER_LABEL}`,
+    "--format", "{{json .}}"
+  ], { timeout: 15_000 });
+  return parseManagedToolContainers(stdout);
+}
+
+app.get("/api/operations/tool-containers", async (_req, res) => {
+  try {
+    const containers = await listManagedToolContainers();
+    return res.json({ ok: true, enabled: terminalRuntime === "docker", count: containers.length, containers });
+  } catch (error) {
+    return res.status(503).json({ error: String(error?.message || "Failed to list managed tool containers") });
+  }
+});
+
+app.delete("/api/operations/tool-containers", async (req, res) => {
+  const requestOrigin = String(req.headers.origin || "").trim();
+  if (!requestOrigin || (authEnabled && !req.basicAuthAuthenticated)) {
+    return res.status(403).json({ error: "managed container cleanup requires an authenticated browser session" });
+  }
+  if (String(req.body?.confirmation || "") !== MANAGED_TOOL_CONTAINER_CONFIRMATION) {
+    return res.status(400).json({ error: "managed container cleanup confirmation is required" });
+  }
+  try {
+    const containers = await listManagedToolContainers();
+    const ids = managedToolContainerIds(containers);
+    if (ids.length > 0) {
+      await execFileAsync("docker", ["rm", "-f", ...ids], { timeout: 60_000 });
+    }
+    await appendAuditLog(req, "managed-tool-containers-remove", {
+      count: ids.length,
+      containers: containers.map((item) => ({ id: item.id, name: item.name, image: item.image }))
+    });
+    return res.json({ ok: true, removed: ids.length });
+  } catch (error) {
+    return res.status(500).json({ error: String(error?.message || "Failed to remove managed tool containers") });
+  }
+});
+
+app.get("/api/usage", async (req, res) => {
+  try {
+    const context = getWorkspaceContext();
+    const period = String(req.query.period || "month").toLowerCase() === "day" ? "day" : "month";
+    const traceId = String(req.query.traceId || "").trim().slice(0, 120);
+    const fromDate = new Date();
+    if (period === "day") fromDate.setUTCHours(0, 0, 0, 0);
+    else { fromDate.setUTCDate(1); fromDate.setUTCHours(0, 0, 0, 0); }
+    const aggregate = aggregateUsage(await readUsageLedger(), { workspaceCode: context.code, traceId, from: fromDate.getTime() });
+    const groups = {};
+    const days = {};
+    for (const entry of aggregate.entries) {
+      const key = `${entry.provider}/${entry.model}`;
+      groups[key] ||= [];
+      groups[key].push(entry);
+      const day = String(entry.timestamp).slice(0, 10);
+      days[day] ||= [];
+      days[day].push(entry);
+    }
+    const byProviderModel = Object.entries(groups).map(([key, entries]) => ({ key, ...aggregateUsage(entries).totals }));
+    const daily = Object.entries(days).sort(([left], [right]) => left.localeCompare(right)).map(([date, entries]) => ({ date, ...aggregateUsage(entries).totals }));
+    const warning = Boolean(
+      (usageMonthlyWarningTokens && aggregate.totals.totalTokens >= usageMonthlyWarningTokens)
+      || (usageMonthlyWarningUsd && aggregate.totals.estimatedCostUsd >= usageMonthlyWarningUsd)
+    );
+    return res.json({
+      workspaceCode: context.code, period, from: fromDate.toISOString(), traceId: traceId || null,
+      totals: aggregate.totals, byProviderModel, daily, entries: aggregate.entries.slice(0, 100), warning,
+      limits: {
+        warningTokens: usageMonthlyWarningTokens || null, hardTokens: usageMonthlyHardLimitTokens || null,
+        warningUsd: usageMonthlyWarningUsd || null, hardUsd: usageMonthlyHardLimitUsd || null
+      },
+      pricing: usagePricing
+    });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to read usage ledger") });
+  }
 });
 
 app.get("/models.csv", (_req, res) => {
@@ -7543,6 +9535,7 @@ app.get("/api/tools", (req, res) => {
       utcHour: workspaceBackupUtcHour,
       retentionDays: workspaceBackupRetentionDays
     },
+    agentToolPolicies: agentToolPolicySummary(agentToolDefinitions),
     workspaceGitRemote: {
       remoteName: workspaceGitRemoteName,
       remoteHttpsUrl: getWorkspaceBareRepoHttpsUrl(req, context.code)
@@ -7555,8 +9548,23 @@ app.get("/api/tools", (req, res) => {
         enabled: true,
         thresholdBytes: chunkUploadThresholdBytes,
         chunkSizeBytes: chunkUploadChunkSizeBytes,
+        maxChunkSizeBytes: chunkUploadMaxChunkSizeBytes,
         sessionMaxAgeMs: chunkUploadSessionMaxAgeMs
       }
+    },
+    agentStepOverridePolicy: {
+      enabled: Boolean(security.agentMaxStepsOverrideCode || security.workspaceAgentStepOverrideCodes.size),
+      workspaceCodeConfigured: security.workspaceAgentStepOverrideCodes.has(context.code),
+      baseMaxSteps: agentMaxSteps,
+      maxOverrideSteps: agentMaxStepsOverrideLimit
+    },
+    imageCapabilities: {
+      search: ["wikimedia-commons"],
+      generation: [
+        ...(openaiApiKey ? [{ provider: "openai", model: openaiImageModel }] : []),
+        ...(xaiApiKey ? [{ provider: "xai", model: xaiImageModel }] : []),
+        ...(googleApiKey ? [{ provider: "google", model: googleImageModel }] : [])
+      ]
     },
     apiKeyAuth: {
       enabled: security.apiKeyAuthEnabled && security.apiKeys.length > 0,
@@ -7582,6 +9590,7 @@ app.get("/api/tools", (req, res) => {
       "Each workspace path is the source-of-truth git repository; optional auto session branches can isolate daily sessions.",
       "Each workspace also has a bare git remote at WORKSPACE_GIT_REMOTE_ROOT/<workspace>.git for fast external push/pull workflows.",
       "Optional per-workspace upload bypass codes can remove FILE_API_UPLOAD_MAX_BYTES when sent as X-Upload-Bypass-Code.",
+      "Optional per-workspace agent step codes override the global high-step unlock only for their workspace.",
       "Nightly workspace backups create git bundle archives and prune backups older than retention policy.",
       "Terminal tool runs with an isolated per-workspace HOME/cache/env and host runtime cannot execute host-admin commands like sudo/apt.",
       "When TERMINAL_RUNTIME=docker, run_terminal command strings execute through sh -lc inside the container, so normal shell syntax like &&, ||, pipes, redirects, multiline backslashes, and flags works.",
@@ -7604,6 +9613,8 @@ app.get("/api/tools", (req, res) => {
     agentToolReference: [
       { toolName: "agent_reach_status", description: "Check Agent Reach channel health", whyUseful: "Know which internet backends are live" },
       { toolName: "search_internet", description: "Semantic web search through Exa", whyUseful: "Deeper current web research" },
+      { toolName: "search_images", description: "Search Wikimedia Commons with source/license metadata", whyUseful: "Find inspectable reusable imagery" },
+      { toolName: "generate_image", description: "Generate workspace imagery with configured providers", whyUseful: "Create visual assets from agent tasks" },
       { toolName: "search_youtube", description: "Search YouTube through yt-dlp", whyUseful: "Find relevant videos" },
       { toolName: "get_youtube_transcript", description: "Extract YouTube captions", whyUseful: "Research and summarize videos" },
       { toolName: "delete_file", description: "Delete file/folder", whyUseful: "Housekeeping control" },
@@ -7630,6 +9641,9 @@ app.get("/api/tools", (req, res) => {
     ],
     tools: [
       { method: "GET", path: "/api/openapi.json", purpose: "OpenAPI schema for external tooling and SDK generation" },
+      { method: "GET", path: "/api/activity?limit=250&category=tool&traceId=...", purpose: "Unified workspace activity across audit, agents, tools, Git, files, shares, recipes, and failures" },
+      { method: "POST", path: "/api/chat/subagents/:id/approve", purpose: "Approve and start an exact-path coding child" },
+      { method: "PATCH", path: "/api/chat/subagents/:id/acceptance", purpose: "Record selective artifact/context decisions for completed child output", body: { artifacts: { "images/result.png": "accepted" }, context: { 0: "rejected" } } },
       { method: "GET", path: "/api/notifications?limit=100", purpose: "List recent notify_user notifications" },
       { method: "GET", path: "/api/session/workspace/git", purpose: "Get workspace bare git remote path/URL" },
       { method: "POST", path: "/api/session/workspace/git/pull", purpose: "Pull remote branch into workspace", body: { remoteName: "origin", branch: "main", strategy: "ff-only" } },
@@ -7639,6 +9653,8 @@ app.get("/api/tools", (req, res) => {
       { method: "POST", path: "/api/files/write", purpose: "Write file text", body: { path: "src/app.js", content: "..." } },
       { method: "POST", path: "/api/files/upload", purpose: "Upload one or many files (fields: files or file, optional path and relativePaths[])" },
       { method: "GET", path: "/api/files/download?path=src/app.js", purpose: "Download a file or a directory as a zip" },
+      { method: "GET", path: "/api/files/shares", purpose: "List retained shares and analytics" },
+      { method: "PATCH", path: "/api/files/shares/:id/expiration", purpose: "Extend share expiration", body: { extendByHours: 168 } },
       { method: "POST", path: "/api/files/copy", purpose: "Duplicate file or directory", body: { fromPath: "docs/a.txt", toPath: "docs/a copy.txt" } },
       { method: "POST", path: "/api/files/move", purpose: "Move file or directory", body: { fromPath: "old.txt", toPath: "docs/new.txt" } },
       { method: "POST", path: "/api/files/rename", purpose: "Rename in place", body: { path: "docs/a.txt", newName: "b.txt" } },
@@ -7649,6 +9665,13 @@ app.get("/api/tools", (req, res) => {
       { method: "POST", path: "/api/files/terminal", purpose: "Run allow-listed command in isolated workspace terminal env", body: { command: "git clone https://github.com/org/repo.git repo && git -C repo status", cwd: "", timeoutMs: 120000 } },
       { method: "GET", path: "/api/files/audit?limit=200", purpose: "Read per-operation audit entries" },
       { method: "GET", path: "/api/files/git/log?limit=20", purpose: "List sandbox commits" },
+      { method: "GET", path: "/api/files/git/status", purpose: "Structured working tree and branch status" },
+      { method: "GET", path: "/api/files/git/change-diff?path=...&staged=false", purpose: "Review a staged or working-tree file diff" },
+      { method: "POST", path: "/api/files/git/stage", purpose: "Stage selected files", body: { paths: ["src/app.js"] } },
+      { method: "POST", path: "/api/files/git/unstage", purpose: "Unstage selected files", body: { paths: ["src/app.js"] } },
+      { method: "POST", path: "/api/files/git/commit", purpose: "Commit staged files", body: { message: "Describe the change" } },
+      { method: "GET", path: "/api/operations/health", purpose: "Dependency and bounded runtime metric history" },
+      { method: "GET", path: "/api/usage?period=month&traceId=...", purpose: "Workspace provider usage and cost summary" },
       { method: "POST", path: "/api/files/git/revert", purpose: "Hard reset sandbox to a commit", body: { ref: "HEAD~1" } },
       { method: "GET", path: "/api/files/snapshots?limit=30", purpose: "List snapshot commits" },
       { method: "POST", path: "/api/files/snapshots", purpose: "Create manual snapshot commit", body: { message: "checkpoint before refactor" } },
@@ -7727,6 +9750,8 @@ app.get("/api/openapi.json", (_req, res) => {
       },
       "/api/files/upload/chunk/{uploadId}/complete": { post: { summary: "Complete chunked upload" } },
       "/api/files/download": { get: { summary: "Download file or directory zip" } },
+      "/api/files/shares": { get: { summary: "List file shares with analytics" }, post: { summary: "Create file share" } },
+      "/api/files/shares/{id}/expiration": { patch: { summary: "Extend file share expiration" } },
       "/api/files/copy": { post: { summary: "Duplicate path" } },
       "/api/files/move": { post: { summary: "Move path" } },
       "/api/files/rename": { post: { summary: "Rename path" } },
@@ -7737,7 +9762,16 @@ app.get("/api/openapi.json", (_req, res) => {
       "/api/files/terminal": { post: { summary: "Run safe terminal command" } },
       "/api/files/audit": { get: { summary: "List audit entries" } },
       "/api/files/git/log": { get: { summary: "List git commits" } },
+      "/api/files/git/status": { get: { summary: "Get structured Git status" } },
+      "/api/files/git/change-diff": { get: { summary: "Get file change diff" } },
+      "/api/files/git/stage": { post: { summary: "Stage selected files" } },
+      "/api/files/git/unstage": { post: { summary: "Unstage selected files" } },
+      "/api/files/git/commit": { post: { summary: "Commit staged files" } },
+      "/api/files/git/branch": { post: { summary: "Switch or create branch" } },
+      "/api/files/git/conflict": { post: { summary: "Resolve a conflicted file" } },
       "/api/files/git/revert": { post: { summary: "Revert sandbox git state" } },
+      "/api/operations/health": { get: { summary: "Get live health and runtime history" } },
+      "/api/usage": { get: { summary: "Get workspace usage and cost totals" } },
       "/api/files/snapshots": {
         get: { summary: "List snapshots" },
         post: { summary: "Create snapshot" }
@@ -7908,7 +9942,7 @@ app.post("/api/files/upload/chunk/start", async (req, res) => {
 
     const requestedChunkSizeValue = Number(req.body?.chunkSizeBytes || chunkUploadChunkSizeBytes);
     const requestedChunkSize = Number.isFinite(requestedChunkSizeValue) ? requestedChunkSizeValue : chunkUploadChunkSizeBytes;
-    const selectedChunkSize = Math.max(256 * 1024, Math.min(chunkUploadChunkSizeBytes, requestedChunkSize));
+    const selectedChunkSize = Math.max(256 * 1024, Math.min(chunkUploadMaxChunkSizeBytes, requestedChunkSize));
     const totalChunks = Math.max(1, Math.ceil(size / selectedChunkSize));
     const session = {
       id: uploadId,
@@ -7939,7 +9973,7 @@ app.post("/api/files/upload/chunk/start", async (req, res) => {
   }
 });
 
-app.post("/api/files/upload/chunk/:uploadId", express.raw({ type: "application/octet-stream", limit: `${Math.max(1, Math.ceil(chunkUploadChunkSizeBytes / (1024 * 1024)) + 2)}mb` }), async (req, res) => {
+app.post("/api/files/upload/chunk/:uploadId", express.raw({ type: "application/octet-stream", limit: `${Math.max(1, Math.ceil(chunkUploadMaxChunkSizeBytes / (1024 * 1024)) + 2)}mb` }), async (req, res) => {
   try {
     const uploadId = String(req.params.uploadId || "").trim();
     if (!uploadId) {
@@ -8153,7 +10187,9 @@ app.post("/api/files/shares", async (req, res) => {
       passwordSalt: passwordSalt?.toString("hex") || "",
       passwordHash: passwordHash?.toString("hex") || "",
       encrypted,
-      accessCount: 0
+      accessCount: 0,
+      viewCount: 0,
+      downloadCount: 0
     };
 
     if (encrypted) {
@@ -8199,6 +10235,26 @@ app.delete("/api/files/shares/:id", async (req, res) => {
     return res.json({ ok: true });
   } catch (error) {
     return res.status(400).json({ error: String(error?.message || "Failed to revoke file share") });
+  }
+});
+
+app.patch("/api/files/shares/:id/expiration", async (req, res) => {
+  try {
+    const db = await readFileShareDb();
+    const share = db.shares.find((item) => item.id === req.params.id && item.workspaceCode === getWorkspaceContext().code && !item.revokedAt);
+    if (!share) return res.status(404).json({ error: "File share not found" });
+    const previousExpiresAt = share.expiresAt;
+    share.expiresAt = extendShareExpiration(share.expiresAt, req.body?.extendByHours ?? 168);
+    await writeFileShareDb(db);
+    await appendAuditLog(req, "extend-file-share", {
+      path: share.relativePath,
+      shareId: share.id,
+      previousExpiresAt,
+      expiresAt: share.expiresAt
+    });
+    return res.json({ ok: true, share: publicFileShareRecord(share) });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to extend file share") });
   }
 });
 
@@ -8442,6 +10498,89 @@ app.get("/api/files/git/log", async (req, res) => {
   }
 });
 
+app.get("/api/files/git/status", async (req, res) => {
+  try {
+    return res.json(await getGitChangeCenterStatus());
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to read Git status") });
+  }
+});
+
+app.get("/api/files/git/change-diff", async (req, res) => {
+  try {
+    const [targetPath] = selectedGitChangePaths(req.query.path);
+    const staged = String(req.query.staged || "false").toLowerCase() === "true";
+    const args = ["diff", "--no-ext-diff", "--no-color", ...(staged ? ["--cached"] : []), "--", targetPath];
+    const result = await runGit(args, true);
+    return res.json({ path: targetPath, staged, diff: String(result.stdout || "").slice(0, 750_000) });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to read Git diff") });
+  }
+});
+
+app.post("/api/files/git/stage", async (req, res) => {
+  try {
+    const paths = selectedGitChangePaths(req.body?.paths);
+    await runGit(["add", "--", ...paths]);
+    await appendAuditLog(req, "git-stage", { paths });
+    return res.json({ ok: true, status: await getGitChangeCenterStatus() });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to stage files") });
+  }
+});
+
+app.post("/api/files/git/unstage", async (req, res) => {
+  try {
+    const paths = selectedGitChangePaths(req.body?.paths);
+    const result = await runGit(["restore", "--staged", "--", ...paths], true);
+    if (result.code) throw new Error(String(result.stderr || "Failed to unstage files"));
+    await appendAuditLog(req, "git-unstage", { paths });
+    return res.json({ ok: true, status: await getGitChangeCenterStatus() });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to unstage files") });
+  }
+});
+
+app.post("/api/files/git/commit", async (req, res) => {
+  try {
+    const message = String(req.body?.message || "").trim();
+    if (!message || message.length > 240 || /[\r\n]/.test(message)) return res.status(400).json({ error: "Commit message must be 1 to 240 characters on one line" });
+    const result = await runGit(["commit", "-m", message], true);
+    if (result.code) throw new Error(String(result.stderr || result.stdout || "Git commit failed"));
+    const hash = String((await runGit(["rev-parse", "--short", "HEAD"])).stdout || "").trim();
+    await appendAuditLog(req, "git-commit", { message, hash });
+    return res.json({ ok: true, hash, output: String(result.stdout || "").trim(), status: await getGitChangeCenterStatus() });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to commit changes") });
+  }
+});
+
+app.post("/api/files/git/branch", async (req, res) => {
+  try {
+    const branch = await switchWorkspaceBranch(req.body?.branch, Boolean(req.body?.create));
+    await appendAuditLog(req, "git-branch-switch", { branch, create: Boolean(req.body?.create) });
+    return res.json({ ok: true, branch, status: await getGitChangeCenterStatus() });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to switch branch") });
+  }
+});
+
+app.post("/api/files/git/conflict", async (req, res) => {
+  try {
+    const [targetPath] = selectedGitChangePaths(req.body?.path);
+    const strategy = String(req.body?.strategy || "").trim().toLowerCase();
+    const status = await getGitChangeCenterStatus();
+    if (!status.files.some((item) => item.path === targetPath && item.conflict)) return res.status(409).json({ error: "File is not currently conflicted" });
+    if (strategy === "ours" || strategy === "theirs") await runGit(["checkout", `--${strategy}`, "--", targetPath]);
+    else if (strategy !== "mark-resolved") return res.status(400).json({ error: "Strategy must be ours, theirs, or mark-resolved" });
+    await runGit(["add", "--", targetPath]);
+    await appendAuditLog(req, "git-conflict-resolve", { path: targetPath, strategy });
+    return res.json({ ok: true, status: await getGitChangeCenterStatus() });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to resolve conflict") });
+  }
+});
+
 app.post("/api/files/git/revert", async (req, res) => {
   try {
     const ref = String(req.body?.ref || "").trim() || "HEAD~1";
@@ -8534,7 +10673,8 @@ app.get("/api/files/search", async (req, res) => {
     const mode = String(req.query.mode || "hybrid").trim();
     const targetPath = String(req.query.path || "").trim();
     const limit = Number(req.query.limit || 20);
-    const result = await searchSandboxContent({ query, mode, path: targetPath, limit });
+    const caseSensitive = String(req.query.caseSensitive || "").toLowerCase() === "true";
+    const result = await searchSandboxContent({ query, mode, path: targetPath, limit, caseSensitive });
     await appendAuditLog(req, "search", {
       query: result.query,
       mode: result.mode,
@@ -8545,6 +10685,44 @@ app.get("/api/files/search", async (req, res) => {
     return res.json(result);
   } catch (error) {
     return res.status(400).json({ error: String(error?.message || "Failed to search sandbox") });
+  }
+});
+
+app.post("/api/files/search/replace-preview", async (req, res) => {
+  try {
+    const targetPath = String(req.body?.path || "").trim();
+    const { absolute: baseAbs, rel: baseRel } = resolveSandboxPath(targetPath);
+    const result = await previewWorkspaceReplacements(getSandboxRoot(), baseAbs, req.body || {});
+    await appendAuditLog(req, "search-replace-preview", {
+      path: baseRel,
+      filesScanned: result.filesScanned,
+      filesMatched: result.filesMatched,
+      replacementCount: result.replacementCount
+    });
+    return res.json({ ok: true, path: baseRel, ...result });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to preview replacements") });
+  }
+});
+
+app.post("/api/files/search/replace", async (req, res) => {
+  try {
+    const targetPath = String(req.body?.path || "").trim();
+    const acceptedPaths = Array.isArray(req.body?.acceptedPaths) ? req.body.acceptedPaths : [];
+    const { absolute: baseAbs, rel: baseRel } = resolveSandboxPath(targetPath);
+    const result = await applyWorkspaceReplacements(getSandboxRoot(), baseAbs, acceptedPaths, req.body || {});
+    if (result.filesChanged > 0) {
+      await commitSandboxSnapshot(`search replace ${baseRel || "."} (${result.replacementCount})`, result.changedFiles);
+    }
+    await appendAuditLog(req, "search-replace", {
+      path: baseRel,
+      filesChanged: result.filesChanged,
+      replacementCount: result.replacementCount,
+      changedFiles: result.changedFiles
+    });
+    return res.json({ ok: true, path: baseRel, ...result });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to apply replacements") });
   }
 });
 
@@ -8599,6 +10777,11 @@ app.post("/api/tests/run", async (req, res) => {
   }
 });
 
+app.use("/vendor/katex", express.static(path.join(projectRoot, "node_modules", "katex", "dist"), {
+  fallthrough: false,
+  immutable: true,
+  maxAge: "30d"
+}));
 app.use(express.static(publicDir));
 
 app.get("/health", (_req, res) => {
@@ -8607,7 +10790,10 @@ app.get("/health", (_req, res) => {
 
 await ensureSandboxReady();
 await loadAdminSecuritySettings();
+await loadChatJobState();
+await loadAgentRecipeSchedules();
 scheduleNightlyWorkspaceBackups();
+queueMicrotask(dispatchChatJobs);
 
 app.listen(port, host, () => {
   console.log(`Remote AI Access listening on ${host}:${port} (${appBaseUrl})`);

@@ -11,6 +11,7 @@ const apiKeysInputEl = document.getElementById("apiKeysInput");
 const protectedPrefixesInputEl = document.getElementById("protectedPrefixesInput");
 const exemptPrefixesInputEl = document.getElementById("exemptPrefixesInput");
 const agentOverrideCodeInputEl = document.getElementById("agentOverrideCodeInput");
+const workspaceAgentOverrideCodesInputEl = document.getElementById("workspaceAgentOverrideCodesInput");
 const uploadBypassCodesInputEl = document.getElementById("uploadBypassCodesInput");
 const saveSettingsBtnEl = document.getElementById("saveSettingsBtn");
 const reloadSettingsBtnEl = document.getElementById("reloadSettingsBtn");
@@ -69,6 +70,7 @@ function fillForm(settings = {}) {
     ? settings.apiKeyExemptPathPrefixes.join("\n")
     : "";
   agentOverrideCodeInputEl.value = String(settings.agentMaxStepsOverrideCode || "");
+  workspaceAgentOverrideCodesInputEl.value = String(settings.workspaceAgentStepOverrideCodesRaw || "");
   uploadBypassCodesInputEl.value = String(settings.workspaceUploadBypassCodesRaw || "");
 
   if (window.RemoteAiAuth?.setApiKeyHeaderName) {
@@ -86,6 +88,7 @@ function collectPayload() {
     apiKeyProtectedPathPrefixes: toList(protectedPrefixesInputEl.value),
     apiKeyExemptPathPrefixes: toList(exemptPrefixesInputEl.value),
     agentMaxStepsOverrideCode: String(agentOverrideCodeInputEl.value || "").trim(),
+    workspaceAgentStepOverrideCodesRaw: String(workspaceAgentOverrideCodesInputEl.value || "").trim(),
     workspaceUploadBypassCodesRaw: String(uploadBypassCodesInputEl.value || "").trim()
   };
 }
