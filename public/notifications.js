@@ -5,6 +5,7 @@ const refreshNotificationsBtnEl = document.getElementById("refreshNotificationsB
 const notificationsStatusEl = document.getElementById("notificationsStatus");
 const notificationsListEl = document.getElementById("notificationsList");
 const notificationsJsonEl = document.getElementById("notificationsJson");
+const questionsListEl = document.getElementById("questionsList");
 
 function applyTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
@@ -29,6 +30,72 @@ function formatTime(isoValue) {
   }
 }
 
+function renderQuestions(rows) {
+  questionsListEl.replaceChildren();
+  const questions = rows.filter((item) => item?.metadata?.kind === "user-question" && item.metadata.jobId);
+  if (questions.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "muted-inline";
+    empty.textContent = "No workflows are waiting for an answer.";
+    questionsListEl.appendChild(empty);
+    return;
+  }
+  for (const item of questions) {
+    const card = document.createElement("article");
+    card.className = "notification-question";
+    const prompt = document.createElement("strong");
+    prompt.textContent = String(item.message || "Agent question").replace(/^Agent question:\s*/i, "");
+    const meta = document.createElement("span");
+    meta.className = "muted-inline";
+    meta.textContent = formatTime(item.timestamp);
+    const actions = document.createElement("div");
+    actions.className = "notification-question-actions";
+    const choices = Array.isArray(item.metadata.choices) ? item.metadata.choices : [];
+    const answer = async (value, status) => {
+      actions.querySelectorAll("button, input").forEach((control) => { control.disabled = true; });
+      status.textContent = "Submitting answer…";
+      try {
+        const response = await fetch(`/api/chat/jobs/${encodeURIComponent(item.metadata.jobId)}/input`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ questionId: item.metadata.questionId, answer: value })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Failed to submit answer");
+        status.textContent = "Answered; workflow resumed.";
+        await loadNotifications();
+      } catch (error) {
+        status.textContent = `Answer error: ${error.message}`;
+        actions.querySelectorAll("button, input").forEach((control) => { control.disabled = false; });
+      }
+    };
+    const status = document.createElement("span");
+    status.className = "muted-inline";
+    if (choices.length > 0) {
+      for (const choice of choices) {
+        const button = document.createElement("button");
+        button.className = "btn btn-soft";
+        button.type = "button";
+        button.textContent = choice;
+        button.addEventListener("click", () => answer(choice, status));
+        actions.appendChild(button);
+      }
+    } else {
+      const input = document.createElement("input");
+      input.className = "notification-question-input";
+      input.placeholder = "Type your answer";
+      const button = document.createElement("button");
+      button.className = "btn";
+      button.type = "button";
+      button.textContent = "Answer";
+      button.addEventListener("click", () => answer(input.value, status));
+      actions.append(input, button);
+    }
+    card.append(prompt, meta, actions, status);
+    questionsListEl.appendChild(card);
+  }
+}
+
 async function loadNotifications() {
   notificationsStatusEl.textContent = "Loading...";
   try {
@@ -40,6 +107,7 @@ async function loadNotifications() {
 
     const rows = Array.isArray(data?.notifications) ? data.notifications : [];
     notificationsListEl.innerHTML = "";
+    renderQuestions(rows);
 
     if (rows.length === 0) {
       const li = document.createElement("li");

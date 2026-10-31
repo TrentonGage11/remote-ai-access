@@ -188,6 +188,11 @@ body {
 .monitor-list { display: grid; gap: 8px; }
 .monitor-list > div { display: flex; justify-content: space-between; gap: 12px; padding-block: 7px; border-bottom: 1px solid var(--line); }
 .status-ok { color: var(--accent); }.status-error { color: #bd3d34; }.status-disabled { color: var(--muted); }
+
+.notification-questions { display: grid; gap: 10px; }
+.notification-question { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--surface) 82%, transparent); }
+.notification-question-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.notification-question-input { flex: 1 1 16rem; min-width: 0; }
 @media (max-width: 1000px) { .monitor-metric-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 650px) { .monitor-metric-grid, .monitor-chart-grid, .monitor-detail-grid { grid-template-columns: 1fr; } }
 
