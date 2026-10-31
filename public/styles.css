@@ -531,6 +531,28 @@ label {
   background: var(--bubble-assistant);
 }
 
+.user-question-card {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  box-shadow: 0 8px 24px rgba(27, 115, 75, 0.12);
+}
+
+.question-card-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.question-answer-input {
+  flex: 1 1 220px;
+  min-width: 160px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
 .msg-head {
   display: flex;
   justify-content: space-between;

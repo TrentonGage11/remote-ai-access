@@ -5347,6 +5347,7 @@ async function requestUserInput(req, args = {}) {
     kind: "user-question",
     jobId,
     questionId: question.id,
+    clientChatId: String(job.requestBody?.clientChatId || job.recovery?.clientChatId || "").slice(0, 160),
     choices
   });
   const error = new Error("Waiting for user input");

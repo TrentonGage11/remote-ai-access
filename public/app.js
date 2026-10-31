@@ -171,6 +171,7 @@ let notificationPollTimer = null;
 let notificationTitleFlashTimer = null;
 let notificationTitleFlashEndsAt = 0;
 let notificationToastContainer = null;
+const pendingUserQuestions = new Map();
 let lastNotificationShownAt = 0;
 const recentlyShownNotificationKeys = new Map();
 const notificationRuleLastRunAt = new Map();
@@ -2529,7 +2530,44 @@ function renderMessages() {
     messageListEl.appendChild(item);
   }
 
+  for (const question of pendingUserQuestions.values()) {
+    if (question.clientChatId && question.clientChatId !== chat.id) continue;
+    const item = document.createElement("li");
+    item.className = "msg assistant user-question-card";
+    const choices = Array.isArray(question.choices) ? question.choices : [];
+    item.innerHTML = `
+      <div class="msg-head"><strong>Assistant needs your input</strong><span>Paused</span></div>
+      <div class="md"><p>${escapeHtml(question.prompt || "Please answer the agent question.")}</p></div>
+      <div class="question-card-controls">
+        ${choices.map((choice) => `<button type="button" class="btn btn-soft question-choice" data-question-job="${escapeHtml(question.jobId)}" data-question-id="${escapeHtml(question.questionId)}" data-question-answer="${escapeHtml(choice)}">${escapeHtml(choice)}</button>`).join("")}
+        <input class="question-answer-input" data-question-input="${escapeHtml(question.jobId)}" type="text" placeholder="Type an answer" aria-label="Answer agent question" />
+        <button type="button" class="btn question-submit" data-question-submit="${escapeHtml(question.jobId)}" data-question-id="${escapeHtml(question.questionId)}">Answer</button>
+      </div>
+    `;
+    messageListEl.appendChild(item);
+  }
+
   chatPanelEl.scrollTop = chatPanelEl.scrollHeight;
+}
+
+async function submitUserQuestionAnswer(jobId, questionId, answer) {
+  const value = String(answer || "").trim();
+  if (!value) return;
+  try {
+    const response = await fetch(`/api/chat/jobs/${encodeURIComponent(jobId)}/input`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ questionId, answer: value })
+    });
+    const data = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "Failed to submit answer");
+    pendingUserQuestions.delete(jobId);
+    statusEl.textContent = "Answer submitted; workflow resumed.";
+    renderMessages();
+    loadChatJobs().catch(() => undefined);
+  } catch (error) {
+    statusEl.textContent = `Question answer failed: ${error.message}`;
+  }
 }
 
 function buildRequestBodyForUserMessage(chat, userMessageId) {
@@ -3191,24 +3229,9 @@ async function deliverNotificationEvent(item) {
 
   const question = item?.metadata?.kind === "user-question" ? item.metadata : null;
   if (question?.jobId && question?.questionId) {
-    const choices = Array.isArray(question.choices) && question.choices.length > 0
-      ? `\n\nChoices: ${question.choices.join(", ")}`
-      : "";
-    const answer = window.prompt(`${message}${choices}\n\nAnswer (Cancel leaves the workflow paused):`);
-    if (answer && answer.trim()) {
-      try {
-        const response = await fetch(`/api/chat/jobs/${encodeURIComponent(question.jobId)}/input`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ questionId: question.questionId, answer: answer.trim() })
-        });
-        const data = await parseJsonResponse(response);
-        if (!response.ok) throw new Error(data.error || "Failed to submit answer");
-        statusEl.textContent = "Answer submitted; workflow resumed.";
-      } catch (error) {
-        statusEl.textContent = `Question answer failed: ${error.message}`;
-      }
-    }
+    pendingUserQuestions.set(String(question.jobId), question);
+    renderMessages();
+    statusEl.textContent = "An agent is waiting for your answer in the chat.";
   }
 
   const handledByRules = await applyNotificationRules(item, level, message);
@@ -3874,6 +3897,19 @@ messageListEl.addEventListener("click", async (event) => {
       String(retryBtn.dataset.retryChatId || ""),
       String(retryBtn.dataset.retryMsgId || "")
     );
+    return;
+  }
+
+  const choiceBtn = target.closest("button[data-question-job][data-question-id][data-question-answer]");
+  const submitBtn = target.closest("button[data-question-submit][data-question-id]");
+  if (choiceBtn instanceof HTMLButtonElement) {
+    await submitUserQuestionAnswer(choiceBtn.dataset.questionJob, choiceBtn.dataset.questionId, choiceBtn.dataset.questionAnswer);
+    return;
+  }
+  if (submitBtn instanceof HTMLButtonElement) {
+    const jobId = String(submitBtn.dataset.questionSubmit || "");
+    const input = messageListEl.querySelector(`input[data-question-input="${CSS.escape(jobId)}"]`);
+    await submitUserQuestionAnswer(jobId, submitBtn.dataset.questionId, input?.value || "");
     return;
   }
 
