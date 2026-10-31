@@ -107,6 +107,7 @@ Small web app you can host on an approved domain. It keeps provider API keys on 
 - `FILE_SHARE_DATA_ROOT`: encrypted share snapshot folder (default `./sandbox/_admin/file-share-data`)
 - `FILE_SHARE_ENCRYPTION_SECRET`: long server secret required to create encrypted share snapshots
 - `SANDBOX_GIT_USER_NAME`, `SANDBOX_GIT_USER_EMAIL`: git commit identity for sandbox snapshots
+- From WSL, run `bash scripts/deploy-production.sh` after committing to push and deploy a clean release. It stages runtime files, backs up the live copies, restarts `remote-ai-access`, and records the deployed commit; it does not touch `.env` or sandbox state.
 
 ## File Lab features
 
