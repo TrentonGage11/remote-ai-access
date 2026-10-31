@@ -17,6 +17,11 @@ fi
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
+node_bin="$(command -v node || command -v node.exe || true)"
+if [[ -z "$node_bin" ]]; then
+  echo "Node.js is required to run the deployment tests." >&2
+  exit 1
+fi
 
 # The checkout is shared with Windows, whose Git uses CRLF normalization. Keep
 # the safety check from treating WSL's LF view as a mass of real edits.
@@ -26,7 +31,7 @@ if [[ -n "$(git -c core.autocrlf=true status --porcelain)" ]]; then
 fi
 
 if [[ "${RAA_DEPLOY_SKIP_TESTS:-false}" != "true" ]]; then
-  node --test tests/*.test.mjs
+  "$node_bin" --test tests/*.test.mjs
 fi
 
 if [[ "$skip_push" != "true" ]]; then
