@@ -188,6 +188,26 @@
           </details>
         </section>
 
+        <section class="card disclosure-panel reveal" style="--d: 102ms">
+          <details id="codeMapDetails" class="context-disclosure" data-filelab-disclosure-key="filelab-code-map-open-v1">
+            <summary>
+              <span role="heading" aria-level="2">Code Map</span>
+              <span id="codeMapSummary" class="tab-meta">Cached symbols and imports</span>
+            </summary>
+            <div class="context-disclosure-body code-map-panel">
+              <div class="code-map-controls">
+                <label for="codeMapPathInput">Folder
+                  <input id="codeMapPathInput" type="text" placeholder="Whole workspace" />
+                </label>
+                <button id="codeMapBtn" class="btn" type="button">Build Code Map</button>
+                <button id="codeMapRefreshBtn" class="btn btn-soft" type="button">Refresh</button>
+              </div>
+              <p id="codeMapStatus" class="muted-inline" aria-live="polite">Build an index to inspect symbols and imports.</p>
+              <div id="codeMapResults" class="code-map-results" aria-live="polite"></div>
+            </div>
+          </details>
+        </section>
+
         <section id="sharePanel" class="card disclosure-panel reveal" style="--d: 105ms">
           <details id="publicSharesDetails" class="context-disclosure" data-filelab-disclosure-key="filelab-public-shares-open-v1">
             <summary>

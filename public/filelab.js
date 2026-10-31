@@ -193,6 +193,12 @@ const workspaceReplaceApplyBtnEl = document.getElementById("workspaceReplaceAppl
 const workspaceReplaceStatusEl = document.getElementById("workspaceReplaceStatus");
 const workspaceReplaceSummaryEl = document.getElementById("workspaceReplaceSummary");
 const workspaceReplaceResultsEl = document.getElementById("workspaceReplaceResults");
+const codeMapPathInputEl = document.getElementById("codeMapPathInput");
+const codeMapBtnEl = document.getElementById("codeMapBtn");
+const codeMapRefreshBtnEl = document.getElementById("codeMapRefreshBtn");
+const codeMapStatusEl = document.getElementById("codeMapStatus");
+const codeMapSummaryEl = document.getElementById("codeMapSummary");
+const codeMapResultsEl = document.getElementById("codeMapResults");
 
 const refreshBtnEl = document.getElementById("refreshBtn");
 const goDirBtnEl = document.getElementById("goDirBtn");
@@ -1677,6 +1683,63 @@ function workspaceSearchRequest() {
   };
 }
 
+function renderCodeMap(data) {
+  if (!codeMapResultsEl) return;
+  codeMapResultsEl.replaceChildren();
+  for (const file of Array.isArray(data.files) ? data.files : []) {
+    const card = document.createElement("article");
+    card.className = "code-map-file";
+    const heading = document.createElement("div");
+    heading.className = "code-map-file-heading";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "btn btn-soft code-map-open";
+    open.textContent = file.path;
+    open.addEventListener("click", () => openFileByPath(file.path).catch((error) => setStatus(`Error: ${error.message}`)));
+    heading.append(open);
+    const meta = document.createElement("span");
+    meta.className = "tab-meta";
+    meta.textContent = `${file.symbols?.length || 0} symbols · ${file.imports?.length || 0} imports`;
+    heading.append(meta);
+    card.append(heading);
+    const details = document.createElement("div");
+    details.className = "code-map-file-details";
+    const symbols = (file.symbols || []).map((item) => `${item.kind} ${item.name} · L${item.line}`).join("  •  ");
+    const imports = (file.imports || []).map((item) => `${item.source} · L${item.line}`).join("  •  ");
+    details.textContent = [symbols && `Symbols: ${symbols}`, imports && `Imports: ${imports}`].filter(Boolean).join("\n") || "No symbols or imports detected.";
+    card.append(details);
+    codeMapResultsEl.append(card);
+  }
+  if (!data.files?.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted-inline";
+    empty.textContent = "No supported source files were found in this folder.";
+    codeMapResultsEl.append(empty);
+  }
+}
+
+async function loadCodeMap(forceRefresh = false) {
+  if (!codeMapStatusEl) return;
+  const pathValue = normalizeRelativePath(codeMapPathInputEl?.value || "");
+  const query = new URLSearchParams({ path: pathValue });
+  if (forceRefresh) query.set("refresh", "true");
+  codeMapBtnEl && (codeMapBtnEl.disabled = true);
+  codeMapRefreshBtnEl && (codeMapRefreshBtnEl.disabled = true);
+  codeMapStatusEl.textContent = forceRefresh ? "Refreshing code map…" : "Loading code map…";
+  try {
+    const data = await apiJson(`/api/files/code-map?${query.toString()}`);
+    renderCodeMap(data);
+    const summary = data.summary || {};
+    codeMapSummaryEl.textContent = `${summary.fileCount || 0} files · ${summary.symbolCount || 0} symbols · ${summary.importCount || 0} imports`;
+    codeMapStatusEl.textContent = `${summary.fileCount || 0} files indexed${summary.skippedCount ? ` · ${summary.skippedCount} skipped` : ""}.`;
+  } catch (error) {
+    codeMapStatusEl.textContent = `Code map error: ${error.message}`;
+  } finally {
+    codeMapBtnEl && (codeMapBtnEl.disabled = false);
+    codeMapRefreshBtnEl && (codeMapRefreshBtnEl.disabled = false);
+  }
+}
+
 function renderWorkspaceSearchResults(results) {
   workspaceSearchResultsEl.replaceChildren();
   for (const result of results) {
@@ -3049,6 +3112,14 @@ workspaceSearchQueryInputEl?.addEventListener("keydown", (event) => {
 });
 workspaceReplacePreviewBtnEl?.addEventListener("click", previewWorkspaceReplace);
 workspaceReplaceApplyBtnEl?.addEventListener("click", applyWorkspaceReplace);
+codeMapBtnEl?.addEventListener("click", () => loadCodeMap(false));
+codeMapRefreshBtnEl?.addEventListener("click", () => loadCodeMap(true));
+codeMapPathInputEl?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    loadCodeMap(false);
+  }
+});
 
 goDirBtnEl.addEventListener("click", () => {
   loadDirectory(dirPathInputEl.value).catch((error) => setStatus(`Error: ${error.message}`));

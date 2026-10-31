@@ -1502,6 +1502,71 @@ textarea:focus {
   gap: 12px;
 }
 
+.code-map-panel {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.code-map-controls {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) auto auto;
+  gap: 0.65rem;
+  align-items: end;
+}
+
+.code-map-controls label {
+  display: grid;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.code-map-controls input {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 0.55rem;
+  background: var(--panel-strong);
+  color: var(--text);
+  padding: 0.65rem 0.75rem;
+}
+
+.code-map-results {
+  display: grid;
+  gap: 0.6rem;
+  max-height: 28rem;
+  overflow: auto;
+}
+
+.code-map-file {
+  border: 1px solid var(--line);
+  border-radius: 0.65rem;
+  padding: 0.7rem;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+}
+
+.code-map-file-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.code-map-open {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 70%;
+}
+
+.code-map-file-details {
+  white-space: pre-wrap;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  line-height: 1.5;
+  margin-top: 0.55rem;
+}
+
 .workspace-search-controls {
   display: grid;
   grid-template-columns: minmax(220px, 2fr) minmax(120px, 0.7fr) minmax(160px, 1fr) 80px auto auto;
@@ -2758,6 +2823,14 @@ textarea:focus {
 @media (max-width: 900px) {
   .workspace-search-controls {
     grid-template-columns: minmax(0, 1fr) minmax(120px, 0.5fr);
+  }
+
+  .code-map-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .code-map-controls .btn {
+    width: 100%;
   }
 
   .search-query-field,
