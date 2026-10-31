@@ -25,6 +25,10 @@ if [[ -n "$(git -c core.autocrlf=true status --porcelain)" ]]; then
   exit 1
 fi
 
+if [[ "${RAA_DEPLOY_SKIP_TESTS:-false}" != "true" ]]; then
+  node --test tests/*.test.mjs
+fi
+
 if [[ "$skip_push" != "true" ]]; then
   git push origin HEAD
 fi
