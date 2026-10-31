@@ -1195,6 +1195,18 @@ function renderAgentQueueJobs(jobs) {
       addToChat.addEventListener("click", () => importCompletedJobIntoChat(job));
       item.appendChild(addToChat);
     }
+    if (job.result?.review) {
+      const review = job.result.review;
+      const details = document.createElement("details");
+      details.className = "queue-job-output";
+      const summary = document.createElement("summary");
+      summary.textContent = `Review gate: ${review.status || "unknown"}`;
+      const pre = document.createElement("pre");
+      pre.className = "doc-json";
+      pre.textContent = JSON.stringify(review, null, 2);
+      details.append(summary, pre);
+      item.appendChild(details);
+    }
     agentQueueListEl.appendChild(item);
   }
 }
@@ -3659,6 +3671,18 @@ async function pollChatJob(jobId, timeoutMs = 18 * 60 * 1000) {
     }
 
     const job = data?.job || {};
+    if (job.status === "needs_input" && job.question) {
+      pendingUserQuestions.set(String(job.id), {
+        jobId: job.id,
+        questionId: job.question.id,
+        clientChatId: job.recovery?.clientChatId || getActiveChat().id,
+        prompt: job.question.prompt,
+        choices: job.question.choices || []
+      });
+      renderMessages();
+      statusEl.textContent = "The agent is waiting for your answer in the chat.";
+      return { needsInput: true, jobId: job.id, question: job.question };
+    }
     if (job.status === "completed") {
       return { ...(job.result || {}), jobId: job.id };
     }
@@ -3826,7 +3850,11 @@ async function sendPrompt() {
 
   try {
     const data = await submitUserMessageRequest(chatId, userMessage.id);
-    applyChatResponseStatus(data);
+    if (data?.needsInput) {
+      statusEl.textContent = "The agent is waiting for your answer in the chat.";
+    } else {
+      applyChatResponseStatus(data);
+    }
   } catch (error) {
     setFailedRetryTarget(chatId, userMessage.id);
     renderAll();

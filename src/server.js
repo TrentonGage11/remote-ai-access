@@ -101,6 +101,7 @@ import { matchesUnlockCode, parseWorkspaceUnlockCodes } from "./workspace-unlock
 import { extractGeneratedImage, normalizeImageRequest, parseWikimediaImageResults } from "./image-tools.js";
 import { buildWorkspaceActivityTimeline } from "./workspace-activity.js";
 import { collectSubagentArtifacts, extractSubagentContextProposals, mergeSubagentAcceptance } from "./subagent-results.js";
+import { createReviewWorkflow, recordReviewStage } from "./review-workflow.js";
 import {
   managedToolContainerIds,
   MANAGED_TOOL_CONTAINER_CONFIRMATION,
@@ -2054,6 +2055,52 @@ function saveChatJobState() {
   return chatJobPersistenceWriteQueue;
 }
 
+async function runAutomaticReviewWorkflow(req, job, result) {
+  const workflow = createReviewWorkflow();
+  const executedTools = Array.isArray(result?.executedTools) ? result.executedTools : [];
+  if (!executedTools.some((tool) => String(tool).split(":")[0] === "write_file")) {
+    return null;
+  }
+  const cwd = getSandboxRoot();
+  let diff = "";
+  let status = "";
+  try {
+    [{ stdout: status }, { stdout: diff }] = await Promise.all([
+      execFileAsync("git", ["status", "--short"], { cwd, timeout: 10_000, maxBuffer: 200_000 }),
+      execFileAsync("git", ["diff", "--no-color", "--no-ext-diff"], { cwd, timeout: 10_000, maxBuffer: 1_000_000 })
+    ]);
+  } catch (error) {
+    return { ...workflow, status: "changes_requested", error: String(error?.message || error).slice(0, 1000) };
+  }
+  const optimizerFindings = /<<<<<<<|=======|>>>>>>>/.test(diff)
+    ? ["merge-conflict markers are present in the diff"]
+    : [];
+  const chaosFindings = /catch\s*\{\s*\}/.test(diff)
+    ? ["empty catch block may hide runtime failures"]
+    : [];
+  const securityFindings = /(password|api[_-]?key|secret|token)\s*[:=]\s*["'][^"']{8,}/i.test(diff)
+    ? ["possible credential-like literal detected; verify it is not a secret"]
+    : [];
+  let reviewed = recordReviewStage(workflow, "optimizer", { passed: optimizerFindings.length === 0, findings: optimizerFindings });
+  reviewed = recordReviewStage(reviewed, "chaos", { passed: chaosFindings.length === 0, findings: chaosFindings });
+  reviewed = recordReviewStage(reviewed, "security", { passed: securityFindings.length === 0, findings: securityFindings });
+  reviewed.statusText = status.trim().slice(0, 4000);
+  reviewed.reviewedJobId = job.id;
+  await appendAuditLog(req, "agent-review-workflow", {
+    jobId: job.id,
+    status: reviewed.status,
+    findings: [...optimizerFindings, ...chaosFindings, ...securityFindings]
+  });
+  if (reviewed.status === "changes_requested") {
+    await createNotification(req, `Review gate found ${optimizerFindings.length + chaosFindings.length + securityFindings.length} finding(s) for job ${job.id}.`, "warning", {
+      kind: "review-gate",
+      jobId: job.id,
+      status: reviewed.status
+    });
+  }
+  return reviewed;
+}
+
 function scheduleChatJobStateSave() {
   if (chatJobPersistenceTimer) return;
   chatJobPersistenceTimer = setTimeout(() => {
@@ -2348,6 +2395,7 @@ function startQueuedChatJob(job) {
       }
       setChatJobStatus(job, "running", { eventPayload: { provider: job.provider, traceId: job.traceId } });
       const result = await generateChatResponse(execution.reqClone);
+      result.review = await runAutomaticReviewWorkflow(execution.reqClone, job, result);
       result.contextMutations = Array.isArray(execution.reqClone.agentContextMutations)
         ? execution.reqClone.agentContextMutations
         : [];
