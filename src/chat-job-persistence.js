@@ -35,6 +35,7 @@ export function serializeChatJobState(jobs, pausedWorkspaceCodes = new Set()) {
       result: jsonClone(job.result, null),
       error: jsonClone(job.error, null),
       recovery: jsonClone(job.recovery, null),
+      question: jsonClone(job.question, null),
       events: jsonClone(job.events, []),
       scheduleId: job.scheduleId ? String(job.scheduleId) : null,
       requestBody: jsonClone(job.requestBody, null)

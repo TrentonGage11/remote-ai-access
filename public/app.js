@@ -3195,6 +3195,28 @@ async function deliverNotificationEvent(item) {
     return;
   }
 
+  const question = item?.metadata?.kind === "user-question" ? item.metadata : null;
+  if (question?.jobId && question?.questionId) {
+    const choices = Array.isArray(question.choices) && question.choices.length > 0
+      ? `\n\nChoices: ${question.choices.join(", ")}`
+      : "";
+    const answer = window.prompt(`${message}${choices}\n\nAnswer (Cancel leaves the workflow paused):`);
+    if (answer && answer.trim()) {
+      try {
+        const response = await fetch(`/api/chat/jobs/${encodeURIComponent(question.jobId)}/input`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ questionId: question.questionId, answer: answer.trim() })
+        });
+        const data = await parseJsonResponse(response);
+        if (!response.ok) throw new Error(data.error || "Failed to submit answer");
+        statusEl.textContent = "Answer submitted; workflow resumed.";
+      } catch (error) {
+        statusEl.textContent = `Question answer failed: ${error.message}`;
+      }
+    }
+  }
+
   showNotificationToast(level, message);
   maybePlayNotificationSound(level);
 

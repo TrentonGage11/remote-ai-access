@@ -44,3 +44,22 @@ test("writes and reads queue state atomically", async () => {
   assert.deepEqual(await readChatJobState(filePath), state);
   await fsp.rm(directory, { recursive: true, force: true });
 });
+
+test("preserves a durable user question while a job is paused", () => {
+  const question = {
+    id: "question-1",
+    jobId: "job-1",
+    prompt: "Which test profile should I run?",
+    choices: ["unit", "integration"],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    answeredAt: null
+  };
+  const state = serializeChatJobState([{
+    id: "job-1", traceId: "trace-1", status: "needs_input", workspaceCode: "alpha",
+    createdAt: question.createdAt, updatedAt: question.createdAt, question,
+    requestBody: { messages: [{ role: "user", content: "run the checks" }] }, events: []
+  }]);
+  const restored = restoreChatJobState(state);
+  assert.equal(restored.jobs[0].status, "needs_input");
+  assert.deepEqual(restored.jobs[0].question, question);
+});

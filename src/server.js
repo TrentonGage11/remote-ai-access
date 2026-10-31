@@ -2292,6 +2292,7 @@ function getChatJobResponse(job) {
     cancelRequested: Boolean(job.cancelRequested),
     cancelledAt: job.cancelledAt || null,
     recovery: job.recovery || null,
+    question: job.question || null,
     result: job.status === "completed" ? job.result : null,
     error: ["failed", "cancelled"].includes(job.status) ? job.error : null
   };
@@ -2355,7 +2356,13 @@ function startQueuedChatJob(job) {
         setChatJobStatus(job, "completed", { result, eventPayload: { traceId: job.traceId } });
       }
     } catch (error) {
-      if (job.status !== "cancelled") {
+      if (error?.code === "USER_INPUT_REQUIRED" && job.status !== "cancelled") {
+        job.question = error.question || job.question || null;
+        setChatJobStatus(job, "needs_input", {
+          eventPayload: { traceId: job.traceId, questionId: job.question?.id || null }
+        });
+        await saveChatJobState();
+      } else if (job.status !== "cancelled") {
         setChatJobStatus(job, "failed", {
           error: {
             message: String(error?.message || error),
@@ -2367,9 +2374,11 @@ function startQueuedChatJob(job) {
       }
     } finally {
       job.abortController = null;
-      job.execution = null;
-      await finishScheduledAgentRecipeJob(job);
-      dispatchChatJobs();
+      if (job.status !== "needs_input") {
+        job.execution = null;
+      }
+      if (job.status !== "needs_input") await finishScheduledAgentRecipeJob(job);
+      if (job.status !== "needs_input") dispatchChatJobs();
     }
   });
 }
@@ -5298,12 +5307,13 @@ function listScheduledTasks() {
   }));
 }
 
-async function createNotification(req, message, level = "info") {
+async function createNotification(req, message, level = "info", metadata = null) {
   const entry = {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     timestamp: new Date().toISOString(),
     level: String(level || "info").slice(0, 16),
-    message: String(message || "").slice(0, 1000)
+    message: String(message || "").slice(0, 1000),
+    ...(metadata && typeof metadata === "object" ? { metadata: sanitizeAuditPayload(metadata) } : {})
   };
   notificationStore.unshift(entry);
   if (notificationStore.length > 200) {
@@ -5311,6 +5321,38 @@ async function createNotification(req, message, level = "info") {
   }
   await appendAuditLog(req, "notify", { level: entry.level, message: entry.message });
   return entry;
+}
+
+async function requestUserInput(req, args = {}) {
+  const jobId = String(req?.chatJobId || "").trim();
+  const job = jobId ? chatJobStore.get(jobId) : null;
+  if (!job) throw new Error("ask_user is only available during a queued chat job");
+  if (job.question) throw new Error("this chat job is already waiting for an answer");
+  const prompt = String(args.prompt || args.question || "").trim().slice(0, 2000);
+  if (!prompt) throw new Error("prompt is required");
+  const choices = [...new Set((Array.isArray(args.choices) ? args.choices : [])
+    .map((choice) => String(choice || "").trim().slice(0, 200))
+    .filter(Boolean))].slice(0, 12);
+  const question = {
+    id: `question-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    jobId,
+    prompt,
+    choices,
+    createdAt: new Date().toISOString(),
+    answeredAt: null
+  };
+  job.question = question;
+  recordChatJobEvent(job, "needs-input", { questionId: question.id, prompt, choices });
+  await createNotification(req, `Agent question: ${prompt}`, "warning", {
+    kind: "user-question",
+    jobId,
+    questionId: question.id,
+    choices
+  });
+  const error = new Error("Waiting for user input");
+  error.code = "USER_INPUT_REQUIRED";
+  error.question = question;
+  throw error;
 }
 
 async function searchStackOverflow(query, limit) {
@@ -6392,6 +6434,21 @@ const agentToolDefinitions = [
   {
     type: "function",
     function: {
+      name: "ask_user",
+      description: "Pause this workflow and ask the user a question. The chat job resumes when the user answers.",
+      parameters: {
+        type: "object",
+        properties: {
+          prompt: { type: "string", description: "The question to show the user" },
+          choices: { type: "array", items: { type: "string" }, description: "Optional answer choices" }
+        },
+        required: ["prompt"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
       name: "notify_user",
       description: "Create and list lightweight notification entries.",
       parameters: {
@@ -7254,6 +7311,8 @@ async function executeAgentTool(req, callName, args) {
       await appendAuditLog(req, "agent-tool", { name: callName, id: note.id, level: note.level });
       return { ok: true, notification: note };
     }
+    case "ask_user":
+      return requestUserInput(req, args);
     case "spawn_subagent":
       return { ok: true, job: await spawnResearchSubagent(req, args) };
     case "get_subagent":
@@ -7417,6 +7476,7 @@ async function runOpenAiAgentWithTools(req, model, messages, maxSteps = agentMax
           output = await executeAgentTool(req, name, args);
           executedTools.push(name);
         } catch (error) {
+          if (error?.code === "USER_INPUT_REQUIRED") throw error;
           output = { error: String(error?.message || error) };
           ok = false;
           executedTools.push(`${name}:error`);
@@ -9180,6 +9240,45 @@ app.get("/api/chat/jobs/:jobId", async (req, res) => {
   }
 
   return res.json({ ok: true, job: getChatJobResponse(job) });
+});
+
+app.post("/api/chat/jobs/:jobId/input", async (req, res) => {
+  pruneChatJobs();
+  const jobId = String(req.params.jobId || "").trim();
+  const job = chatJobStore.get(jobId);
+  if (!job) return res.status(404).json({ error: "chat job not found" });
+  if (job.workspaceCode !== getWorkspaceContext().code) {
+    return res.status(403).json({ error: "chat job belongs to a different workspace" });
+  }
+  if (job.status !== "needs_input" || !job.question) {
+    return res.status(409).json({ error: "chat job is not waiting for input", job: getChatJobResponse(job) });
+  }
+  const questionId = String(req.body?.questionId || "").trim();
+  if (questionId && questionId !== job.question.id) {
+    return res.status(409).json({ error: "question is stale", job: getChatJobResponse(job) });
+  }
+  const answer = String(req.body?.answer || "").trim().slice(0, 4000);
+  if (!answer) return res.status(400).json({ error: "answer is required" });
+  if (job.question.choices.length > 0 && !job.question.choices.includes(answer)) {
+    return res.status(400).json({ error: "answer must match one of the offered choices", choices: job.question.choices });
+  }
+
+  job.question = { ...job.question, answer, answeredAt: new Date().toISOString() };
+  job.requestBody = {
+    ...(job.requestBody || {}),
+    messages: [
+      ...(Array.isArray(job.requestBody?.messages) ? job.requestBody.messages : []),
+      { role: "user", content: `Answer to agent question (${job.question.prompt}): ${answer}` }
+    ]
+  };
+  recordChatJobEvent(job, "user-input-received", { questionId: job.question.id });
+  job.question = null;
+  job.execution = createChatJobExecution(job, job.requestBody, req);
+  setChatJobStatus(job, "queued", { eventPayload: { resumedFromQuestion: questionId || null } });
+  await appendAuditLog(req, "chat-job-user-input", { jobId, questionId: questionId || null });
+  await saveChatJobState();
+  queueMicrotask(dispatchChatJobs);
+  return res.status(202).json({ ok: true, job: getChatJobResponse(job) });
 });
 
 app.delete("/api/chat/jobs/:jobId", async (req, res) => {
