@@ -4854,12 +4854,15 @@ async function runAutomatedTestProfile(args = {}) {
   const timeoutMs = Math.max(2000, Math.min(10 * 60 * 1000, Number(args.timeoutMs || 120000)));
   const cwdScope = String(args.cwd || "project").trim().toLowerCase();
   const cwd = ["sandbox", "workspace"].includes(cwdScope) ? getSandboxRoot() : projectRoot;
+  const requestedTestPath = String(args.path || "").trim();
 
   let command = "npm";
   let commandArgs = ["test"];
   if (profile === "node-test") {
     command = "node";
-    commandArgs = ["--test"];
+    commandArgs = requestedTestPath
+      ? ["--test", resolveSandboxPath(requestedTestPath).rel]
+      : ["--test"];
   } else if (profile === "chat-jobs-smoke") {
     command = "node";
     commandArgs = ["--test", "tests/chat-jobs.test.mjs"];
@@ -6613,6 +6616,7 @@ const agentToolDefinitions = [
               testCommand: { type: "string" },
               profile: { type: "string", description: "npm-test|npm-lint|node-test|chat-jobs-smoke" },
               cwd: { type: "string", description: "workspace|sandbox|project" },
+              path: { type: "string", description: "explicit test file path, such as tdd-demo/hello.test.mjs" },
               testFile: { type: "string" },
               maxAttempts: { type: "number" },
               timeoutMs: { type: "number" }
@@ -6777,6 +6781,7 @@ function startSubagentJob(job) {
           runTest: async () => runAutomatedTestProfile({
             profile: job.tdd.profile,
             cwd: job.tdd.cwd,
+            path: job.tdd.path,
             timeoutMs: job.tdd.timeoutMs
           })
         });
@@ -6855,6 +6860,7 @@ function normalizeTddConfig(value, role) {
     cwd: ["workspace", "sandbox", "project"].includes(String(value.cwd || "workspace").trim().toLowerCase())
       ? String(value.cwd || "workspace").trim().toLowerCase()
       : "workspace",
+    path: String(value.path || "").trim().replace(/\\/g, "/").slice(0, 500) || null,
     testFile: String(value.testFile || "").trim().slice(0, 500) || null,
     maxAttempts: Math.max(1, Math.min(8, Number(value.maxAttempts || 3))),
     timeoutMs: Math.max(2_000, Math.min(10 * 60 * 1000, Number(value.timeoutMs || 120_000)))
