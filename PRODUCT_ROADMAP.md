@@ -8,12 +8,9 @@ and **planned** has not been implemented yet.
 
 ## Next recommended slice
 
-Wire the tested TDD workflow into the live coding-job runner. The next pass should
-create a durable tests-first run, execute the configured test command inside the
-workspace, capture stdout/stderr, permit only bounded repair attempts, and pause
-for explicit human approval before any commit. Once that path is live, feed the
-workspace code-map results into agent context so edits can target relevant
-symbols without loading the whole tree.
+Finish the opt-in TDD workflow in the live coding-job runner by adding a richer
+approval surface and then feed workspace code-map results into agent context so
+edits can target relevant symbols without loading the whole tree.
 
 ## Current Delivery Batch
 
@@ -126,8 +123,10 @@ Status: in progress
 
 - TDD state machine: tests-first, bounded execution/repair attempts, captured
   stdout/stderr, and a commit-ready state only after a passing test result.
-  **Partial:** the pure state machine and tests exist, but the workflow is not yet
-  wired into live coding-job execution.
+  **Partial:** an opt-in coding-child loop now executes the configured test
+  profile, captures output, feeds failures back for bounded repair attempts, and
+  exposes `commitReady` only after a pass; a richer explicit commit-approval UI
+  remains.
 - Optimizer/reviewer graph: **deployed** implementation pass followed by
   independent edge-case and security review, with explicit artifact acceptance.
 - Workspace code map v1: **deployed** as a workspace-scoped cached `/api/files/code-map`
@@ -175,7 +174,7 @@ Views, downloads, last access, expiration warnings, revocation, and one-click ex
 
 ## Recommended follow-on order
 
-1. Complete live TDD runner integration and human commit approval.
+1. Add the richer TDD commit-approval UI and persistence.
 2. Inject relevant code-map symbols/imports into agent prompts.
 3. Finish the Portable Workspace Bundles UI with encrypted export, import preview,
    conflict handling, and selective restore.

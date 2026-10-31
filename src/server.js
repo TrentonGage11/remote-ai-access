@@ -103,6 +103,7 @@ import { buildWorkspaceActivityTimeline } from "./workspace-activity.js";
 import { buildCodeMap, codeMapSummary } from "./code-map.js";
 import { collectSubagentArtifacts, extractSubagentContextProposals, mergeSubagentAcceptance } from "./subagent-results.js";
 import { createReviewWorkflow, recordReviewStage } from "./review-workflow.js";
+import { runTddRepairLoop } from "./tdd-runner.js";
 import {
   managedToolContainerIds,
   MANAGED_TOOL_CONTAINER_CONFIRMATION,
@@ -4851,7 +4852,7 @@ async function runAutomatedTestProfile(args = {}) {
   const profile = String(args.profile || "npm-test").trim().toLowerCase();
   const timeoutMs = Math.max(2000, Math.min(10 * 60 * 1000, Number(args.timeoutMs || 120000)));
   const cwdScope = String(args.cwd || "project").trim().toLowerCase();
-  const cwd = cwdScope === "sandbox" ? getSandboxRoot() : projectRoot;
+  const cwd = ["sandbox", "workspace"].includes(cwdScope) ? getSandboxRoot() : projectRoot;
 
   let command = "npm";
   let commandArgs = ["test"];
@@ -6604,6 +6605,18 @@ const agentToolDefinitions = [
           model: { type: "string" },
           allowedTools: { type: "array", items: { type: "string" } },
           allowedPaths: { type: "array", items: { type: "string" } },
+          tdd: {
+            type: "object",
+            description: "Optional bounded tests-first repair loop for coding children.",
+            properties: {
+              testCommand: { type: "string" },
+              profile: { type: "string", description: "npm-test|npm-lint|node-test|chat-jobs-smoke" },
+              cwd: { type: "string", description: "workspace|sandbox|project" },
+              testFile: { type: "string" },
+              maxAttempts: { type: "number" },
+              timeoutMs: { type: "number" }
+            }
+          },
           maxSteps: { type: "number" },
           timeoutMs: { type: "number" }
         },
@@ -6677,6 +6690,7 @@ function publicSubagentJob(job) {
     allowedPaths: job.allowedPaths || [],
     limits: job.limits ? { maxSteps: job.limits.maxSteps, timeoutMs: job.limits.timeoutMs } : null,
     approvedAt: job.approvedAt || null,
+    tdd: job.tdd || null,
     createdAt: job.createdAt,
     startedAt: job.startedAt,
     completedAt: job.completedAt,
@@ -6716,6 +6730,7 @@ function startSubagentJob(job) {
     const profile = ["image", "coding"].includes(job.role) ? "standard" : "read-only";
     const action = job.role === "review" ? "Review" : job.role === "image" ? "Find or create imagery for" : job.role === "coding" ? "Implement" : "Research";
     const pathRule = job.role === "coding" ? ` You may write only these exact approved paths: ${job.allowedPaths.join(", ")}. Leave all changes uncommitted for human review in Git Change Center.` : "";
+    const basePrompt = `${action} this focused task and return a concise evidence-based result with sources, files, and tool evidence.${pathRule} Do not mutate persistent context. If useful, propose context separately using an exact fenced block such as \`\`\`raa-context add with scope and label header lines; proposals require parent acceptance.\n\n${job.task}`;
     const childReq = {
       body: {
         provider: job.provider,
@@ -6723,7 +6738,7 @@ function startSubagentJob(job) {
         agentMode: true,
         toolProfile: profile,
         agentMaxStepsOverride: job.limits.maxSteps,
-        messages: [{ role: "user", content: `${action} this focused task and return a concise evidence-based result with sources, files, and tool evidence.${pathRule} Do not mutate persistent context. If useful, propose context separately using an exact fenced block such as \`\`\`raa-context add with scope and label header lines; proposals require parent acceptance.\n\n${job.task}` }]
+        messages: [{ role: "user", content: basePrompt }]
       },
       headers: {},
       ip: "internal-subagent",
@@ -6741,7 +6756,40 @@ function startSubagentJob(job) {
       onJobEvent: (type, payload) => recordSubagentEvent(job, type, payload)
     };
     try {
-      const response = await generateChatResponse(childReq);
+      let response;
+      if (job.tdd) {
+        const tddResult = await runTddRepairLoop({
+          testCommand: job.tdd.testCommand,
+          maxAttempts: job.tdd.maxAttempts,
+          testFile: job.tdd.testFile,
+          generateAttempt: async ({ feedback }) => {
+            childReq.body.messages = [{
+              role: "user",
+              content: feedback
+                ? `${basePrompt}\n\nTDD feedback from the previous attempt:\n${feedback}`
+                : `${basePrompt}\n\nTDD requirement: write or update the tests first, then implement the requested change. Do not commit.`
+            }];
+            const attempt = await generateChatResponse(childReq);
+            recordSubagentEvent(job, "tdd-attempt", { attempt: (job.tdd.attempt || 0) + 1 });
+            return attempt;
+          },
+          runTest: async () => runAutomatedTestProfile({
+            profile: job.tdd.profile,
+            cwd: job.tdd.cwd,
+            timeoutMs: job.tdd.timeoutMs
+          })
+        });
+        job.tdd = tddResult.state;
+        recordSubagentEvent(job, "tdd-test", {
+          status: job.tdd.status,
+          attempt: job.tdd.attempt,
+          passed: Boolean(tddResult.testResult?.ok),
+          exitCode: tddResult.testResult?.exitCode ?? null
+        });
+        response = tddResult.response;
+      } else {
+        response = await generateChatResponse(childReq);
+      }
       if (job.status !== "cancelled") {
         job.status = "completed";
         job.completedAt = new Date().toISOString();
@@ -6751,6 +6799,7 @@ function startSubagentJob(job) {
           evidence: job.events.filter((event) => event.type === "tool-end").slice(-20).map((event) => event.payload),
           usage: { ...normalizeTokenUsage(response.usage), elapsedMs: Date.now() - Date.parse(job.startedAt) }
         };
+        if (job.tdd) job.result.tdd = job.tdd;
         job.result.artifacts = collectSubagentArtifacts(job.events);
         job.result.proposedContextMutations = extractSubagentContextProposals(job.result.summary);
         recordSubagentEvent(job, "completed", { executedTools: job.result.executedTools });
@@ -6793,6 +6842,24 @@ async function normalizeCodingWriteScopes(values) {
   }));
 }
 
+function normalizeTddConfig(value, role) {
+  if (role !== "coding" || !value || typeof value !== "object") return null;
+  const profile = String(value.profile || "npm-test").trim().toLowerCase();
+  if (!["npm-test", "npm-lint", "node-test", "chat-jobs-smoke"].includes(profile)) {
+    throw new Error("unsupported TDD test profile");
+  }
+  return {
+    testCommand: String(value.testCommand || profile).trim().slice(0, 500),
+    profile,
+    cwd: ["workspace", "sandbox", "project"].includes(String(value.cwd || "workspace").trim().toLowerCase())
+      ? String(value.cwd || "workspace").trim().toLowerCase()
+      : "workspace",
+    testFile: String(value.testFile || "").trim().slice(0, 500) || null,
+    maxAttempts: Math.max(1, Math.min(8, Number(value.maxAttempts || 3))),
+    timeoutMs: Math.max(2_000, Math.min(10 * 60 * 1000, Number(value.timeoutMs || 120_000)))
+  };
+}
+
 async function spawnResearchSubagent(req, args) {
   if (req?.internalAgentAuthorization) throw Object.assign(new Error("subagents cannot spawn children"), { status: 403 });
   const parentId = subagentParentId(req);
@@ -6823,13 +6890,14 @@ async function spawnResearchSubagent(req, args) {
   if (!providedKey) throw Object.assign(new Error("API key required for subagents"), { status: 401 });
   const provider = String(args?.provider || req.body?.provider || defaultProvider).trim().toLowerCase();
   const model = String(args?.model || req.body?.model || "").trim();
+  const tdd = normalizeTddConfig(args?.tdd, role);
   const id = `subagent-${Date.now()}-${subagentJobCounter++}`;
   const abortController = new AbortController();
   const workspaceCode = getWorkspaceContext().code;
   const job = {
     id, parentId, idempotencyKey, task, role, provider, model, workspaceCode, allowedTools, allowedPaths,
     status: role === "coding" ? "awaiting_approval" : "queued", createdAt: new Date().toISOString(), startedAt: null, completedAt: null,
-    approvedAt: null, events: [], result: null, error: null, acceptance: { artifacts: {}, context: {}, updatedAt: null }, abortController, timeout: null,
+    approvedAt: null, tdd, events: [], result: null, error: null, acceptance: { artifacts: {}, context: {}, updatedAt: null }, abortController, timeout: null,
     limits, apiKeyFingerprint: createHash("sha256").update(providedKey).digest("hex"), workspaceContext: getWorkspaceContext(), workspaceContextStore
   };
   if (role === "coding") recordSubagentEvent(job, "awaiting-approval", { allowedTools, allowedPaths });
@@ -6887,7 +6955,7 @@ async function executeAgentTool(req, callName, args) {
           { method: "POST", path: "/api/files/diff/paths", purpose: "Diff two paths" },
           { method: "POST", path: "/api/files/merge/from-snapshot", purpose: "Merge file from snapshot" },
           { method: "GET", path: "/api/files/search?q=...&mode=...", purpose: "Search files" },
-          { method: "GET", path: "/api/tests/profiles", purpose: "List test profiles" },
+      { method: "GET", path: "/api/tests/profiles", purpose: "List test profiles" },
           { method: "POST", path: "/api/tests/run", purpose: "Run test profile" }
         ]
       };
