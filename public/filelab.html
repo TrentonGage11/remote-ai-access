@@ -201,7 +201,10 @@
                 <label for="bundlePasswordInput">Bundle password
                   <input id="bundlePasswordInput" type="password" minlength="8" autocomplete="new-password" placeholder="At least 8 characters" />
                 </label>
-                <label class="share-toggle"><input id="bundleMetadataInput" type="checkbox" /> Include snapshots, recipes, and audit history</label>
+                <label class="bundle-metadata-toggle" for="bundleMetadataInput">
+                  <input id="bundleMetadataInput" type="checkbox" />
+                  <span>Include snapshots, recipes, and audit history</span>
+                </label>
                 <button id="bundleExportBtn" class="btn" type="button">Export encrypted bundle</button>
                 <label for="bundleFileInput" class="btn btn-soft">Choose bundle<input id="bundleFileInput" class="visually-hidden-file-input" type="file" accept=".raa-bundle,.txt" /></label>
               </div>
