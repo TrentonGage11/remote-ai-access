@@ -145,6 +145,7 @@ const defaultUploadMaxBytes = Math.max(1024, Number(process.env.FILE_API_UPLOAD_
 const workspaceUploadBypassCodesRaw = String(process.env.WORKSPACE_UPLOAD_BYPASS_CODES || "");
 const workspaceUploadBypassCodes = parseWorkspaceUploadBypassCodes(workspaceUploadBypassCodesRaw);
 const workspaceAgentStepOverrideCodesRaw = String(process.env.WORKSPACE_AGENT_STEP_OVERRIDE_CODES || "");
+const workspaceCodingAutoApproveCodesRaw = String(process.env.WORKSPACE_CODING_AUTO_APPROVE_CODES || "");
 const chunkUploadThresholdBytes = Math.max(1024 * 1024, Number(process.env.FILE_API_CHUNK_UPLOAD_THRESHOLD_BYTES || 64 * 1024 * 1024));
 const chunkUploadChunkSizeBytes = Math.max(256 * 1024, Number(process.env.FILE_API_CHUNK_SIZE_BYTES || 4 * 1024 * 1024));
 const chunkUploadMaxChunkSizeBytes = Math.max(chunkUploadChunkSizeBytes, Number(process.env.FILE_API_MAX_CHUNK_SIZE_BYTES || 64 * 1024 * 1024));
@@ -750,6 +751,7 @@ function getDefaultAdminSecuritySettings() {
     apiKeyRequireHeaderOnly,
     agentMaxStepsOverrideCode,
     workspaceAgentStepOverrideCodesRaw,
+    workspaceCodingAutoApproveCodesRaw,
     workspaceUploadBypassCodesRaw,
     updatedAt: null
   };
@@ -775,6 +777,7 @@ async function loadAdminSecuritySettings() {
       apiKeyRequireHeaderOnly: parsed?.apiKeyRequireHeaderOnly !== false,
       agentMaxStepsOverrideCode: String(parsed?.agentMaxStepsOverrideCode || fallback.agentMaxStepsOverrideCode).trim(),
       workspaceAgentStepOverrideCodesRaw: String(parsed?.workspaceAgentStepOverrideCodesRaw ?? fallback.workspaceAgentStepOverrideCodesRaw ?? "").trim(),
+      workspaceCodingAutoApproveCodesRaw: String(parsed?.workspaceCodingAutoApproveCodesRaw ?? fallback.workspaceCodingAutoApproveCodesRaw ?? "").trim(),
       workspaceUploadBypassCodesRaw: String(parsed?.workspaceUploadBypassCodesRaw ?? fallback.workspaceUploadBypassCodesRaw ?? "").trim()
     };
   } catch {
@@ -798,6 +801,7 @@ async function saveAdminSecuritySettings(update = {}) {
     apiKeyRequireHeaderOnly: update?.apiKeyRequireHeaderOnly !== false,
     agentMaxStepsOverrideCode: String(update?.agentMaxStepsOverrideCode ?? current.agentMaxStepsOverrideCode ?? "").trim(),
     workspaceAgentStepOverrideCodesRaw: String(update?.workspaceAgentStepOverrideCodesRaw ?? current.workspaceAgentStepOverrideCodesRaw ?? "").trim(),
+    workspaceCodingAutoApproveCodesRaw: String(update?.workspaceCodingAutoApproveCodesRaw ?? current.workspaceCodingAutoApproveCodesRaw ?? "").trim(),
     workspaceUploadBypassCodesRaw: String(update?.workspaceUploadBypassCodesRaw ?? current.workspaceUploadBypassCodesRaw ?? "").trim(),
     updatedAt: new Date().toISOString()
   };
@@ -820,6 +824,7 @@ async function getEffectiveSecuritySettings() {
     apiKeyRequireHeaderOnly: settings.apiKeyRequireHeaderOnly !== false,
     agentMaxStepsOverrideCode: String(settings.agentMaxStepsOverrideCode || "").trim(),
     workspaceAgentStepOverrideCodes: parseWorkspaceUnlockCodes(settings.workspaceAgentStepOverrideCodesRaw, normalizeWorkspaceCode),
+    workspaceCodingAutoApproveCodes: parseWorkspaceUnlockCodes(settings.workspaceCodingAutoApproveCodesRaw, normalizeWorkspaceCode),
     workspaceUploadBypassCodes: parseWorkspaceUploadBypassCodes(settings.workspaceUploadBypassCodesRaw)
   };
 }
@@ -835,6 +840,7 @@ function getEffectiveSecuritySettingsSync() {
     apiKeyRequireHeaderOnly: settings.apiKeyRequireHeaderOnly !== false,
     agentMaxStepsOverrideCode: String(settings.agentMaxStepsOverrideCode || "").trim(),
     workspaceAgentStepOverrideCodes: parseWorkspaceUnlockCodes(settings.workspaceAgentStepOverrideCodesRaw, normalizeWorkspaceCode),
+    workspaceCodingAutoApproveCodes: parseWorkspaceUnlockCodes(settings.workspaceCodingAutoApproveCodesRaw, normalizeWorkspaceCode),
     workspaceUploadBypassCodes: parseWorkspaceUploadBypassCodes(settings.workspaceUploadBypassCodesRaw)
   };
 }
@@ -6609,6 +6615,7 @@ const agentToolDefinitions = [
           model: { type: "string" },
           allowedTools: { type: "array", items: { type: "string" } },
           allowedPaths: { type: "array", items: { type: "string" } },
+          autoApproveCode: { type: "string", description: "Workspace-scoped Security Admin key for skipping the initial approval of this coding child. Never log or return this value." },
           tdd: {
             type: "object",
             description: "Optional bounded tests-first repair loop for coding children.",
@@ -6695,6 +6702,7 @@ function publicSubagentJob(job) {
     allowedPaths: job.allowedPaths || [],
     limits: job.limits ? { maxSteps: job.limits.maxSteps, timeoutMs: job.limits.timeoutMs } : null,
     approvedAt: job.approvedAt || null,
+    autoApproved: Boolean(job.autoApproved),
     tdd: job.tdd || null,
     createdAt: job.createdAt,
     startedAt: job.startedAt,
@@ -6901,16 +6909,23 @@ async function spawnResearchSubagent(req, args) {
   const id = `subagent-${Date.now()}-${subagentJobCounter++}`;
   const abortController = new AbortController();
   const workspaceCode = getWorkspaceContext().code;
+  const requestedAutoApproveCode = String(args?.autoApproveCode || "").trim();
+  const configuredAutoApproveCode = security.workspaceCodingAutoApproveCodes.get(workspaceCode) || "";
+  const autoApproved = role === "coding"
+    && Boolean(requestedAutoApproveCode)
+    && Boolean(configuredAutoApproveCode)
+    && matchesUnlockCode(requestedAutoApproveCode, configuredAutoApproveCode);
   const job = {
     id, parentId, idempotencyKey, task, role, provider, model, workspaceCode, allowedTools, allowedPaths,
-    status: role === "coding" ? "awaiting_approval" : "queued", createdAt: new Date().toISOString(), startedAt: null, completedAt: null,
-    approvedAt: null, tdd, events: [], result: null, error: null, acceptance: { artifacts: {}, context: {}, updatedAt: null }, abortController, timeout: null,
+    status: role === "coding" && !autoApproved ? "awaiting_approval" : "queued", createdAt: new Date().toISOString(), startedAt: null, completedAt: null,
+    approvedAt: autoApproved ? new Date().toISOString() : null, autoApproved, tdd, events: [], result: null, error: null, acceptance: { artifacts: {}, context: {}, updatedAt: null }, abortController, timeout: null,
     limits, apiKeyFingerprint: createHash("sha256").update(providedKey).digest("hex"), workspaceContext: getWorkspaceContext(), workspaceContextStore
   };
-  if (role === "coding") recordSubagentEvent(job, "awaiting-approval", { allowedTools, allowedPaths });
+  if (role === "coding" && !autoApproved) recordSubagentEvent(job, "awaiting-approval", { allowedTools, allowedPaths });
+  if (autoApproved) recordSubagentEvent(job, "auto-approved", { workspaceCode });
   subagentJobStore.set(id, job);
-  if (role !== "coding") startSubagentJob(job);
-  await appendAuditLog(req, "subagent-spawn", { id, parentId, role, provider, model, allowedTools, maxSteps: limits.maxSteps, timeoutMs: limits.timeoutMs });
+  if (role !== "coding" || autoApproved) startSubagentJob(job);
+  await appendAuditLog(req, "subagent-spawn", { id, parentId, role, provider, model, allowedTools, autoApproved, maxSteps: limits.maxSteps, timeoutMs: limits.timeoutMs });
   return publicSubagentJob(job);
 }
 
@@ -8467,6 +8482,7 @@ app.get("/api/admin/security", async (_req, res) => {
       apiKeyRequireHeaderOnly: settings.apiKeyRequireHeaderOnly !== false,
       agentMaxStepsOverrideCode: String(settings.agentMaxStepsOverrideCode || "").trim(),
       workspaceAgentStepOverrideCodesRaw: String(settings.workspaceAgentStepOverrideCodesRaw || ""),
+      workspaceCodingAutoApproveCodesRaw: String(settings.workspaceCodingAutoApproveCodesRaw || ""),
       workspaceUploadBypassCodesRaw: String(settings.workspaceUploadBypassCodesRaw || ""),
       updatedAt: settings.updatedAt || null,
       settingsDbPath: adminSettingsDbPath
@@ -8488,6 +8504,7 @@ app.put("/api/admin/security", async (req, res) => {
       apiKeyRequireHeaderOnly: payload.apiKeyRequireHeaderOnly,
       agentMaxStepsOverrideCode: payload.agentMaxStepsOverrideCode,
       workspaceAgentStepOverrideCodesRaw: payload.workspaceAgentStepOverrideCodesRaw,
+      workspaceCodingAutoApproveCodesRaw: payload.workspaceCodingAutoApproveCodesRaw,
       workspaceUploadBypassCodesRaw: payload.workspaceUploadBypassCodesRaw
     };
 
@@ -8503,6 +8520,7 @@ app.put("/api/admin/security", async (req, res) => {
         apiKeyRequireHeaderOnly: saved.apiKeyRequireHeaderOnly !== false,
         agentMaxStepsOverrideCode: String(saved.agentMaxStepsOverrideCode || "").trim(),
         workspaceAgentStepOverrideCodesRaw: String(saved.workspaceAgentStepOverrideCodesRaw || ""),
+        workspaceCodingAutoApproveCodesRaw: String(saved.workspaceCodingAutoApproveCodesRaw || ""),
         workspaceUploadBypassCodesRaw: String(saved.workspaceUploadBypassCodesRaw || ""),
         updatedAt: saved.updatedAt || null,
         settingsDbPath: adminSettingsDbPath

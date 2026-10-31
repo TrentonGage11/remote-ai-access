@@ -90,6 +90,10 @@
         <label for="uploadBypassCodesInput">Workspace Upload Bypass Codes (CSV workspace:code pairs)</label>
         <textarea id="uploadBypassCodesInput" rows="4" placeholder="default:secret123,alice:another-secret"></textarea>
 
+        <label for="workspaceCodingAutoApproveCodesInput">Workspace Coding Auto-Approve Keys (CSV workspace:key pairs)</label>
+        <textarea id="workspaceCodingAutoApproveCodesInput" rows="4" placeholder="default:tdd-auto-key,alice:another-key"></textarea>
+        <p class="muted-inline">A coding child still needs exact approved paths and tools. This key only skips the initial browser approval for the named workspace; it never commits code automatically.</p>
+
         <div class="actions" style="margin-top: 10px;">
           <button id="saveSettingsBtn" class="btn" type="button">Save Settings</button>
           <button id="reloadSettingsBtn" class="btn btn-soft" type="button">Reload</button>
@@ -104,6 +108,6 @@
     </main>
 
     <script src="api-auth.js"></script>
-    <script type="module" src="security-admin.js?v=20260829a"></script>
+    <script type="module" src="security-admin.js?v=20261031b"></script>
   </body>
 </html>
