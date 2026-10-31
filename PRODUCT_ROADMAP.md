@@ -85,6 +85,33 @@ Status: deployed
 
 ## Follow-up Features
 
+### Interactive Human-in-the-Loop Flows
+
+Status: planned (design contract defined)
+
+Agent workflows may pause in a durable `needs_input` state when they need a
+choice, clarification, or explicit approval. The server will create a
+workspace-scoped notification containing the question, optional choices, and a
+stable response token. The user can answer from the notification or from the
+originating chat; the answer resumes the exact workflow rather than starting a
+new unrelated run. Expired questions, cancellation, and duplicate answers are
+handled idempotently and every transition is audit logged. This is also the
+mechanism for TDD commit approval, chaos-review findings, deployment gates, and
+long-running scheduled recipes.
+
+### Phase 1: Agent Verification Workflows
+
+Status: in progress
+
+- TDD state machine: tests-first, bounded execution/repair attempts, captured
+  stdout/stderr, and a commit-ready state only after a passing test result.
+- Optimizer/reviewer graph: an implementation pass followed by independent
+  edge-case and security review, with explicit artifact acceptance.
+- Workspace code map v1: cached symbols/imports index with regex fallback when
+  a language parser is unavailable.
+- No automatic commit or deployment: the existing write and Git approval gates
+  remain authoritative.
+
 ### Image Search and Generation
 
 Status: deployed
