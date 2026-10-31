@@ -104,6 +104,7 @@ import { buildCodeMap, codeMapSummary } from "./code-map.js";
 import { collectSubagentArtifacts, extractSubagentContextProposals, mergeSubagentAcceptance } from "./subagent-results.js";
 import { createReviewWorkflow, recordReviewStage } from "./review-workflow.js";
 import { runTddRepairLoop } from "./tdd-runner.js";
+import { approveTddCommit } from "./tdd-workflow.js";
 import {
   managedToolContainerIds,
   MANAGED_TOOL_CONTAINER_CONFIRMATION,
@@ -6928,6 +6929,7 @@ async function executeAgentTool(req, callName, args) {
           { method: "POST", path: "/api/chat", purpose: "Chat endpoint (supports OpenAI, Copilot, Google, xAI, DeepSeek, Anthropic Claude, Together AI, and OpenRouter; agentMode is available on configured OpenAI-compatible providers)" },
           { method: "GET", path: "/api/activity?limit=...", purpose: "Unified workspace activity timeline" },
           { method: "POST", path: "/api/chat/subagents/:id/approve", purpose: "Approve and start a pending coding child" },
+          { method: "POST", path: "/api/chat/subagents/:id/tdd-approve", purpose: "Approve a passing TDD child for human Git commit" },
           { method: "PATCH", path: "/api/chat/subagents/:id/acceptance", purpose: "Accept or reject declared child artifacts and context proposals" },
           { method: "GET", path: "/api/tools", purpose: "Tool catalog and capabilities" },
           { method: "GET", path: "/api/notifications?limit=...", purpose: "Recent notify_user entries" },
@@ -9323,6 +9325,29 @@ app.post("/api/chat/subagents/:subagentId/approve", async (req, res) => {
     allowedPaths: job.allowedPaths
   });
   return res.json({ ok: true, job: publicSubagentJob(job) });
+});
+
+app.post("/api/chat/subagents/:subagentId/tdd-approve", async (req, res) => {
+  try {
+    const requestOrigin = String(req.headers.origin || "").trim();
+    if (!requestOrigin || (authEnabled && !req.basicAuthAuthenticated)) {
+      return res.status(403).json({ error: "TDD approval requires an authenticated browser session" });
+    }
+    const job = subagentJobStore.get(String(req.params.subagentId || "").trim());
+    if (!job) return res.status(404).json({ error: "subagent not found" });
+    if (job.workspaceCode !== getWorkspaceContext().code) {
+      return res.status(403).json({ error: "subagent belongs to a different workspace" });
+    }
+    if (job.role !== "coding" || !job.tdd) {
+      return res.status(409).json({ error: "this coding child does not have a TDD workflow", job: publicSubagentJob(job) });
+    }
+    job.tdd = approveTddCommit(job.tdd);
+    recordSubagentEvent(job, "tdd-commit-approved", { attempt: job.tdd.attempt });
+    await appendAuditLog(req, "subagent-tdd-approval", { id: job.id, parentId: job.parentId, attempt: job.tdd.attempt });
+    return res.json({ ok: true, job: publicSubagentJob(job) });
+  } catch (error) {
+    return res.status(Number(error?.status || 400)).json({ error: String(error?.message || "TDD approval failed") });
+  }
 });
 
 app.patch("/api/chat/subagents/:subagentId/acceptance", async (req, res) => {

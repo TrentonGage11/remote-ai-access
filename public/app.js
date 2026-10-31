@@ -1357,6 +1357,43 @@ function renderSubagentOperations(jobs) {
     }
     item.appendChild(metadata);
 
+    if (job.tdd) {
+      const tdd = job.tdd;
+      const panel = document.createElement("div");
+      panel.className = "subagent-tdd-panel";
+      const label = document.createElement("strong");
+      label.textContent = `TDD: ${tdd.status || "unknown"}`;
+      const detail = document.createElement("span");
+      detail.className = "tab-meta";
+      detail.textContent = `${tdd.attempt || 0}/${tdd.maxAttempts || "?"} attempts · ${tdd.testCommand || "configured tests"}`;
+      panel.append(label, detail);
+      if (tdd.lastResult?.stderr || tdd.lastResult?.stdout) {
+        const output = document.createElement("details");
+        output.className = "queue-job-output";
+        const summary = document.createElement("summary");
+        summary.textContent = "Latest test output";
+        const pre = document.createElement("pre");
+        pre.className = "doc-json";
+        pre.textContent = [tdd.lastResult.stdout, tdd.lastResult.stderr].filter(Boolean).join("\n");
+        output.append(summary, pre);
+        panel.appendChild(output);
+      }
+      if (tdd.status === "passed" && !tdd.commitApproved) {
+        const approve = document.createElement("button");
+        approve.className = "btn";
+        approve.type = "button";
+        approve.textContent = "Approve TDD commit";
+        approve.addEventListener("click", () => approveSubagentTddCommit(job.id));
+        panel.appendChild(approve);
+      } else if (tdd.commitApproved) {
+        const approved = document.createElement("span");
+        approved.className = "status-pill is-ok";
+        approved.textContent = "TDD commit approved — commit in Git Change Center";
+        panel.appendChild(approved);
+      }
+      item.appendChild(panel);
+    }
+
     const permissions = Array.isArray(job.allowedTools) ? job.allowedTools : [];
     if (permissions.length > 0) {
       const details = document.createElement("details");
@@ -1505,6 +1542,17 @@ async function approveCodingSubagent(subagentId) {
   const data = await parseJsonResponse(response);
   if (!response.ok) subagentOperationsStatusEl.textContent = `Error: ${data.error || "Approval failed"}`;
   await loadSubagentOperations();
+}
+
+async function approveSubagentTddCommit(subagentId) {
+  try {
+    const response = await fetch(`/api/chat/subagents/${encodeURIComponent(subagentId)}/tdd-approve`, { method: "POST" });
+    const data = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "TDD approval failed");
+    await loadSubagentOperations();
+  } catch (error) {
+    subagentOperationsStatusEl.textContent = `Error: ${error.message}`;
+  }
 }
 
 async function updateSubagentAcceptance(job, section, key, decision) {

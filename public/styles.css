@@ -1286,6 +1286,27 @@ textarea:focus {
   margin-top: 6px;
 }
 
+.subagent-tdd-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 75%, transparent);
+}
+
+.subagent-tdd-panel .queue-job-output {
+  flex-basis: 100%;
+}
+
+.status-pill.is-ok {
+  color: var(--success, #58d68d);
+  font-size: 0.78rem;
+}
+
 .subagent-events {
   margin: 7px 0 0;
   padding-left: 20px;
