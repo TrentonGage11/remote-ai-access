@@ -100,6 +100,7 @@ import {
 import { matchesUnlockCode, parseWorkspaceUnlockCodes } from "./workspace-unlock-codes.js";
 import { extractGeneratedImage, normalizeImageRequest, parseWikimediaImageResults } from "./image-tools.js";
 import { buildWorkspaceActivityTimeline } from "./workspace-activity.js";
+import { buildCodeMap, codeMapSummary } from "./code-map.js";
 import { collectSubagentArtifacts, extractSubagentContextProposals, mergeSubagentAcceptance } from "./subagent-results.js";
 import { createReviewWorkflow, recordReviewStage } from "./review-workflow.js";
 import {
@@ -437,6 +438,7 @@ const videoPreviewCacheRoot = path.join(os.tmpdir(), "remote-ai-video-preview-ca
 const videoPreviewJobs = new Map();
 const imagePreviewCacheRoot = path.join(os.tmpdir(), "remote-ai-image-preview-cache");
 const imagePreviewJobs = new Map();
+const codeMapCache = new Map();
 const adminDashboardToken = String(process.env.ADMIN_DASHBOARD_TOKEN || "").trim();
 const adminSettingsDbPath = path.resolve(process.env.ADMIN_SETTINGS_DB_PATH || path.join(sandboxBaseRoot, "_admin", "settings-db.json"));
 let adminSettingsCache = null;
@@ -9865,6 +9867,7 @@ app.get("/api/tools", (req, res) => {
       { method: "POST", path: "/api/files/diff/paths", purpose: "Diff two sandbox paths", body: { leftPath: "a.txt", rightPath: "b.txt" } },
       { method: "POST", path: "/api/files/merge/from-snapshot", purpose: "Merge path from snapshot into workspace", body: { ref: "HEAD~1", path: "src/app.js" } },
       { method: "GET", path: "/api/files/search?q=term&mode=hybrid&path=src", purpose: "Full-text and semantic search in sandbox files" },
+      { method: "GET", path: "/api/files/code-map?path=src&refresh=false", purpose: "Build or read a cached workspace symbols/imports code map" },
       { method: "GET", path: "/api/tests/profiles", purpose: "List automated test profiles" },
       { method: "POST", path: "/api/tests/run", purpose: "Run automated test profile", body: { profile: "npm-test", cwd: "project" } }
     ]
@@ -9965,7 +9968,8 @@ app.get("/api/openapi.json", (_req, res) => {
       "/api/files/diff": { get: { summary: "Diff refs" } },
       "/api/files/diff/paths": { post: { summary: "Diff paths" } },
       "/api/files/merge/from-snapshot": { post: { summary: "Merge file from snapshot" } },
-      "/api/files/search": { get: { summary: "Search sandbox" } },
+  "/api/files/search": { get: { summary: "Search sandbox" } },
+  "/api/files/code-map": { get: { summary: "Build or read cached workspace code map" } },
       "/api/tests/profiles": { get: { summary: "List test profiles" } },
       "/api/tests/run": { post: { summary: "Run test profile" } },
       "/api/admin/security": {
@@ -10870,6 +10874,26 @@ app.get("/api/files/search", async (req, res) => {
     return res.json(result);
   } catch (error) {
     return res.status(400).json({ error: String(error?.message || "Failed to search sandbox") });
+  }
+});
+
+app.get("/api/files/code-map", async (req, res) => {
+  try {
+    const targetPath = String(req.query.path || "").trim();
+    const refresh = String(req.query.refresh || "").toLowerCase() === "true";
+    const { absolute, rel } = resolveSandboxPath(targetPath);
+    const stat = await fsp.stat(absolute);
+    if (!stat.isDirectory()) return res.status(400).json({ error: "code-map path must be a directory" });
+    const cacheKey = `${getWorkspaceContext().code}:${rel || "."}`;
+    let map = refresh ? null : codeMapCache.get(cacheKey);
+    if (!map) {
+      map = await buildCodeMap(absolute);
+      codeMapCache.set(cacheKey, map);
+    }
+    await appendAuditLog(req, "code-map", { path: rel, refreshed: refresh, ...codeMapSummary(map) });
+    return res.json({ ok: true, path: rel, cached: !refresh && codeMapCache.has(cacheKey), ...map, summary: codeMapSummary(map) });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to build code map") });
   }
 });
 

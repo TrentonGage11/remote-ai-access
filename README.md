@@ -10,6 +10,7 @@ Small web app you can host on an approved domain. It keeps provider API keys on 
 - Optional HTTP Basic Auth
 - Request rate limiting and CSP/security headers
 - File Lab page with sandboxed file editing and drag/drop upload
+- Workspace code-map endpoint (`/api/files/code-map`) for cached symbols/imports indexing with bounded regex fallback
 - Local git snapshot tracking for file operations and rollback support
 - API tools reference page for agent/tool calling instructions
 - OpenAPI schema endpoint for machine-readable API discovery
