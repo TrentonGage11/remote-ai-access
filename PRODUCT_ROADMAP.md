@@ -89,13 +89,14 @@ Status: deployed
 
 ### 8. Portable Workspace Bundles
 
-Status: partial
+Status: deployed; metadata restore remains intentionally selective
 
 - Export selected files, context, recipes, settings, snapshots, and audit history
 - Password-encrypted bundles
-- Import preview, conflict policy, and selective restore
-- The agent-level `export_import_workspace` foundation exists; the user-facing
-  bundle export/import flow and selective restore UI remain TODO.
+- Import preview, conflict policy, and selective file restore
+- Optional recipe and audit-history restore, with imported recipes disabled by default
+- Git snapshot references are previewable but are not treated as portable commits
+- Bundle payloads are capped at 25 MiB with a bundle-only 40 MiB JSON request ceiling
 
 ## Follow-up Features
 

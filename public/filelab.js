@@ -211,6 +211,7 @@ const bundleStatusEl = document.getElementById("bundleStatus");
 const bundlePreviewEl = document.getElementById("bundlePreview");
 let selectedBundleText = "";
 let selectedBundlePaths = new Set();
+let selectedBundleMetadata = { recipes: false, audit: false };
 
 const refreshBtnEl = document.getElementById("refreshBtn");
 const goDirBtnEl = document.getElementById("goDirBtn");
@@ -1755,6 +1756,7 @@ async function loadCodeMap(forceRefresh = false) {
 function renderBundlePreview(data) {
   bundlePreviewEl.replaceChildren();
   selectedBundlePaths = new Set();
+  selectedBundleMetadata = { recipes: false, audit: false };
   for (const file of Array.isArray(data.files) ? data.files : []) {
     const label = document.createElement("label");
     const checkbox = document.createElement("input");
@@ -1766,7 +1768,38 @@ function renderBundlePreview(data) {
     label.append(checkbox, document.createTextNode(` ${file.path} (${formatByteSize(file.bytes || 0)})`));
     bundlePreviewEl.append(label);
   }
-  bundleRestoreBtnEl.disabled = !data.files?.length;
+  const metadata = data.metadata || {};
+  if (metadata.recipes || metadata.audit || metadata.snapshots) {
+    const heading = document.createElement("strong");
+    heading.className = "workspace-bundle-metadata-heading";
+    heading.textContent = "Optional metadata restore";
+    bundlePreviewEl.append(heading);
+    if (metadata.recipes) {
+      const label = document.createElement("label");
+      label.className = "workspace-bundle-metadata-option";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.addEventListener("change", () => { selectedBundleMetadata.recipes = checkbox.checked; });
+      label.append(checkbox, document.createTextNode(` Restore ${metadata.recipes} recipe(s) as disabled imports`));
+      bundlePreviewEl.append(label);
+    }
+    if (metadata.audit) {
+      const label = document.createElement("label");
+      label.className = "workspace-bundle-metadata-option";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.addEventListener("change", () => { selectedBundleMetadata.audit = checkbox.checked; });
+      label.append(checkbox, document.createTextNode(` Restore ${metadata.audit} audit entr${metadata.audit === 1 ? "y" : "ies"}`));
+      bundlePreviewEl.append(label);
+    }
+    if (metadata.snapshots) {
+      const note = document.createElement("span");
+      note.className = "workspace-bundle-metadata-note";
+      note.textContent = `${metadata.snapshots} Git snapshot reference(s) included for inspection; Git commits are not portable in this bundle.`;
+      bundlePreviewEl.append(note);
+    }
+  }
+  bundleRestoreBtnEl.disabled = !data.files?.length && !metadata.recipes && !metadata.audit;
 }
 
 bundleFileInputEl?.addEventListener("change", async () => {
@@ -1808,8 +1841,9 @@ bundlePreviewBtnEl?.addEventListener("click", async () => {
 
 bundleRestoreBtnEl?.addEventListener("click", async () => {
   try {
-    const data = await apiJson("/api/files/bundles/restore", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bundle: selectedBundleText, password: String(bundlePasswordInputEl.value || ""), paths: [...selectedBundlePaths], conflict: bundleConflictSelectEl.value }) });
-    bundleStatusEl.textContent = `Restored ${data.restored.length} files; skipped ${data.skipped.length}.`;
+    const data = await apiJson("/api/files/bundles/restore", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bundle: selectedBundleText, password: String(bundlePasswordInputEl.value || ""), paths: [...selectedBundlePaths], conflict: bundleConflictSelectEl.value, restoreMetadata: selectedBundleMetadata }) });
+    const metadata = data.metadataRestored ? ` Imported ${data.metadataRestored.recipes} recipe(s) and ${data.metadataRestored.audit} audit entr${data.metadataRestored.audit === 1 ? "y" : "ies"}.` : "";
+    bundleStatusEl.textContent = `Restored ${data.restored.length} files; skipped ${data.skipped.length}.${metadata}`;
     await loadDirectory(currentDir);
   } catch (error) {
     bundleStatusEl.textContent = `Bundle restore error: ${error.message}`;

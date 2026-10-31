@@ -5068,7 +5068,7 @@ async function exportImportWorkspace(args = {}) {
 }
 
 const WORKSPACE_BUNDLE_MAX_FILES = 500;
-const WORKSPACE_BUNDLE_MAX_BYTES = 512 * 1024;
+const WORKSPACE_BUNDLE_MAX_BYTES = 25 * 1024 * 1024;
 
 async function collectWorkspaceBundleFiles(paths = []) {
   const requested = Array.isArray(paths) && paths.length > 0 ? paths : [""];
@@ -8115,6 +8115,9 @@ app.use(helmet({
 }));
 
 app.use("/api/chat/archive", express.json({ limit: "25mb" }));
+// Bundles contain base64-encoded file data, so give only these endpoints a
+// larger JSON envelope while keeping the default API body limit unchanged.
+app.use("/api/files/bundles", express.json({ limit: "40mb" }));
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false, limit: "16kb" }));
 
@@ -11032,6 +11035,9 @@ app.post("/api/files/bundles/restore", async (req, res) => {
   try {
     const bundle = decryptWorkspaceBundle(req.body?.bundle, req.body?.password);
     const selected = new Set((Array.isArray(req.body?.paths) ? req.body.paths : bundle.files.map((item) => item.path)).map((item) => normalizeSandboxRelativePath(item)).filter(Boolean));
+    const restoreMetadata = req.body?.restoreMetadata && typeof req.body.restoreMetadata === "object"
+      ? req.body.restoreMetadata
+      : {};
     const conflict = String(req.body?.conflict || "skip").trim().toLowerCase();
     if (!["skip", "overwrite", "fail"].includes(conflict)) throw new Error("conflict must be skip, overwrite, or fail");
     const restored = [];
@@ -11048,8 +11054,51 @@ app.post("/api/files/bundles/restore", async (req, res) => {
       restored.push(rel);
     }
     if (restored.length > 0) await commitSandboxSnapshot(`restore workspace bundle (${restored.length} file(s))`, restored);
-    await appendAuditLog(req, "workspace-bundle-restore", { restored: restored.length, skipped: skipped.length, conflict });
-    return res.json({ ok: true, restored, skipped, conflict });
+    const metadata = bundle.metadata && typeof bundle.metadata === "object" ? bundle.metadata : {};
+    const metadataRestored = { recipes: 0, audit: 0, snapshots: 0 };
+    if (restoreMetadata.recipes === true && Array.isArray(metadata.recipes)) {
+      for (const source of metadata.recipes.slice(0, 100)) {
+        if (!source || typeof source !== "object" || !String(source.prompt || "").trim()) continue;
+        const normalized = normalizeAgentRecipeSchedule(source);
+        const id = `bundle-import-${randomBytes(8).toString("hex")}`;
+        const schedule = {
+          ...source,
+          ...normalized,
+          id,
+          workspaceCode: getWorkspaceContext().code,
+          name: `${String(source.name || "Imported recipe").trim()} (imported)`,
+          enabled: false,
+          nextRunAt: null,
+          lastJobId: null,
+          lastJobStatus: null,
+          lastCompletedAt: null,
+          importedFromBundleAt: new Date().toISOString(),
+          timer: null
+        };
+        agentRecipeScheduleStore.set(id, schedule);
+        metadataRestored.recipes += 1;
+      }
+      if (metadataRestored.recipes > 0) await saveAgentRecipeSchedules();
+    }
+    if (restoreMetadata.audit === true && Array.isArray(metadata.audit) && metadata.audit.length > 0) {
+      const imported = metadata.audit.slice(-200)
+        .filter((entry) => entry && typeof entry === "object")
+        .map((entry) => ({
+          ...entry,
+          workspaceCode: getWorkspaceContext().code,
+          importedFromBundleAt: new Date().toISOString()
+        }));
+      if (imported.length > 0) {
+        const auditPath = getAuditLogPath();
+        await fsp.mkdir(path.dirname(auditPath), { recursive: true });
+        await fsp.appendFile(auditPath, `${imported.map((entry) => JSON.stringify(sanitizeAuditPayload(entry))).join("\n")}\n`, "utf8");
+        metadataRestored.audit = imported.length;
+      }
+    }
+    // Git snapshot entries are references to commits, not portable commits.
+    // They remain previewable but are not falsely reported as restored.
+    await appendAuditLog(req, "workspace-bundle-restore", { restored: restored.length, skipped: skipped.length, conflict, metadataRestored });
+    return res.json({ ok: true, restored, skipped, conflict, metadataRestored, snapshotsAvailable: Array.isArray(metadata.snapshots) ? metadata.snapshots.length : 0 });
   } catch (error) {
     return res.status(400).json({ error: String(error?.message || "Failed to restore workspace bundle") });
   }

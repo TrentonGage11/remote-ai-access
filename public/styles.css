@@ -1578,6 +1578,31 @@ textarea:focus {
   overflow: auto;
 }
 
+.workspace-bundle-metadata-heading {
+  margin-top: 8px;
+  color: var(--ink);
+}
+
+.workspace-bundle-metadata-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.workspace-bundle-metadata-option input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.workspace-bundle-metadata-note {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
 .code-map-controls {
   display: grid;
   grid-template-columns: minmax(12rem, 1fr) auto auto;
