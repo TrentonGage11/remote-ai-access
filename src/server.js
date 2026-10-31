@@ -15,7 +15,7 @@ import { promisify } from "util";
 import { execFile, spawn } from "child_process";
 import { fileURLToPath } from "url";
 import { AsyncLocalStorage } from "async_hooks";
-import { createCipheriv, createDecipheriv, createHash, randomBytes, scrypt, timingSafeEqual } from "crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scrypt, scryptSync, timingSafeEqual } from "crypto";
 import { pipeline } from "stream/promises";
 import { resolveProviderMessageContext } from "./chat-context.js";
 import { buildBoundedAgentConversation, serializeBoundedToolOutput } from "./compatible-agent-context.js";
@@ -5065,6 +5065,59 @@ async function exportImportWorkspace(args = {}) {
     return unzipSandboxArchive(archivePath, String(args.targetPath || ""));
   }
   throw new Error("action must be export or import");
+}
+
+const WORKSPACE_BUNDLE_MAX_FILES = 500;
+const WORKSPACE_BUNDLE_MAX_BYTES = 512 * 1024;
+
+async function collectWorkspaceBundleFiles(paths = []) {
+  const requested = Array.isArray(paths) && paths.length > 0 ? paths : [""];
+  const files = [];
+  async function visit(relativePath) {
+    if (files.length >= WORKSPACE_BUNDLE_MAX_FILES) return;
+    const { absolute, rel } = resolveSandboxPath(relativePath);
+    const stat = await fsp.stat(absolute);
+    if (stat.isFile()) {
+      if (stat.size > WORKSPACE_BUNDLE_MAX_BYTES) throw new Error(`bundle file is too large: ${rel}`);
+      files.push({ path: rel, content: await fsp.readFile(absolute) });
+      return;
+    }
+    if (!stat.isDirectory()) return;
+    const entries = await fsp.readdir(absolute, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === ".git" || entry.name === ".audit-log.jsonl") continue;
+      await visit(path.join(rel, entry.name));
+      if (files.length >= WORKSPACE_BUNDLE_MAX_FILES) return;
+    }
+  }
+  for (const item of requested) await visit(String(item || ""));
+  const totalBytes = files.reduce((total, item) => total + item.content.length, 0);
+  if (totalBytes > WORKSPACE_BUNDLE_MAX_BYTES) throw new Error(`bundle exceeds ${WORKSPACE_BUNDLE_MAX_BYTES} bytes`);
+  return { files, totalBytes };
+}
+
+function encryptWorkspaceBundle(bundle, password) {
+  const passphrase = String(password || "");
+  if (passphrase.length < 8) throw new Error("bundle password must be at least 8 characters");
+  const salt = randomBytes(16);
+  const iv = randomBytes(12);
+  const key = scryptSync(passphrase, salt, 32);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(bundle), "utf8"), cipher.final()]);
+  return `RAA-BUNDLE-1\n${JSON.stringify({ salt: salt.toString("base64"), iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64"), ciphertext: ciphertext.toString("base64") })}`;
+}
+
+function decryptWorkspaceBundle(raw, password) {
+  const text = String(raw || "");
+  if (!text.startsWith("RAA-BUNDLE-1\n")) throw new Error("unsupported workspace bundle format");
+  const envelope = JSON.parse(text.slice("RAA-BUNDLE-1\n".length));
+  const key = scryptSync(String(password || ""), Buffer.from(envelope.salt, "base64"), 32);
+  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(envelope.iv, "base64"));
+  decipher.setAuthTag(Buffer.from(envelope.tag, "base64"));
+  const plaintext = Buffer.concat([decipher.update(Buffer.from(envelope.ciphertext, "base64")), decipher.final()]).toString("utf8");
+  const bundle = JSON.parse(plaintext);
+  if (bundle?.version !== 1 || !Array.isArray(bundle.files)) throw new Error("invalid workspace bundle contents");
+  return bundle;
 }
 
 async function testApiEndpoint(args = {}) {
@@ -10936,6 +10989,60 @@ app.post("/api/files/snapshots", async (req, res) => {
     return res.json({ ok: true, snapshot });
   } catch (error) {
     return res.status(400).json({ error: String(error?.message || "Failed to create snapshot") });
+  }
+});
+
+app.post("/api/files/bundles/export", async (req, res) => {
+  try {
+    const { files, totalBytes } = await collectWorkspaceBundleFiles(req.body?.paths);
+    const bundle = {
+      version: 1,
+      workspaceCode: getWorkspaceContext().code,
+      createdAt: new Date().toISOString(),
+      files: files.map((item) => ({ path: item.path, bytes: item.content.length, content: item.content.toString("base64") }))
+    };
+    const bundleText = encryptWorkspaceBundle(bundle, req.body?.password);
+    await appendAuditLog(req, "workspace-bundle-export", { count: files.length, bytes: totalBytes });
+    return res.json({ ok: true, filename: `workspace-${getWorkspaceContext().code}.raa-bundle`, count: files.length, bytes: totalBytes, bundle: bundleText });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to export workspace bundle") });
+  }
+});
+
+app.post("/api/files/bundles/preview", async (req, res) => {
+  try {
+    const bundle = decryptWorkspaceBundle(req.body?.bundle, req.body?.password);
+    const files = bundle.files.map((item) => ({ path: item.path, bytes: Number(item.bytes || Buffer.from(item.content || "", "base64").length) }));
+    return res.json({ ok: true, version: bundle.version, workspaceCode: bundle.workspaceCode, createdAt: bundle.createdAt, files });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to preview workspace bundle") });
+  }
+});
+
+app.post("/api/files/bundles/restore", async (req, res) => {
+  try {
+    const bundle = decryptWorkspaceBundle(req.body?.bundle, req.body?.password);
+    const selected = new Set((Array.isArray(req.body?.paths) ? req.body.paths : bundle.files.map((item) => item.path)).map((item) => normalizeSandboxRelativePath(item)).filter(Boolean));
+    const conflict = String(req.body?.conflict || "skip").trim().toLowerCase();
+    if (!["skip", "overwrite", "fail"].includes(conflict)) throw new Error("conflict must be skip, overwrite, or fail");
+    const restored = [];
+    const skipped = [];
+    for (const item of bundle.files) {
+      const rel = normalizeSandboxRelativePath(item.path);
+      if (!selected.has(rel)) continue;
+      const { absolute } = resolveSandboxPath(rel);
+      const exists = await fsp.stat(absolute).then(() => true).catch(() => false);
+      if (exists && conflict === "skip") { skipped.push(rel); continue; }
+      if (exists && conflict === "fail") throw new Error(`restore conflict at ${rel}`);
+      await fsp.mkdir(path.dirname(absolute), { recursive: true });
+      await fsp.writeFile(absolute, Buffer.from(item.content, "base64"));
+      restored.push(rel);
+    }
+    if (restored.length > 0) await commitSandboxSnapshot(`restore workspace bundle (${restored.length} file(s))`, restored);
+    await appendAuditLog(req, "workspace-bundle-restore", { restored: restored.length, skipped: skipped.length, conflict });
+    return res.json({ ok: true, restored, skipped, conflict });
+  } catch (error) {
+    return res.status(400).json({ error: String(error?.message || "Failed to restore workspace bundle") });
   }
 });
 

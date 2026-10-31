@@ -1528,6 +1528,28 @@ textarea:focus {
   gap: 0.75rem;
 }
 
+.workspace-bundle-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: end;
+  margin-top: 10px;
+}
+
+.workspace-bundle-controls label {
+  display: grid;
+  gap: 4px;
+  min-width: 220px;
+}
+
+.workspace-bundle-preview {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  max-height: 220px;
+  overflow: auto;
+}
+
 .code-map-controls {
   display: grid;
   grid-template-columns: minmax(12rem, 1fr) auto auto;

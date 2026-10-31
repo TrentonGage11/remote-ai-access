@@ -199,6 +199,17 @@ const codeMapRefreshBtnEl = document.getElementById("codeMapRefreshBtn");
 const codeMapStatusEl = document.getElementById("codeMapStatus");
 const codeMapSummaryEl = document.getElementById("codeMapSummary");
 const codeMapResultsEl = document.getElementById("codeMapResults");
+const bundlePathsInputEl = document.getElementById("bundlePathsInput");
+const bundlePasswordInputEl = document.getElementById("bundlePasswordInput");
+const bundleExportBtnEl = document.getElementById("bundleExportBtn");
+const bundleFileInputEl = document.getElementById("bundleFileInput");
+const bundlePreviewBtnEl = document.getElementById("bundlePreviewBtn");
+const bundleConflictSelectEl = document.getElementById("bundleConflictSelect");
+const bundleRestoreBtnEl = document.getElementById("bundleRestoreBtn");
+const bundleStatusEl = document.getElementById("bundleStatus");
+const bundlePreviewEl = document.getElementById("bundlePreview");
+let selectedBundleText = "";
+let selectedBundlePaths = new Set();
 
 const refreshBtnEl = document.getElementById("refreshBtn");
 const goDirBtnEl = document.getElementById("goDirBtn");
@@ -1739,6 +1750,68 @@ async function loadCodeMap(forceRefresh = false) {
     codeMapRefreshBtnEl && (codeMapRefreshBtnEl.disabled = false);
   }
 }
+
+function renderBundlePreview(data) {
+  bundlePreviewEl.replaceChildren();
+  selectedBundlePaths = new Set();
+  for (const file of Array.isArray(data.files) ? data.files : []) {
+    const label = document.createElement("label");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = true;
+    checkbox.dataset.bundlePath = file.path;
+    selectedBundlePaths.add(file.path);
+    checkbox.addEventListener("change", () => checkbox.checked ? selectedBundlePaths.add(file.path) : selectedBundlePaths.delete(file.path));
+    label.append(checkbox, document.createTextNode(` ${file.path} (${formatByteSize(file.bytes || 0)})`));
+    bundlePreviewEl.append(label);
+  }
+  bundleRestoreBtnEl.disabled = !data.files?.length;
+}
+
+bundleFileInputEl?.addEventListener("change", async () => {
+  const file = bundleFileInputEl.files?.[0];
+  if (!file) return;
+  selectedBundleText = await file.text();
+  bundlePreviewBtnEl.disabled = false;
+  bundleStatusEl.textContent = `Loaded ${file.name}. Enter its password, then preview it.`;
+});
+
+bundleExportBtnEl?.addEventListener("click", async () => {
+  try {
+    const password = String(bundlePasswordInputEl.value || "");
+    const paths = String(bundlePathsInputEl.value || "").split(/\r?\n/).map((item) => normalizeRelativePath(item)).filter(Boolean);
+    const data = await apiJson("/api/files/bundles/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paths, password }) });
+    const blob = new Blob([data.bundle], { type: "application/octet-stream" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = data.filename || "workspace.raa-bundle";
+    link.click();
+    URL.revokeObjectURL(link.href);
+    bundleStatusEl.textContent = `Exported ${data.count} files (${formatByteSize(data.bytes)}). Keep the password safe.`;
+  } catch (error) {
+    bundleStatusEl.textContent = `Bundle export error: ${error.message}`;
+  }
+});
+
+bundlePreviewBtnEl?.addEventListener("click", async () => {
+  try {
+    const data = await apiJson("/api/files/bundles/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bundle: selectedBundleText, password: String(bundlePasswordInputEl.value || "") }) });
+    renderBundlePreview(data);
+    bundleStatusEl.textContent = `Preview ready: ${data.files.length} files from workspace ${data.workspaceCode}.`;
+  } catch (error) {
+    bundleStatusEl.textContent = `Bundle preview error: ${error.message}`;
+  }
+});
+
+bundleRestoreBtnEl?.addEventListener("click", async () => {
+  try {
+    const data = await apiJson("/api/files/bundles/restore", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bundle: selectedBundleText, password: String(bundlePasswordInputEl.value || ""), paths: [...selectedBundlePaths], conflict: bundleConflictSelectEl.value }) });
+    bundleStatusEl.textContent = `Restored ${data.restored.length} files; skipped ${data.skipped.length}.`;
+    await loadDirectory(currentDir);
+  } catch (error) {
+    bundleStatusEl.textContent = `Bundle restore error: ${error.message}`;
+  }
+});
 
 function renderWorkspaceSearchResults(results) {
   workspaceSearchResultsEl.replaceChildren();

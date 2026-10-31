@@ -188,6 +188,37 @@
           </details>
         </section>
 
+        <section class="card disclosure-panel reveal" style="--d: 101ms">
+          <details id="workspaceBundlesDetails" class="context-disclosure" data-filelab-disclosure-key="filelab-workspace-bundles-open-v1">
+            <summary>
+              <span role="heading" aria-level="2">Portable Workspace Bundles</span>
+              <span id="workspaceBundlesSummary" class="tab-meta">Encrypted export/import</span>
+            </summary>
+            <div class="context-disclosure-body workspace-bundle-panel">
+              <label for="bundlePathsInput">Files or folders to export (one per line; blank means whole workspace)</label>
+              <textarea id="bundlePathsInput" rows="3" placeholder="src\npublic\nREADME.md"></textarea>
+              <div class="workspace-bundle-controls">
+                <label for="bundlePasswordInput">Bundle password
+                  <input id="bundlePasswordInput" type="password" minlength="8" autocomplete="new-password" placeholder="At least 8 characters" />
+                </label>
+                <button id="bundleExportBtn" class="btn" type="button">Export encrypted bundle</button>
+                <label for="bundleFileInput" class="btn btn-soft">Choose bundle<input id="bundleFileInput" class="visually-hidden-file-input" type="file" accept=".raa-bundle,.txt" /></label>
+              </div>
+              <div class="workspace-bundle-controls">
+                <button id="bundlePreviewBtn" class="btn btn-soft" type="button" disabled>Preview selected bundle</button>
+                <select id="bundleConflictSelect" aria-label="Bundle conflict policy">
+                  <option value="skip">Skip existing files</option>
+                  <option value="overwrite">Overwrite existing files</option>
+                  <option value="fail">Fail on conflicts</option>
+                </select>
+                <button id="bundleRestoreBtn" class="btn" type="button" disabled>Restore checked files</button>
+              </div>
+              <p id="bundleStatus" class="muted-inline" aria-live="polite">Bundles are AES-encrypted and capped at 512 KiB per export.</p>
+              <div id="bundlePreview" class="workspace-bundle-preview" aria-live="polite"></div>
+            </div>
+          </details>
+        </section>
+
         <section class="card disclosure-panel reveal" style="--d: 102ms">
           <details id="codeMapDetails" class="context-disclosure" data-filelab-disclosure-key="filelab-code-map-open-v1">
             <summary>
