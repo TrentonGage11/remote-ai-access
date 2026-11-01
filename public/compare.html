@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Provider Comparison | Remote AI Access</title>
+    <link rel="stylesheet" href="styles.css?v=20261031c" />
+  </head>
+  <body>
+    <main class="docs-shell">
+      <section class="card reveal">
+        <div class="topbar">
+          <div>
+            <h1>Provider Comparison</h1>
+            <p>Send one prompt to multiple configured providers and compare the evidence side by side.</p>
+          </div>
+          <div class="top-actions">
+            <a class="btn btn-soft" href="index.html">Back to Chat</a>
+            <button id="themeToggle" class="btn btn-soft" type="button">Dark mode</button>
+          </div>
+        </div>
+      </section>
+      <section class="card reveal compare-compose">
+        <label for="comparePrompt">Prompt</label>
+        <textarea id="comparePrompt" rows="6" placeholder="Ask the same question across providers…"></textarea>
+        <div id="compareVariants" class="compare-variants"></div>
+        <div class="top-actions">
+          <button id="addCompareVariantBtn" class="btn btn-soft" type="button">Add provider</button>
+          <button id="runCompareBtn" class="btn" type="button">Run comparison</button>
+          <span id="compareStatus" class="muted-inline" role="status" aria-live="polite">Loading providers…</span>
+        </div>
+      </section>
+      <section class="card reveal">
+        <h2>Results</h2>
+        <div id="compareResults" class="compare-results"></div>
+      </section>
+    </main>
+    <script src="api-auth.js?v=20260822a"></script>
+    <script type="module" src="compare.js?v=20261031a"></script>
+  </body>
+</html>

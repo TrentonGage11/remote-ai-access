@@ -148,6 +148,7 @@ const COMMAND_PALETTE_COMMANDS = [
   { title: "Open Usage", hint: "Insights", keywords: "tokens cost latency", href: "usage.html" },
   { title: "Open Activity", hint: "Insights", keywords: "audit timeline events", href: "activity.html" },
   { title: "Open Provider API Tools", hint: "Tools", keywords: "api web image tools", href: "api-tools.html" },
+  { title: "Open Provider Comparison", hint: "Insights", keywords: "compare providers models latency cost", href: "compare.html" },
   { title: "Open Design Lab", hint: "Tools", keywords: "elephant goldfish design", href: "design.html" },
   { title: "Open Security Admin", hint: "Admin", keywords: "keys policy security", href: "security-admin.html" },
   { title: "Open Chat Archive", hint: "History", keywords: "saved chats history", href: "archive.html" }

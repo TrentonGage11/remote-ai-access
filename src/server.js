@@ -9227,6 +9227,36 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
+app.post("/api/chat/compare", async (req, res) => {
+  try {
+    const messageContext = resolveMessageContext(req.body);
+    if (!messageContext?.messages) {
+      return res.status(400).json({ error: "messages must contain non-empty user or assistant items within size limits" });
+    }
+    const variants = Array.isArray(req.body?.variants) ? req.body.variants.slice(0, 4) : [];
+    if (variants.length < 2) return res.status(400).json({ error: "at least two provider/model variants are required" });
+    const comparisonId = createTraceId();
+    const results = await Promise.all(variants.map(async (variant, index) => {
+      const provider = String(variant?.provider || "").trim().toLowerCase();
+      const model = String(variant?.model || "").trim();
+      const startedAt = Date.now();
+      const childReq = Object.create(req);
+      childReq.body = { ...req.body, provider, model, messages: messageContext.messages, agentMode: false };
+      childReq.traceId = `${comparisonId}-${index + 1}`;
+      try {
+        const result = await generateChatResponse(childReq);
+        return { ok: true, provider: result.provider, model: result.model, reply: result.reply, usage: result.usage || null, latencyMs: Date.now() - startedAt, traceId: result.traceId };
+      } catch (error) {
+        return { ok: false, provider, model, error: String(error?.message || "Provider request failed"), latencyMs: Date.now() - startedAt, traceId: childReq.traceId };
+      }
+    }));
+    await appendAuditLog(req, "provider-comparison", { comparisonId, variants: results.map(({ provider, model, ok }) => ({ provider, model, ok })) });
+    return res.json({ ok: true, comparisonId, results });
+  } catch (error) {
+    return res.status(Number(error?.status || 400)).json({ error: String(error?.message || "Provider comparison failed") });
+  }
+});
+
 app.post("/api/chat/jobs", async (req, res) => {
   const job = enqueueChatJob(req);
   await saveChatJobState();
